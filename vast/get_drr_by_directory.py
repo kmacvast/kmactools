@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 ################################################################################
-# Script Name:    get_drr_by_directory.py
+# Script Name:    vast-du.py
 # Description:    Queries the VAST Data REST API to retrieve the Data Reduction 
 #                 Ratio (DRR) and capacity metrics for specific directory paths.
 #                 Supports recursive child discovery and multiple output formats.

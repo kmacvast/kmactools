@@ -53,7 +53,7 @@ chmod 600 ~/.vastconf
 Check the efficiency of a specific logical path:
 
 ```bash
-python3 get_drr_by_directory.py -d /kmac/nfs
+python3 vast-du.py -d /kmac/nfs
 ```
 
 #### **2\. Deep Efficiency Breakdown**
@@ -63,7 +63,7 @@ Use the **\-b** or **\--breakdown** flag to see exactly how much of your savings
 > **Similarity metrics will be added shortly.** 
 
 ```
-python3 get_drr_by_directory.py -d /kmac/nfs -b
+python3 vast-du.py -d /kmac/nfs -b
 ```
 
 #### **3\. Automatic Child Discovery (Top Talkers)**
@@ -71,7 +71,7 @@ python3 get_drr_by_directory.py -d /kmac/nfs -b
 Use the **\-c** or **\--children** flag to automatically find and report on every immediate subdirectory. This is a good way to identify which datasets are your "best" or "worst" reducers.
 
 ```bash
-python3 get_drr_by_directory.py -d /kmac/nfs --children
+python3 vast-du.py -d /kmac/nfs --children
 ```
 
 #### **4\. Output Options**
@@ -82,7 +82,7 @@ python3 get_drr_by_directory.py -d /kmac/nfs --children
 ---
 #### **Example Usage**
 ```bash
-$ python3  ~/scripts/get_drr_by_directory.py -d /kmac/splunk/logs/high_comp /kmac/splunk/logs/low_comp -b -o json
+$ python3  ~/scripts/vast-du.py -d /kmac/splunk/logs/high_comp /kmac/splunk/logs/low_comp -b -o json
 [
     {
         "path": "/kmac/splunk/logs/high_comp",

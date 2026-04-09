@@ -4,14 +4,9 @@
 # Description:    Queries the VAST Data REST API to retrieve the Data Reduction 
 #                 Ratio (DRR) and capacity metrics for specific directory paths.
 #                 Supports recursive child discovery and multiple output formats.
-#                 Reads defaults from ~/.vastconf if available.
 #                 
 # Author:         KMac kmac@vastdata.com
-# Created:        2026-04-07
-# Version:        2.0.0
-# 
-# Dependencies:   - Python 3.x
-#                 - requests library (pip install requests)
+# Version:        0.4.2
 ################################################################################
 
 import argparse
@@ -45,29 +40,19 @@ def get_subdirectories(vms_ip, user, pwd, path, tenant):
     try:
         response = requests.get(url, auth=(user, pwd), params=params, verify=False, timeout=20)
         response.raise_for_status()
-        # Filter for directories and build full logical paths
         return [os.path.join(path, item['name']) for item in response.json() if item.get('is_dir')]
     except Exception:
         return []
 
-def get_drr(vms_ip, user, pwd, directory, tenant):
-    """Queries the VAST API for capacity estimation of a specific path and tenant."""
+def get_drr(vms_ip, user, pwd, directory, tenant, breakdown=False):
+    """Queries the VAST API for capacity estimation and calculates ratios."""
     url = f"https://{vms_ip}/api/capacity/capacity_estimation/"
     clean_path = directory.rstrip('/')
     
-    params = {
-        'path': clean_path,
-        'tenant_name': tenant
-    }
+    params = {'path': clean_path, 'tenant_name': tenant}
     
     try:
-        response = requests.get(
-            url, 
-            auth=(user, pwd), 
-            params=params, 
-            verify=False,
-            timeout=60
-        )
+        response = requests.get(url, auth=(user, pwd), params=params, verify=False, timeout=60)
         
         if response.status_code == 401:
             return {"path": directory, "error": "Authentication Failed"}
@@ -87,13 +72,23 @@ def get_drr(vms_ip, user, pwd, directory, tenant):
             
             drr = logical_b / physical_b if physical_b > 0 else 1.0
             
-            return {
+            data = {
                 "path": clean_path,
                 "logical_gib": round(logical_b / (1024**3), 2),
                 "physical_gib": round(physical_b / (1024**3), 2),
                 "unique_gib": round(unique_b / (1024**3), 2),
                 "drr": round(drr, 2)
             }
+
+            if breakdown:
+                # Similarity (Dedup) = Logical / Unique
+                # Compression = Unique / Physical
+                dedup = logical_b / unique_b if unique_b > 0 else 1.0
+                comp = unique_b / physical_b if physical_b > 0 else 1.0
+                data["dedup"] = round(dedup, 2)
+                data["compression"] = round(comp, 2)
+            
+            return data
         else:
             return {"path": directory, "error": "Path key not found in API response"}
 
@@ -103,13 +98,12 @@ def get_drr(vms_ip, user, pwd, directory, tenant):
 def main():
     config = load_config()
 
-    parser = argparse.ArgumentParser(
-        description="VAST Data Reduction Report & Discovery Tool"
-    )
+    parser = argparse.ArgumentParser(description="VAST Data Reduction Report & Discovery Tool")
     
     # Required/Input Arguments
     parser.add_argument("-d", "--directories", nargs='+', required=True, help="VAST logical paths")
     parser.add_argument("-c", "--children", action="store_true", help="Discover and report on immediate subdirectories")
+    parser.add_argument("-b", "--breakdown", action="store_true", help="Show Dedup and Compression breakdown")
     
     # Output Control
     parser.add_argument("-o", "--output", choices=['text', 'json', 'csv'], default='text', help="Output format (default: text)")
@@ -123,51 +117,58 @@ def main():
     args = parser.parse_args()
     password = args.password or config.get("password") or getpass.getpass(f"Password for {args.user}: ")
 
-    # 1. Handle Path Discovery
     final_path_list = []
     for p in args.directories:
         final_path_list.append(p)
         if args.children:
             final_path_list.extend(get_subdirectories(args.vms, args.user, password, p, args.tenant))
     
-    # Remove duplicates and sort for a clean report
     final_path_list = sorted(list(set(final_path_list)))
 
-    # 2. Gather Data
     results = []
     for path in final_path_list:
-        results.append(get_drr(args.vms, args.user, password, path, args.tenant))
+        results.append(get_drr(args.vms, args.user, password, path, args.tenant, args.breakdown))
 
-    # 3. Handle Output Formats
+    # Output Logic
     if args.output == 'json':
         print(json.dumps(results, indent=4))
     
     elif args.output == 'csv':
-        writer = csv.DictWriter(sys.stdout, fieldnames=["path", "logical_gib", "physical_gib", "unique_gib", "drr", "error"])
+        fields = ["path", "logical_gib", "physical_gib", "unique_gib", "drr"]
+        if args.breakdown:
+            fields += ["dedup", "compression"]
+        fields.append("error")
+        
+        writer = csv.DictWriter(sys.stdout, fieldnames=fields)
         writer.writeheader()
         for row in results:
-            # Ensure error key exists for rows that succeeded
             if "error" not in row: row["error"] = ""
             writer.writerow(row)
 
     else:
         # Default Text Table
-        print(f"\nVAST Data Reduction Report | VMS: {args.vms} | Tenant: {args.tenant} | User: {args.user}")
+        print(f"\nVAST Data Reduction Report | VMS: {args.vms} | Tenant: {args.tenant}")
+        
         header = f"{'Directory Path':<50} | {'Logical':>10} | {'Phys':>10} | {'Unique':>10} | {'DRR':>8}"
-        print(f"{'-' * len(header)}")
+        if args.breakdown:
+            header += f" | {'Dedup':>8} | {'Comp':>8}"
+        
+        print("-" * len(header))
         print(header)
-        print(f"{'-' * len(header)}")
+        print("-" * len(header))
 
         for r in results:
             if "error" in r:
                 print(f"{r['path']:<50} | Error: {r['error']}")
             else:
                 path_str = r['path']
-                # Truncate very long paths for the table view
                 if len(path_str) > 50: path_str = "..." + path_str[-47:]
                 
-                print(f"{path_str:<50} | {r['logical_gib']:>7.2f} GiB | {r['physical_gib']:>7.2f} GiB | {r['unique_gib']:>7.2f} GiB | {r['drr']:>7.2f}:1")
-        print(f"{'-' * len(header)}\n")
+                line = f"{path_str:<50} | {r['logical_gib']:>7.2f} GiB | {r['physical_gib']:>7.2f} GiB | {r['unique_gib']:>7.2f} GiB | {r['drr']:>7.2f}:1"
+                if args.breakdown:
+                    line += f" | {r['dedup']:>7.2f}:1 | {r['compression']:>7.2f}:1"
+                print(line)
+        print("-" * len(header) + "\n")
 
 if __name__ == "__main__":
     main()

@@ -1,0 +1,15 @@
+---
+description: Rules for Frontend (JS/TS) and Bash scripting
+globs: **/*.{js,jsx,ts,tsx,sh}
+alwaysApply: false
+---
+# Shell & Frontend Standards
+
+## Bash Scripting
+- **Safety:** Always start with `#!/usr/bin/env bash` and `set -euo pipefail`.
+- **NFS Awareness:** Check for the KMAC mount: `mountpoint -q /mnt/kmac || { echo "KMAC mount missing"; exit 1; }`.
+
+## Web Frontend
+- **Patterns:** Use functional components, hooks, and named exports.
+- **Styling:** Tailwind CSS is the standard.
+- **Integration:** Always validate VAST API responses before rendering.

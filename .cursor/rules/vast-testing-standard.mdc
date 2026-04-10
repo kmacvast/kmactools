@@ -1,0 +1,20 @@
+---
+description: Standards for writing and running tests in the VAST project.
+globs: **/*.py, tests/*.py
+alwaysApply: true
+---
+# VAST Testing Standard
+
+## Test Location
+- All test files MUST be stored in the root `/tests/` directory.
+- Test files must be named `test_*.py`.
+
+## Testing Strategy
+- **Framework:** Use `pytest`.
+- **Mocks:** Use `pytest-mock` to mock the `VASTClient` and REST responses. We do not want unit tests hitting the live VMS at `var203` unless explicitly labeled as an integration test.
+- **Coverage:** Every new script in `vast/` must have a corresponding test file in `tests/`.
+
+## Workflow
+1. Create/Update script in `vast/`.
+2. Create/Update test in `tests/`.
+3. Run `pytest tests/` from the repo root.

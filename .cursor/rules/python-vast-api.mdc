@@ -1,0 +1,13 @@
+---
+description: Standards for Python and VAST Data API development
+globs: **/*.py
+alwaysApply: false
+---
+# Python & VAST Standards
+- **Styling:** PEP8 via Ruff. Use Python 3.12+ type hints (Pydantic preferred).
+- **SDKs:** - VMS Management: Use `vastpy`.
+  - Data/Catalog: Use `vastdb` with `PyArrow` batches.
+- **VAST Best Practices:**
+  - Use `with session.transaction() as tx:` for `vastdb`.
+  - Prefer `Table.select().where()` for cluster-side predicate pushdown.
+  - Wrap API calls in try-except for `HttpError` or `ServiceUnavailable`.

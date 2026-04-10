@@ -1,0 +1,31 @@
+---
+description: Mandatory configuration and authentication standards for VAST scripts.
+globs: **/*.py
+alwaysApply: true
+---
+# VAST Configuration Standard
+
+## Credential Source of Truth
+- **NEVER** hardcode IPs, usernames, passwords, or tokens.
+- **ALWAYS** load connection details from the local file: `~/.vastconf`.
+
+## Shared Utilities (The "Lazy" Rule)
+- **Do NOT re-implement** the config loader in new scripts. 
+- **Mandatory Import:** `from vast.common.utils import load_vast_config`
+- **What it handles:** This utility automatically expands `~/.vastconf` and normalizes the `tenant` field (setting it to `None` if it is "default" or blank) to support Global Admin auth.
+
+## Authentication Implementation
+- Use the dict returned by `load_vast_config()` to initialize `VASTClient`.
+- Priority: Use `token` if present; fallback to `user`/`password`.
+
+## Formatting: Proper Header
+- Whenever a "proper header" is requested, use this format exactly:
+
+#!/usr/bin/env python3
+################################################################################
+# Script Name:  [name]
+# Description:  [description]
+#
+# Author:         KMac kmac@vastdata.com
+# Version:        [version]
+################################################################################

@@ -18,7 +18,47 @@ usage() {
     exit 1
 }
 
-# Fix for long-option --url
+if [[ "$OSTYPE" != "darwin"* ]]; then
+    echo "Error: This script is optimized for macOS (Apple Silicon) and cannot run on this OS."
+    exit 1
+fi
+
+check_prereq() {
+    local cmd=$1
+    local pkg=$2
+    if ! command -v "$cmd" &> /dev/null; then
+        echo "Prerequisite '$pkg' is missing."
+        read -p "Would you like to install $pkg via Homebrew now? (y/n) " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            if ! command -v brew &> /dev/null; then
+                echo "Homebrew not found. Please install Homebrew first at https://brew.sh"
+                exit 1
+            fi
+            brew install "$pkg"
+        else
+            echo "Error: $pkg is required for this script to function."
+            exit 1
+        fi
+    fi
+}
+
+check_prereq "brew" "brew"
+check_prereq "yt-dlp" "yt-dlp"
+check_prereq "ffmpeg" "ffmpeg"
+
+if ! brew list whisper-cpp &> /dev/null; then
+    echo "Prerequisite 'whisper-cpp' is missing."
+    read -p "Would you like to install whisper-cpp via Homebrew now? (y/n) " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        brew install whisper-cpp
+    else
+        echo "Error: whisper-cpp is required."
+        exit 1
+    fi
+fi
+
 for arg in "$@"; do
   shift
   case "$arg" in
@@ -41,30 +81,33 @@ if [ -z "$URL" ]; then
     usage
 fi
 
+RAW_TITLE=$(yt-dlp --get-title "$URL")
+SAFE_TITLE=$(echo "$RAW_TITLE" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/_/g' | sed 's/__*/_/g' | sed 's/^_//;s/_$//')
+
+if [ -z "$SAFE_TITLE" ]; then
+    SAFE_TITLE="transcription_$(date +%Y%m%d_%H%M%S)"
+fi
+
 MODEL_NAME="ggml-small.en.bin"
 MODEL_DIR="$HOME/.cache/whisper-models"
 MODEL_PATH="$MODEL_DIR/$MODEL_NAME"
 
 mkdir -p "$MODEL_DIR"
 
-# Integrity check: Ensure model is present and not a corrupt/partial download
 if [ ! -f "$MODEL_PATH" ] || [ $(stat -f%z "$MODEL_PATH") -lt 1000000 ]; then
     echo "--- Downloading Whisper Model (Approx 460MB) ---"
     rm -f "$MODEL_PATH"
     curl -L "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/$MODEL_NAME" -o "$MODEL_PATH"
 fi
 
-echo "--- Downloading YouTube Audio ---"
-# Using a temp name to avoid overlapping runs
-yt-dlp -f "ba" -x --audio-format wav "$URL" -o "temp_audio.wav"
+echo "--- Downloading: $RAW_TITLE ---"
+yt-dlp -f "ba" -x --audio-format wav "$URL" -o "${SAFE_TITLE}_raw.wav"
 
 echo "--- Resampling to 16kHz ---"
-ffmpeg -i "temp_audio.wav" -ar 16000 -ac 1 -c:a pcm_s16le "ready_audio.wav" -y
+ffmpeg -i "${SAFE_TITLE}_raw.wav" -ar 16000 -ac 1 -c:a pcm_s16le "${SAFE_TITLE}_ready.wav" -y
 
-# Explicitly target the correct Homebrew binaries
 BREW_PATH=$(brew --prefix whisper-cpp)
-# Priority 1: whisper-cli (standard for newer brew installs)
-# Priority 2: whisper-cpp (fallback)
+
 if [ -f "$BREW_PATH/bin/whisper-cli" ]; then
     WHISPER_EXE="$BREW_PATH/bin/whisper-cli"
 else
@@ -74,10 +117,8 @@ fi
 export GGML_METAL_PATH_RESOURCES="$BREW_PATH/share/whisper-cpp"
 
 echo "--- Starting Transcription (Writing to .txt) ---"
-# -otxt: Automatically creates ready_audio.wav.txt
-# -nt:   Removes timestamps for a clean transcript
-"$WHISPER_EXE" -m "$MODEL_PATH" -f "ready_audio.wav" --language en -nt -otxt
+"$WHISPER_EXE" -m "$MODEL_PATH" -f "${SAFE_TITLE}_ready.wav" --language en -nt -otxt
 
 echo "--- Process Complete ---"
-echo "Transcription saved to: ready_audio.wav.txt"
-echo "Preserved: temp_audio.wav, ready_audio.wav"
+echo "Transcription saved to: ${SAFE_TITLE}_ready.wav.txt"
+echo "Preserved: ${SAFE_TITLE}_raw.wav, ${SAFE_TITLE}_ready.wav"

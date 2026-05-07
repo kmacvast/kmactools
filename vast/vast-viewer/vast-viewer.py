@@ -2,124 +2,184 @@ import argparse
 import json
 import sys
 import urllib3
+import csv
+import io
 from pathlib import Path
 from vastpy import VASTClient
 
 # Suppress InsecureRequestWarning
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+# Configuration file location in the user's home directory
 CONFIG_FILE = Path.home() / ".vast-viewer.conf"
 
-def get_config():
-    if not CONFIG_FILE.exists():
-        print(f"Error: Configuration file {CONFIG_FILE} not found.")
-        sys.exit(1)
-    try:
-        with open(CONFIG_FILE, 'r') as f:
-            return json.load(f)
-    except json.JSONDecodeError as e:
-        print(f"Error: Failed to parse JSON in {CONFIG_FILE}: {e}")
-        sys.exit(1)
-
-def get_client(config):
-    """Initializes the VAST Client with SSL verification disabled."""
-    try:
-        client = VASTClient(
-            address=config.get('vast_server'),
-            user=config.get('vast_user'),
-            password=config.get('vast_passwd')
-        )
-        client.session.verify = False
-        return client
-    except Exception as e:
-        print(f"Error connecting to VMS: {e}")
-        sys.exit(1)
-
-def main():
-    parser = argparse.ArgumentParser(description="VAST Cluster Configuration Viewer")
+def get_config(args):
+    """Merges config file data with command-line overrides."""
+    config = {}
+    if CONFIG_FILE.exists():
+        try:
+            with open(CONFIG_FILE, 'r') as f:
+                config = json.load(f)
+        except json.JSONDecodeError:
+            pass
     
-    # List/Global Flags
-    parser.add_argument("--list-policies", action="store_true")
-    parser.add_argument("--list-views", action="store_true")
-    parser.add_argument("--list-tenants", action="store_true")
-    parser.add_argument("--list-vippools", action="store_true")
-    parser.add_argument("--list-activities", action="store_true")
-    parser.add_argument("--vast-dns", action="store_true")
-    parser.add_argument("--vast-providers", action="store_true")
-
-    # Detail Flags
-    parser.add_argument("--view-policy", action="store_true")
-    parser.add_argument("--view", action="store_true")
-    parser.add_argument("--view-tenant", action="store_true")
-    parser.add_argument("--vippool", action="store_true")
-    parser.add_argument("--show-activity", action="store_true")
+    # CLI Overrides take precedence over the config file
+    if args.server: config['vast_server'] = args.server
+    if args.user: config['vast_user'] = args.user
+    if args.password: config['vast_passwd'] = args.password
     
-    parser.add_argument("--id", type=int, help="The ID of the resource")
+    # Required keys for the VAST Client
+    required = ['vast_server', 'vast_user', 'vast_passwd']
+    missing = [r for r in required if r not in config]
+    if missing:
+        print(f"Error: Missing configuration for {', '.join(missing)}")
+        print(f"Provide via --server, --user, --password or store them in {CONFIG_FILE}.")
+        sys.exit(1)
+    return config
 
-    args = parser.parse_args()
-    if not any(vars(args).values()):
-        parser.print_help()
+def format_output(data, output_type, headers=None):
+    """Universal formatter for different output types."""
+    if not data:
+        if output_type == 'text':
+            print("No data returned.")
         return
 
-    client = get_client(get_config())
+    # Ensure data is a list for consistent processing
+    if isinstance(data, dict):
+        # Extract items from API envelopes or handle as a single dictionary
+        data_list = data.get('items', [v for v in data.values() if isinstance(v, dict)])
+        if not data_list and data:
+            data_list = [data]
+    else:
+        data_list = data if isinstance(data, list) else [data]
+
+    if output_type == 'json':
+        print(json.dumps(data, indent=4))
+    
+    elif output_type == 'csv':
+        if not data_list: return
+        output = io.StringIO()
+        writer = csv.DictWriter(output, fieldnames=data_list[0].keys())
+        writer.writeheader()
+        writer.writerows(data_list)
+        print(output.getvalue())
+
+    elif output_type in ['text', 'table']:
+        if not data_list: return
+        keys = headers if headers else data_list[0].keys()
+        
+        header_line = " | ".join([f"{str(k).upper():<15}" for k in keys])
+        print(header_line)
+        print("-" * len(header_line))
+        for item in data_list:
+            print(" | ".join([f"{str(item.get(k, 'N/A')):<15}" for k in keys]))
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="VAST Cluster Configuration Viewer. Credentials can be provided via CLI or stored in ~/.vast-viewer.conf"
+    )
+    
+    # Auth Arguments
+    parser.add_argument("--server", help="VAST VMS IP/Hostname")
+    parser.add_argument("--user", help="VAST User")
+    parser.add_argument("--password", help="VAST Password")
+    
+    # Output Control
+    parser.add_argument("--output", choices=['text', 'json', 'csv', 'table'], default='text', help="Output format")
+
+    # List Commands
+    parser.add_argument("--list-policies", action="store_true", help="List all policies")
+    parser.add_argument("--list-views", action="store_true", help="List all views")
+    parser.add_argument("--list-tenants", action="store_true", help="List all tenants")
+    parser.add_argument("--list-vippools", action="store_true", help="List all VIP pools")
+    parser.add_argument("--list-activities", action="store_true", help="List recent activity events")
+    parser.add_argument("--list-vastdns", action="store_true", help="List DNS configurations")
+    parser.add_argument("--list-providers", action="store_true", help="List identity providers")
+
+    # View Commands
+    parser.add_argument("--view-policy", action="store_true", help="Detail for a policy (req --id)")
+    parser.add_argument("--view", action="store_true", help="Detail for a view (req --id)")
+    parser.add_argument("--view-tenant", action="store_true", help="Detail for a tenant (req --id)")
+    parser.add_argument("--view-vippools", action="store_true", help="Detail for a VIP Pool (req --id)")
+    parser.add_argument("--view-activity", action="store_true", help="Detail for an activity event (req --id)")
+    parser.add_argument("--view-vastdns", action="store_true", help="Detail for a DNS configuration (req --id)")
+    parser.add_argument("--view-providers", action="store_true", help="Detail for an identity provider (req --id)")
+    
+    parser.add_argument("--id", type=int, help="Resource ID for detail views")
+
+    args = parser.parse_args()
+
+    # Identify action flags to verify usage
+    actions = [a for a in vars(args) if (a.startswith('list_') or a.startswith('view')) and getattr(args, a)]
+
+    # If no action is provided, print help and exit
+    if not actions:
+        parser.print_help()
+        sys.exit(0)
+
+    config = get_config(args)
+    client = VASTClient(address=config['vast_server'], user=config['vast_user'], password=config['vast_passwd'])
+    client.session.verify = False 
 
     try:
         # --- LIST OPERATIONS ---
         if args.list_policies:
-            print(f"{'ID':<10} | {'Policy Name'}\n" + "-"*40)
-            for p in client.viewpolicies.get(): print(f"{p['id']:<10} | {p['name']}")
-        
+            format_output(client.viewpolicies.get(), args.output, ['id', 'name'])
         if args.list_views:
-            print(f"{'ID':<10} | {'Path'}\n" + "-"*40)
-            for v in client.views.get(): print(f"{v['id']:<10} | {v['path']}")
-            
+            format_output(client.views.get(), args.output, ['id', 'path'])
         if args.list_tenants:
-            print(f"{'ID':<10} | {'Tenant Name'}\n" + "-"*40)
-            for t in client.tenants.get(): print(f"{t['id']:<10} | {t['name']}")
-            
+            format_output(client.tenants.get(), args.output, ['id', 'name'])
         if args.list_vippools:
-            print(f"{'ID':<10} | {'VIP Pool Name'}\n" + "-"*40)
-            for vp in client.vippools.get(): print(f"{vp['id']:<10} | {vp['name']}")
-
+            format_output(client.vippools.get(), args.output, ['id', 'name'])
         if args.list_activities:
-            # Handles dictionary envelopes and metadata integers
-            print(f"{'ID':<10} | {'Severity':<12} | {'Message'}\n" + "-"*60)
             res = client.events.get(page_size=100)
-            data = res.get('items', [v for v in res.values() if isinstance(v, dict)]) if isinstance(res, dict) else res
-            for e in data: 
-                print(f"{e.get('id', 'N/A'):<10} | {e.get('severity', 'N/A'):<12} | {e.get('message', 'N/A')}")
-
-        # --- GLOBAL CONFIGS ---
-        if args.vast_dns: 
-            print(json.dumps(client.dns.get(), indent=4))
-
-        if args.vast_providers: 
-            # Multi-endpoint discovery for identity providers
-            found = False
+            format_output(res, args.output, ['id', 'severity', 'message'])
+        if args.list_vastdns:
+            format_output(client.dns.get(), args.output)
+        if args.list_providers:
+            # Shotgun approach across VMS versions
             for attr in ['active_directories', 'active_directory', 'activedirectories', 'ldap', 'nis', 'providers']:
                 try:
-                    res = getattr(client, attr).get()
-                    if res:
-                        print(f"--- {attr.upper()} ---")
-                        print(json.dumps(res, indent=4))
-                        found = True
+                    if hasattr(client, attr):
+                        res = getattr(client, attr).get()
+                        if res:
+                            if args.output == 'text':
+                                print(f"\n--- {attr.upper()} ---")
+                            format_output(res, args.output)
                 except: continue
-            if not found: print("No Identity Providers found.")
 
-        # --- DETAIL OPERATIONS ---
+        # --- VIEW OPERATIONS ---
         detail_map = [
-            (args.view_policy, client.viewpolicies, "view-policy"),
-            (args.view, client.views, "view"),
-            (args.view_tenant, client.tenants, "view-tenant"),
-            (args.vippool, client.vippools, "vippool"),
-            (args.show_activity, client.events, "show-activity")
+            (args.view_policy, client.viewpolicies),
+            (args.view, client.views),
+            (args.view_tenant, client.tenants),
+            (args.view_vippools, client.vippools),
+            (args.view_activity, client.events),
+            (args.view_vastdns, client.dns)
         ]
-        for flag, resource, name in detail_map:
+        for flag, resource in detail_map:
             if flag:
                 if args.id is None:
-                    print(f"Error: --{name} requires --id")
+                    print(f"Error: Detail views require --id")
                 else:
-                    print(json.dumps(resource[args.id].get(), indent=4))
+                    format_output(resource[args.id].get(), args.output)
+
+        if args.view_providers:
+            if args.id is None:
+                print("Error: --view-providers requires --id")
+            else:
+                found = False
+                for attr in ['active_directories', 'active_directory', 'activedirectories', 'ldap', 'nis', 'providers']:
+                    try:
+                        if hasattr(client, attr):
+                            res = getattr(client, attr)[args.id].get()
+                            if res:
+                                format_output(res, args.output)
+                                found = True
+                                break
+                    except: continue
+                if not found:
+                    print(f"Provider ID {args.id} not found across identity endpoints.")
 
     except Exception as e:
         print(f"API Error: {e}")

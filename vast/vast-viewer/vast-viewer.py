@@ -51,7 +51,6 @@ def get_config(args):
     missing = [r for r in required if r not in config]
     if missing:
         print(f"Error: Missing configuration for {', '.join(missing)}")
-        print(f"Provide via --server, --user, --password or store in {CONFIG_FILE}.")
         sys.exit(1)
     return config
 
@@ -64,17 +63,19 @@ def format_output(data, output_type, headers=None):
             print("No data returned.")
         return
 
-    # Handle API envelopes and detail objects
     if isinstance(data, dict):
         if 'items' in data:
             data_list = data['items']
         elif 'results' in data:
             data_list = data['results']
         elif 'id' in data:
-            data_list = [data] # Treat as detail object
+            # FIXED: Explicit detail object. Treat as a single item.
+            data_list = [data]
         else:
-            # Map-style collection: filter out metadata integers
-            data_list = [v for v in data.values() if isinstance(v, (dict, list))]
+            data_list = []
+            for v in data.values():
+                if isinstance(v, dict): data_list.append(v)
+                elif isinstance(v, list): data_list.extend(v)
             if not data_list and data: data_list = [data]
     else:
         data_list = data if isinstance(data, list) else [data]
@@ -98,14 +99,12 @@ def format_output(data, output_type, headers=None):
             print(" | ".join([f"{str(item.get(k, 'N/A')):<15}" for k in keys]))
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="VAST Cluster Configuration Viewer. Credentials stored in ~/.vast-viewer.conf"
-    )
+    parser = argparse.ArgumentParser(description="VAST Configuration Viewer")
     
     parser.add_argument("--server", help="VAST VMS IP/Hostname")
     parser.add_argument("--user", help="VAST User")
     parser.add_argument("--password", help="VAST Password")
-    parser.add_argument("--output", choices=['text', 'json', 'csv', 'table'], default='json', help="Output format")
+    parser.add_argument("--output", choices=['text', 'json', 'csv', 'table'], default='json')
 
     # Actions
     parser.add_argument("--list-policies", action="store_true")
@@ -127,10 +126,8 @@ def main():
     parser.add_argument("--id", type=int)
 
     args = parser.parse_args()
-    actions = [a for a in vars(args) if (a.startswith('list_') or a.startswith('view')) and getattr(args, a)]
-    if not actions:
-        parser.print_help()
-        sys.exit(0)
+    if not any(vars(args)[a] for a in vars(args) if a.startswith(('list_', 'view'))):
+        parser.print_help(); sys.exit(0)
 
     config = get_config(args)
     client = VASTClient(address=config['vast_server'], user=config['vast_user'], password=config['vast_passwd'])
@@ -148,25 +145,22 @@ def main():
         if args.list_providers:
             all_providers = {} if args.output == 'json' else []
             found_any = False
-            for attr in ['active_directories', 'active_directory', 'activedirectories', 'ldap', 'nis', 'providers']:
+            # UPDATED: Using verified attributes found in interactive session.
+            for attr in ['activedirectory', 'ldaps', 'nis', 'active_directories', 'ldap', 'providers']:
                 try:
                     if hasattr(client, attr):
                         res = getattr(client, attr).get()
-                        if res is not None:
-                            # Normalize into a list for evaluation
-                            items = []
-                            if isinstance(res, dict): items = res.get('items', res.get('results', []))
-                            elif isinstance(res, list): items = res
-                            
+                        if res:
+                            items = res.get('items', res.get('results', res)) if isinstance(res, dict) else res
                             if items:
                                 found_any = True
                                 if args.output == 'text':
                                     print(f"\n--- {attr.upper()} ---")
                                     format_output(items, 'text')
                                 elif args.output == 'json':
-                                    all_providers[attr] = res
+                                    all_providers[attr] = items
                                 else:
-                                    all_providers.extend(items)
+                                    all_providers.extend(items if isinstance(items, list) else [items])
                 except: continue
             
             if args.output != 'text':
@@ -179,21 +173,18 @@ def main():
         ]
         for flag, resource in detail_map:
             if flag:
-                if args.id is None: 
-                    print(f"Error: {flag} requires --id"); sys.exit(1)
+                if args.id is None: print(f"Error: {flag} requires --id"); sys.exit(1)
                 format_output(resource[args.id].get(), args.output)
 
         if args.view_providers:
-            if args.id is None: 
-                print("Error: --view-providers requires --id"); sys.exit(1)
+            if args.id is None: print("Error: --view-providers requires --id"); sys.exit(1)
             found = False
-            for attr in ['active_directories', 'active_directory', 'activedirectories', 'ldap', 'nis', 'providers']:
+            for attr in ['activedirectory', 'ldaps', 'nis', 'active_directories', 'ldap', 'providers']:
                 try:
                     res = getattr(client, attr)[args.id].get()
                     if res: format_output(res, args.output); found = True; break
                 except: continue
-            if not found: 
-                print(f"Provider {args.id} not found."); sys.exit(1)
+            if not found: print(f"Provider {args.id} not found."); sys.exit(1)
 
     except Exception as e:
         print(f"API Error: {e}"); sys.exit(1)

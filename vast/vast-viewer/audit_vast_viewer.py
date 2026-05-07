@@ -6,7 +6,8 @@
 # KMac, 20260507
 #
 # Description: Auditor for the VAST Cluster Configuration Viewer.
-# Dynamically gathers metadata to verify all list and view commands.
+# Dynamically gathers metadata to verify all list and view commands, 
+# execution timing, and explicit format testing.
 #
 ################################################################################
 
@@ -42,25 +43,26 @@ def main():
         print("Gathering metadata for detail tests...")
         
         def get_safe_id(resource_call, **kwargs):
-            """Robust ID selection that handles 'items' and 'results' envelopes."""
+            """Handles both results and items envelopes for metadata IDs."""
             res = resource_call.get(**kwargs)
             if isinstance(res, dict):
-                # Search results, then items, then non-integer values
                 data = res.get('results', res.get('items', [v for v in res.values() if isinstance(v, (dict, list))]))
-                # If we found a nested list (common in 'results'), use it directly
                 if data and isinstance(data, list): pass
                 else: data = []
             else: data = res if isinstance(res, list) else []
             return random.choice(list(data))['id'] if data else None
 
         def find_provider_id(client):
-            for attr in ['active_directories', 'active_directory', 'activedirectories', 'ldap', 'nis', 'providers']:
+            """Finds an ID from verified provider endpoints."""
+            for attr in ['activedirectory', 'ldaps', 'nis', 'active_directories', 'ldap', 'providers']:
                 try:
                     if hasattr(client, attr):
                         res = getattr(client, attr).get()
                         if res:
-                            data = res.get('results', res.get('items', [])) if isinstance(res, dict) else res
-                            if data: return data[0]['id']
+                            data = res.get('results', res.get('items', res)) if isinstance(res, dict) else res
+                            if data:
+                                item = data[0] if isinstance(data, list) else data
+                                return item['id']
                 except: continue
             return None
 
@@ -73,14 +75,25 @@ def main():
     except Exception as e:
         print(f"FAILED TO INITIALIZE AUDIT: {e}"); return
 
-    # Static Lists
+    # EXPLICIT FEEDBACK: Formatting Verification Loop
+    if audit_args.check_formatting:
+        print("\n" + "-"*85)
+        print("VERIFYING OUTPUT FORMATS")
+        print("-"*85)
+        for fmt in ['json', 'csv', 'table', 'text']:
+            print(f"Testing output format: {fmt.upper()}...")
+            res, duration = run_cmd(["--list-tenants", "--output", fmt])
+            status = "✅ PASS" if res.returncode == 0 and res.stdout.strip() else "❌ FAIL"
+            print(f"Format Check: {fmt:<36} | {duration:>8.2f}s | {status}")
+            print("-" * 85)
+        print("\n")
+
     all_tests = [
         ("--list-policies", None), ("--list-views", None), ("--list-tenants", None),
         ("--list-vippools", None), ("--list-activities", None), ("--list-vastdns", None),
         ("--list-providers", None)
     ]
 
-    # Dynamic Views
     id_map = [
         ("--view-policy", "policy"), ("--view", "view"), 
         ("--view-tenant", "tenant"), ("--view-vippools", "vippool"), 

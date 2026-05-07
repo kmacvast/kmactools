@@ -19,7 +19,7 @@ def get_client():
     return c
 
 def run_cmd(args):
-    """Executes the viewer script and returns result with timing."""
+    """Executes viewer script and returns result with timing."""
     start_time = time.perf_counter()
     process = subprocess.run(
         [sys.executable, "vast-viewer.py"] + args,
@@ -38,16 +38,13 @@ def main():
         client = get_client()
         print("Gathering metadata for detail tests...")
         
-        def get_safe_id(resource_call):
-            """Filters out metadata integers from API envelopes before picking an ID"""
-            res = resource_call.get() if not isinstance(resource_call, list) else resource_call
-            
-            # If it's a dict, it might have metadata. Filter for dict values only.
+        def get_safe_id(resource_call, **kwargs):
+            """Filters out metadata integers from envelopes before picking an ID"""
+            res = resource_call.get(**kwargs)
             if isinstance(res, dict):
                 data = res.get('items', [v for v in res.values() if isinstance(v, dict)])
             else:
                 data = res if isinstance(res, list) else []
-                
             return random.choice(data)['id'] if data else None
 
         test_data = {
@@ -55,7 +52,7 @@ def main():
             "view": get_safe_id(client.views),
             "tenant": get_safe_id(client.tenants),
             "vippool": get_safe_id(client.vippools),
-            "event": get_safe_id(client.events)
+            "event": get_safe_id(client.events, page_size=50) # Keep it fast
         }
     except Exception as e:
         print(f"FAILED TO INITIALIZE AUDIT: {e}")
@@ -81,10 +78,8 @@ def main():
         args = [flag] + (["--id", str(target_id)] if target_id else [])
         res, duration = run_cmd(args)
         status = "✅ PASS" if res.returncode == 0 else "❌ FAIL"
-        
         cmd_str = f"vast-viewer.py {' '.join(args)}"
         print(f"{cmd_str[:50]:<50} | {duration:>8.2f}s | {status}")
-        
         if res.returncode != 0:
             print(f"   ↳ Error: {res.stdout.strip() or res.stderr.strip()}")
         print("-" * 85)

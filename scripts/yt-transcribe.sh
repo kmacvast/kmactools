@@ -1,5 +1,4 @@
 #!/bin/bash
-
 ###############################################################################
 # Script Name: yt-transcribe.sh
 # Description: Downloads YouTube audio and generates a local transcription.

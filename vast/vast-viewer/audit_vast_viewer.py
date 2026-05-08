@@ -1,13 +1,29 @@
 #!/usr/bin/env python3
 ################################################################################
 #
-# audit_vast_viewer.py
+# VAST Viewer Auditor (audit_vast_viewer.py)
 #
-# KMac, 20260507
+# Author:      KMac
+# Date:        2026-05-07
 #
-# Description: Auditor for the VAST Cluster Configuration Viewer.
-# Dynamically gathers metadata to verify all list and view commands, 
-# execution timing, and explicit format testing.
+# Description:
+#   Automated validation suite for the VAST Cluster Configuration Viewer.
+#   Performs dynamic metadata discovery to verify the integrity of deep-link 
+#   detail views and ensures cross-format output consistency.
+#
+# Key Features:
+#   - Safe ID Selection: Automatically filters API metadata to find valid 
+#     resource IDs for testing.
+#   - Format Verification: Validates JSON, CSV, Table, and Text rendering.
+#   - Performance Timing: Tracks execution duration for every API call.
+#
+# Usage:
+#   Standard audit:    python3 audit_vast_viewer.py
+#   Full format check: python3 audit_vast_viewer.py --check-formatting
+#
+# Logic:
+#   This script requires vast-viewer.py in the same directory and 
+#   valid credentials in ~/.vast-viewer.conf.
 #
 ################################################################################
 
@@ -43,24 +59,21 @@ def main():
         print("Gathering metadata for detail tests...")
         
         def get_safe_id(resource_call, **kwargs):
-            """Handles both results and items envelopes for metadata IDs."""
             res = resource_call.get(**kwargs)
             if isinstance(res, dict):
                 data = res.get('results', res.get('items', [v for v in res.values() if isinstance(v, (dict, list))]))
-                if data and isinstance(data, list): pass
-                else: data = []
+                if not isinstance(data, list): data = []
             else: data = res if isinstance(res, list) else []
             return random.choice(list(data))['id'] if data else None
 
         def find_provider_id(client):
-            """Finds an ID from verified provider endpoints."""
-            for attr in ['activedirectory', 'ldaps', 'nis', 'active_directories', 'ldap', 'providers']:
+            for attr in ['activedirectory', 'ldaps', 'nis', 'active_directories', 'ldap']:
                 try:
                     if hasattr(client, attr):
                         res = getattr(client, attr).get()
                         if res:
                             data = res.get('results', res.get('items', res)) if isinstance(res, dict) else res
-                            if data:
+                            if data: 
                                 item = data[0] if isinstance(data, list) else data
                                 return item['id']
                 except: continue
@@ -75,7 +88,6 @@ def main():
     except Exception as e:
         print(f"FAILED TO INITIALIZE AUDIT: {e}"); return
 
-    # EXPLICIT FEEDBACK: Formatting Verification Loop
     if audit_args.check_formatting:
         print("\n" + "-"*85)
         print("VERIFYING OUTPUT FORMATS")

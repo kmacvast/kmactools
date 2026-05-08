@@ -1,21 +1,26 @@
 #!/usr/bin/env python3
 ################################################################################
 #
-# vast-viewer.py
+# VAST Cluster Configuration Viewer (vast-viewer.py)
 #
-# KMac, 20260507
+# Author:      KMac
+# Date:        2026-05-07
 #
-# Description: VAST Cluster Configuration Viewer.
-# Retrieves and displays policies, views, tenants, VIP pools, activities, DNS, 
-# and identity providers across various VMS versions.
+# Description:
+#   A multi-version compatible utility for retrieving and displaying VAST VMS 
+#   cluster metadata. Designed for rapid auditing of Policies, Views, Tenants, 
+#   VIP Pools, DNS, and Identity Providers.
 #
-# Note: I’ll add capabilities as I learn recurring tasks. (That’s the point of this TBH)
+# Example Usage:
+#   List resources:  python3 vast-viewer.py --list-tenants
+#   View specific:   python3 vast-viewer.py --view-policy --id 12 --output table
+#   Format options:  json (default), text, table, csv
 #
-# Usage: python3 vast-viewer.py --list-<resource>
-#        python3 vast-viewer.py --view-<resource> --id <ID> [--output <type>]
+# Configuration:
+#   Credentials can be passed via CLI or stored as a JSON object in:
+#   ~/.vast-viewer.conf
 #
-# Credentials: CLI arguments or stored in ~/.vast-viewer.conf.
-# Output: Supports text, table, json, and csv formats. Default is JSON.
+# Note: I’ll add capabilities for recurring tasks.
 #
 ################################################################################
 
@@ -69,9 +74,9 @@ def format_output(data, output_type, headers=None):
         elif 'results' in data:
             data_list = data['results']
         elif 'id' in data:
-            # FIXED: Explicit detail object. Treat as a single item.
             data_list = [data]
         else:
+            # Handle aggregated map results or ID-keyed collections
             data_list = []
             for v in data.values():
                 if isinstance(v, dict): data_list.append(v)
@@ -106,7 +111,7 @@ def main():
     parser.add_argument("--password", help="VAST Password")
     parser.add_argument("--output", choices=['text', 'json', 'csv', 'table'], default='json')
 
-    # Actions
+    # List Actions
     parser.add_argument("--list-policies", action="store_true")
     parser.add_argument("--list-views", action="store_true")
     parser.add_argument("--list-tenants", action="store_true")
@@ -115,6 +120,7 @@ def main():
     parser.add_argument("--list-vastdns", action="store_true")
     parser.add_argument("--list-providers", action="store_true")
 
+    # View Actions
     parser.add_argument("--view-policy", action="store_true")
     parser.add_argument("--view", action="store_true")
     parser.add_argument("--view-tenant", action="store_true")
@@ -123,11 +129,13 @@ def main():
     parser.add_argument("--view-vastdns", action="store_true")
     parser.add_argument("--view-providers", action="store_true")
     
-    parser.add_argument("--id", type=int)
+    parser.add_argument("--id", type=int, help="Resource ID")
 
     args = parser.parse_args()
-    if not any(vars(args)[a] for a in vars(args) if a.startswith(('list_', 'view'))):
-        parser.print_help(); sys.exit(0)
+    actions = [a for a in vars(args) if (a.startswith('list_') or a.startswith('view')) and getattr(args, a)]
+    if not actions:
+        parser.print_help()
+        sys.exit(0)
 
     config = get_config(args)
     client = VASTClient(address=config['vast_server'], user=config['vast_user'], password=config['vast_passwd'])
@@ -145,22 +153,20 @@ def main():
         if args.list_providers:
             all_providers = {} if args.output == 'json' else []
             found_any = False
-            # UPDATED: Using verified attributes found in interactive session.
             for attr in ['activedirectory', 'ldaps', 'nis', 'active_directories', 'ldap', 'providers']:
                 try:
                     if hasattr(client, attr):
                         res = getattr(client, attr).get()
-                        if res:
+                        if res is not None:
                             items = res.get('items', res.get('results', res)) if isinstance(res, dict) else res
                             if items:
                                 found_any = True
+                                items_list = items if isinstance(items, list) else [items]
                                 if args.output == 'text':
                                     print(f"\n--- {attr.upper()} ---")
-                                    format_output(items, 'text')
-                                elif args.output == 'json':
-                                    all_providers[attr] = items
-                                else:
-                                    all_providers.extend(items if isinstance(items, list) else [items])
+                                    format_output(items_list, 'text')
+                                elif args.output == 'json': all_providers[attr] = items
+                                else: all_providers.extend(items_list)
                 except: continue
             
             if args.output != 'text':
@@ -173,18 +179,21 @@ def main():
         ]
         for flag, resource in detail_map:
             if flag:
-                if args.id is None: print(f"Error: {flag} requires --id"); sys.exit(1)
+                if args.id is None: 
+                    print(f"Error: {flag} requires --id"); sys.exit(1)
                 format_output(resource[args.id].get(), args.output)
 
         if args.view_providers:
-            if args.id is None: print("Error: --view-providers requires --id"); sys.exit(1)
+            if args.id is None: 
+                print("Error: --view-providers requires --id"); sys.exit(1)
             found = False
             for attr in ['activedirectory', 'ldaps', 'nis', 'active_directories', 'ldap', 'providers']:
                 try:
                     res = getattr(client, attr)[args.id].get()
                     if res: format_output(res, args.output); found = True; break
                 except: continue
-            if not found: print(f"Provider {args.id} not found."); sys.exit(1)
+            if not found: 
+                print(f"Provider {args.id} not found."); sys.exit(1)
 
     except Exception as e:
         print(f"API Error: {e}"); sys.exit(1)

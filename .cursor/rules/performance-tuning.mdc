@@ -1,9 +1,0 @@
----
-description: Optimizing data-heavy operations for VAST and PyArrow
-globs: **/*.py
-alwaysApply: false
----
-# Performance Constraints
-- **PyArrow:** Never suggest `.to_pandas()` on a large `pyarrow.Table` without warning about memory impact.
-- **VAST Search:** Always suggest using `limit` or `projections` (selecting only specific columns) when querying VAST Catalog.
-- **Batching:** If processing more than 100k rows, suggest using `PyArrow` batch iterators rather than loading the whole table.

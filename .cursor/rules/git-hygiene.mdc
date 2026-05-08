@@ -1,9 +1,0 @@
----
-description: Standards for commit messages and documentation
-globs: 
-alwaysApply: true
----
-# Git & Documentation
-- **Commits:** Use [Conventional Commits](https://www.conventionalcommits.org/) (e.g., `feat:`, `fix:`, `docs:`, `refactor:`).
-- **Docstrings:** Use **Google Style** docstrings for all Python functions.
-- **Change Logs:** If you modify a VAST API wrapper, remind the user to update the `README.md` or the version number if applicable.

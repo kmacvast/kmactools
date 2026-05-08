@@ -2,9 +2,9 @@
 
 This is a simple VAST viewer built on top of the [vastpy](https://github.com/vast-data/vastpy) module. Instead of using `vcli` and fighting through unstructured output, I wanted something that returned clean JSON I could easily pipe into `jq` and other tooling.
 
-The goal is to simplify repetitive read-only VAST inspection tasks with cleaner, more predictable output. This tool does not perform write operations and cannot modify or destroy cluster configuration.
+The goal is to simplify repetitive read-only VAST inspection tasks with cleaner, more predictable output. This tool does not perform create/update/delete operations in order to protect cluster configs.
 
-Creds to Bryan G for introducing me to [vastpy](https://github.com/vast-data/vastpy).
+Kudos to Bryan G for introducing me to [vastpy](https://github.com/vast-data/vastpy).
 
 ## Components
 

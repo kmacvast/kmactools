@@ -4,13 +4,14 @@
 # Description: Analyze vCenter VMs for downsizing, power-off, and delete candidates.
 #
 # Author: KMac kmac@vastdata.com
-# Version: 2.1
+# Version: 0.2
 ################################################################################
 
 import argparse
 import getpass
 import os
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
@@ -24,6 +25,58 @@ MEM_DOWNSIZE_PCT = 40.0
 CPU_IDLE_PCT = 5.0
 MEM_IDLE_PCT = 10.0
 DISK_NET_IDLE_KBPS = 50.0  # combined avg KB/s over lookback
+
+DEFAULT_PROGRESS_INTERVAL_SEC = 60
+
+
+class Progress:
+    """Print phase progress periodically with ETA."""
+
+    def __init__(self, phase: str, total: int, interval_sec: int = DEFAULT_PROGRESS_INTERVAL_SEC):
+        self.phase = phase
+        self.total = max(total, 1)
+        self.interval_sec = interval_sec
+        self.done = 0
+        self.t0 = time.monotonic()
+        self.last_report = 0.0
+        print(f"[{phase}] 0/{total} (0%) starting...", flush=True)
+
+    def tick(self, n: int = 1, detail: str = "") -> None:
+        self.done += n
+        now = time.monotonic()
+        if self.done >= self.total or (now - self.last_report) >= self.interval_sec:
+            self._report(detail)
+            self.last_report = now
+
+    def finish(self, detail: str = "") -> None:
+        self.done = self.total
+        self._report(detail or "done")
+
+    def _report(self, detail: str) -> None:
+        elapsed = time.monotonic() - self.t0
+        pct = min(100.0, 100.0 * self.done / self.total)
+        rate = self.done / elapsed if elapsed > 0 else 0.0
+        eta_sec = (self.total - self.done) / rate if rate > 0 and self.done < self.total else 0.0
+        msg = f"[{self.phase}] {self.done}/{self.total} ({pct:.0f}%) elapsed {elapsed / 60:.1f}m"
+        if eta_sec > 0:
+            msg += f" ETA {eta_sec / 60:.1f}m"
+        if detail:
+            msg += f" | {detail}"
+        print(msg, flush=True)
+
+
+def build_host_name_map(content) -> dict[str, str]:
+    """Map HostSystem moId -> name; fall back to moId when System.View is denied."""
+    view = content.viewManager.CreateContainerView(content.rootFolder, [vim.HostSystem], True)
+    names: dict[str, str] = {}
+    for host in view.view:
+        try:
+            names[host._moId] = host.name
+        except vim.fault.NoPermission:
+            names[host._moId] = host._moId
+    view.Destroy()
+    return names
+
 
 PERF_COUNTERS = (
     ("cpu", "usage", "average"),
@@ -154,6 +207,7 @@ def query_vm_performance(
     vms: list[vim.VirtualMachine],
     lookback_days: int,
     chunk_size: int = 8,
+    progress_interval_sec: int = DEFAULT_PROGRESS_INTERVAL_SEC,
 ) -> dict[str, dict[str, float | None]]:
     """Batch QueryPerf for powered-on VMs. Returns vm._moId -> metric averages."""
     interval = pick_historical_interval(perf_manager, lookback_days)
@@ -178,9 +232,14 @@ def query_vm_performance(
 
     powered_on = [vm for vm in vms if vm.runtime.powerState == vim.VirtualMachinePowerState.poweredOn]
     results: dict[str, dict[str, float | None]] = {}
+    batch_count = (len(powered_on) + chunk_size - 1) // chunk_size
+    progress = Progress("perf metrics", batch_count, progress_interval_sec)
 
-    for i in range(0, len(powered_on), chunk_size):
+    for batch_idx, i in enumerate(range(0, len(powered_on), chunk_size)):
         batch = powered_on[i : i + chunk_size]
+        batch_names = ", ".join(vm.name for vm in batch[:3])
+        if len(batch) > 3:
+            batch_names += f", +{len(batch) - 3} more"
         try:
             perf_data = _query_perf_batch(
                 perf_manager, batch, metric_ids, interval_id, start, end, max_sample
@@ -194,10 +253,12 @@ def query_vm_performance(
                     )
                     results.update(_parse_perf_results(perf_data, counter_map, id_to_name))
                 except Exception as exc:
-                    print(f"Warning: perf skipped {vm.name}: {exc}")
+                    print(f"Warning: perf skipped {vm.name}: {exc}", flush=True)
         except Exception as exc:
-            print(f"Warning: perf batch {i} failed: {exc}")
+            print(f"Warning: perf batch {i} failed: {exc}", flush=True)
+        progress.tick(1, f"{len(results)} VMs sampled | batch: {batch_names}")
 
+    progress.finish(f"{len(results)} powered-on VMs with metrics")
     return results
 
 
@@ -228,11 +289,15 @@ def folder_path(vm: vim.VirtualMachine) -> str:
 
 
 def snapshot_stats(vm: vim.VirtualMachine) -> tuple[int, float]:
-    if not vm.layoutEx or not vm.layoutEx.snapshot:
+    try:
+        layout = vm.layoutEx
+    except vim.fault.NoPermission:
         return 0, 0.0
-    files = {f.key: f.size for f in (vm.layoutEx.file or [])}
+    if not layout or not layout.snapshot:
+        return 0, 0.0
+    files = {f.key: f.size for f in (layout.file or [])}
     total = 0
-    for snap in vm.layoutEx.snapshot:
+    for snap in layout.snapshot:
         keys = snap.dataKey
         if not keys:
             continue
@@ -240,7 +305,7 @@ def snapshot_stats(vm: vim.VirtualMachine) -> tuple[int, float]:
             keys = [keys]
         for file_key in keys:
             total += files.get(file_key, 0)
-    return len(vm.layoutEx.snapshot), round(total / (1024**3), 2)
+    return len(layout.snapshot), round(total / (1024**3), 2)
 
 
 def classify_vm(
@@ -304,19 +369,39 @@ def classify_vm(
     return "OK", f"Active: CPU {cpu:.1f}%, mem {mem:.1f}%, I/O {activity_kb:.0f} KB/s"
 
 
-def collect_vm_rows(content, vms: list[vim.VirtualMachine], perf_by_id: dict, idle_days: int) -> list[dict]:
+def esxi_host_name(summary, host_names: dict[str, str]) -> str:
+    host_ref = summary.runtime.host if summary and summary.runtime else None
+    if not host_ref:
+        return ""
+    return host_names.get(host_ref._moId, host_ref._moId)
+
+
+def collect_vm_rows(
+    content,
+    vms: list[vim.VirtualMachine],
+    perf_by_id: dict,
+    idle_days: int,
+    host_names: dict[str, str],
+    progress_interval_sec: int = DEFAULT_PROGRESS_INTERVAL_SEC,
+) -> list[dict]:
     rows = []
-    off_vms = [vm for vm in vms if vm.runtime.powerState == vim.VirtualMachinePowerState.poweredOff]
+    off_vms = [
+        vm
+        for vm in vms
+        if vm.summary.runtime.powerState == vim.VirtualMachinePowerState.poweredOff
+    ]
     off_times: dict[str, datetime | None] = {}
-    print(f"Querying power-off events for {len(off_vms)} powered-off VMs...")
+    progress = Progress("power-off events", len(off_vms), progress_interval_sec)
     for vm in off_vms:
         off_times[vm._moId] = last_powered_off_time(content, vm)
+        progress.tick(1, vm.name)
 
+    progress = Progress("build report", len(vms), progress_interval_sec)
     for vm in vms:
         summary = vm.summary
-        runtime = vm.runtime
-        config = vm.config
-        power = summary.runtime.powerState
+        cfg = summary.config
+        rt = summary.runtime
+        power = rt.powerState
         snap_count, snap_gb = snapshot_stats(vm)
         committed_gb = round((summary.storage.committed or 0) / (1024**3), 2)
 
@@ -328,7 +413,7 @@ def collect_vm_rows(content, vms: list[vim.VirtualMachine], perf_by_id: dict, id
 
         recommendation, reason = classify_vm(
             power_state=str(power),
-            is_template=bool(config.template),
+            is_template=bool(cfg.template),
             idle_days=idle_days,
             cpu_pct=cpu_pct,
             mem_pct=mem_pct,
@@ -339,20 +424,20 @@ def collect_vm_rows(content, vms: list[vim.VirtualMachine], perf_by_id: dict, id
             storage_used_gb=committed_gb,
         )
 
-        boot = runtime.bootTime.strftime("%Y-%m-%d %H:%M:%S") if runtime.bootTime else ""
+        boot = rt.bootTime.strftime("%Y-%m-%d %H:%M:%S") if rt.bootTime else ""
         off_at = off_times.get(vm._moId)
         rows.append(
             {
-                "Name": summary.config.name,
+                "Name": cfg.name,
                 "Recommendation": recommendation,
                 "Reason": reason,
                 "PowerState": str(power),
-                "vCPUs": summary.config.numCpu,
-                "Memory_GB": round(summary.config.memorySizeMB / 1024, 1),
+                "vCPUs": cfg.numCpu,
+                "Memory_GB": round(cfg.memorySizeMB / 1024, 1),
                 "Avg_CPU_Pct": round(cpu_pct, 1) if cpu_pct is not None else "",
                 "Avg_Mem_Pct": round(mem_pct, 1) if mem_pct is not None else "",
                 "Avg_DiskNet_KBps": round(disk_kb + net_kb, 1) if perf else "",
-                "ESXi_Host": runtime.host.name if runtime.host else "",
+                "ESXi_Host": esxi_host_name(summary, host_names),
                 "Folder": folder_path(vm),
                 "Storage_Used_GB": committed_gb,
                 "Snapshot_Count": snap_count,
@@ -361,6 +446,8 @@ def collect_vm_rows(content, vms: list[vim.VirtualMachine], perf_by_id: dict, id
                 "Last_Powered_Off": off_at.strftime("%Y-%m-%d %H:%M:%S") if off_at else "",
             }
         )
+        progress.tick(1, f"{cfg.name} -> {recommendation}")
+    progress.finish(f"{len(rows)} rows")
     return rows
 
 
@@ -377,6 +464,12 @@ def parse_args():
         "--output",
         default=os.path.expanduser("~/Desktop/vcenter_analysis.csv"),
         help="CSV output path",
+    )
+    parser.add_argument(
+        "--progress-interval",
+        type=int,
+        default=int(os.environ.get("VMW_PROGRESS_INTERVAL", DEFAULT_PROGRESS_INTERVAL_SEC)),
+        help="Seconds between progress updates (default: 60)",
     )
     return parser.parse_args()
 
@@ -395,13 +488,40 @@ def main():
     vms = list(container.view)
     container.Destroy()
 
-    print(f"Found {len(vms)} VMs. Collecting {args.idle_days}-day performance metrics...")
-    counter_map = build_counter_map(content.perfManager)
-    perf_by_id = query_vm_performance(content.perfManager, counter_map, vms, args.idle_days)
+    powered_on = sum(
+        1 for v in vms if v.summary.runtime.powerState == vim.VirtualMachinePowerState.poweredOn
+    )
+    powered_off = len(vms) - powered_on
+    print(
+        f"Found {len(vms)} VMs ({powered_on} on, {powered_off} off). "
+        f"Progress every {args.progress_interval}s.",
+        flush=True,
+    )
 
-    rows = collect_vm_rows(content, vms, perf_by_id, args.idle_days)
+    print("Loading ESXi host names...", flush=True)
+    host_names = build_host_name_map(content)
+
+    print(f"Collecting {args.idle_days}-day performance metrics...", flush=True)
+    counter_map = build_counter_map(content.perfManager)
+    perf_by_id = query_vm_performance(
+        content.perfManager,
+        counter_map,
+        vms,
+        args.idle_days,
+        progress_interval_sec=args.progress_interval,
+    )
+
+    rows = collect_vm_rows(
+        content,
+        vms,
+        perf_by_id,
+        args.idle_days,
+        host_names,
+        progress_interval_sec=args.progress_interval,
+    )
     Disconnect(si)
 
+    print(f"Writing CSV to {args.output}...", flush=True)
     df = pd.DataFrame(rows).sort_values(["Recommendation", "Name"])
     df.to_csv(args.output, index=False)
 

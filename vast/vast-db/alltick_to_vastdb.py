@@ -25,9 +25,10 @@ VAST_SECRET_KEY = config["VAST_SECRET_KEY"]
 VAST_BUCKET = config["VAST_BUCKET"]
 VAST_SCHEMA = config["VAST_SCHEMA"]
 VAST_TABLE_NAME = config["VAST_TABLE_NAME"]
+# Natively pulled from your ~/.vast-ingestor file
+ALLTICK_TOKEN = config["ALLTICK_TOKEN"]
 
 # AllTick Configuration
-ALLTICK_TOKEN = "testtoken" 
 ALLTICK_WS_URL = f"wss://quote.alltick.co/quote-stock-b-ws-api?token={ALLTICK_TOKEN}"
 SYMBOLS_TO_TRACK = ["AAPL.US", "TSLA.US", "NVDA.US", "MSFT.US"]
 

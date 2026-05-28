@@ -20,8 +20,9 @@ st.set_page_config(
 # Custom enterprise styling injector
 st.markdown("""
     <style>
-        .block-container { padding-top: 2rem; padding-bottom: 2rem; }
+        .block-container { padding-top: 1.5rem; padding-bottom: 1.5rem; }
         .stMetric { background-color: #1e222b; padding: 1rem; border-radius: 8px; border: 1px solid #2d3139; }
+        .infra-badge { background-color: #10141d; padding: 0.75rem; border-radius: 6px; border-left: 4px solid #636EFA; font-family: monospace; }
         div[data-testid="stMetricDelta"] svg { fill: #00CC96 !important; }
     </style>
 """, unsafe_allow_html=True)
@@ -37,22 +38,26 @@ if not os.path.exists(CONFIG_PATH):
 with open(CONFIG_PATH, "r") as f:
     config = json.load(f)
 
+VAST_ENDPOINT = config["VAST_ENDPOINT"]
+VAST_BUCKET = config["VAST_BUCKET"]
+VAST_SCHEMA = config["VAST_SCHEMA"]
+VAST_TABLE_NAME = config["VAST_TABLE_NAME"]
+
 # ==========================================
 # 3. HIGH-AVAILABILITY CLUSTER CONNECTION
 # ==========================================
 @st.cache_resource
 def get_vast_session():
     return connect(
-        endpoint=config["VAST_ENDPOINT"], 
+        endpoint=VAST_ENDPOINT, 
         access=config["VAST_ACCESS_KEY"], 
         secret=config["VAST_SECRET_KEY"]
     )
 
-# Establish status state markers
 connection_status = "🔴 Disconnected"
 try:
     vast_session = get_vast_session()
-    connection_status = "🟢 Connected to VAST Engine"
+    connection_status = "🟢 Connected"
 except Exception as conn_error:
     st.error(f"CRITICAL: Could not reach VAST Data VIP node: {conn_error}")
     st.stop()
@@ -60,7 +65,7 @@ except Exception as conn_error:
 # ==========================================
 # 4. INTERACTIVE SIDEBAR CONTROL PLANE
 # ==========================================
-st.sidebar.markdown(f"### 🖥️ Engine Status\n`{connection_status}`")
+st.sidebar.markdown(f"### 🖥️ Cluster Engine\n`{connection_status}`")
 st.sidebar.markdown("---")
 st.sidebar.header("🎛️ Analytics Workspace Tuning")
 
@@ -72,38 +77,55 @@ with st.sidebar.container():
     refresh_interval = st.sidebar.slider("UI Frame Refresh Rate (Seconds)", 1, 10, 2)
 
 # ==========================================
-# 5. TRANSACTIONAL TRANSACTION SNAPSHOT
+# 5. INSTRUMENTED TRANSACTION BLOCK
 # ==========================================
+query_start_time = time.time()
 try:
     with vast_session.transaction() as tx:
-        table = tx.bucket(config["VAST_BUCKET"]).schema(config["VAST_SCHEMA"]).table(config["VAST_TABLE_NAME"])
+        table = tx.bucket(VAST_BUCKET).schema(VAST_SCHEMA).table(VAST_TABLE_NAME)
         reader = table.select()
         df = reader.read_all().to_pandas()
+    # Calculate exact delta in milliseconds
+    vast_latency_ms = (time.time() - query_start_time) * 1000
 except Exception as query_fault:
     st.error(f"Database Query Error: Failed to extract records from VAST fabric: {query_fault}")
     df = pd.DataFrame()
+    vast_latency_ms = 0.0
 
 # ==========================================
 # 6. ENTERPRISE DASHBOARD RENDER LAYER
 # ==========================================
-# Main app header structure - Full Width
 st.title("📊 VAST DataBase Live Telemetry Suite")
-st.markdown(f"Evaluating sub-millisecond market events directly out of table: `{config['VAST_TABLE_NAME']}`")
+st.markdown("Evaluating sub-millisecond market events directly out of multi-protocol tabular flash storage.")
+
+# --- PROOF OF STORAGE INFRASTRUCTURE PLANE ---
+st.markdown("### 🛠️ Cluster Architecture Inventory")
+infra_col1, infra_col2, infra_col3, infra_col4 = st.columns(4)
+
+with infra_col1:
+    st.markdown(f"<div class='infra-badge'><b>🌐 DATA VIP ENDPOINT</b><br>{VAST_ENDPOINT}</div>", unsafe_allow_html=True)
+with infra_col2:
+    st.markdown(f"<div class='infra-badge'><b>🪣 S3 ELEMENT BUCKET</b><br>s3://{VAST_BUCKET}</div>", unsafe_allow_html=True)
+with infra_col3:
+    st.markdown(f"<div class='infra-badge'><b>📂 TABULAR SCHEMA</b><br>/{VAST_SCHEMA}</div>", unsafe_allow_html=True)
+with infra_col4:
+    st.markdown(f"<div class='infra-badge'><b>📋 TARGET DATABASE TABLE</b><br>{VAST_TABLE_NAME}</div>", unsafe_allow_html=True)
+
+# Output a unified logical path string
+st.caption(f"**Logical Object URI:** `vast://{VAST_ENDPOINT.replace('http://', '')}/{VAST_BUCKET}/{VAST_SCHEMA}/{VAST_TABLE_NAME}`")
 
 st.markdown("---")
 
 if not df.empty:
-    # Filter dataset for matching target symbols chronologically
     df_filtered = df[df['symbol'] == ticker_choice].sort_values('tick_time').tail(lookback_ticks)
     
     if df_filtered.empty:
         st.warning(f"⚠️ Telemetry Void: No active data rows found in VAST table for symbol: **{ticker_choice}**.")
     else:
         # Construct Key Performance Indicator Row
-        kpi1, kpi2, kpi3 = st.columns(3)
+        kpi1, kpi2, kpi3, kpi4 = st.columns(4)
         latest_row = df_filtered.iloc[-1]
         
-        # Calculate market ticks delta directionality
         price_delta = round(latest_row['price'] - df_filtered.iloc[-2]['price'], 2) if len(df_filtered) > 1 else 0.0
         
         kpi1.metric(
@@ -116,8 +138,14 @@ if not df.empty:
             value=f"{int(latest_row['volume']):,}"
         )
         kpi3.metric(
-            label="Total Database Records Ingested", 
+            label="Total Database Records", 
             value=f"{len(df):,} Rows"
+        )
+        # Highlight performance metric to display VAST speed
+        kpi4.metric(
+            label="⚡ VAST Fabric Fetch Latency", 
+            value=f"{vast_latency_ms:.2f} ms",
+            delta="Direct NVMe-oF Read"
         )
         
         st.markdown("<br>", unsafe_allow_html=True)
@@ -155,24 +183,19 @@ if not df.empty:
             )])
             fig.update_layout(xaxis_rangeslider_visible=False)
 
-        # Apply standardized business layout configurations
         fig.update_layout(**chart_theme)
         fig.update_xaxes(title_text="Time Partition Slice", showgrid=True, gridcolor='#2d3139', linecolor='#2d3139')
         fig.update_yaxes(title_text="Execution Price ($)", showgrid=True, gridcolor='#2d3139', linecolor='#2d3139', tickformat=".2f")
         fig.update_layout(margin=dict(l=10, r=10, t=20, b=10), height=420)
         
-        # FIX: Changed use_container_width=True to width='stretch' to match 2026 specs
         st.plotly_chart(fig, width='stretch')
 
-        # Structured lower segment layout 
         st.markdown("---")
         st.subheader("📋 Core Audit Trail Ledger (Tail 5 Rows)")
         
-        # Format the dataframe layout seamlessly
         ledger_df = df_filtered.tail(5)[['symbol', 'tick_time', 'price', 'volume', 'turnover', 'seq']].copy()
         ledger_df['tick_time'] = pd.to_datetime(ledger_df['tick_time']).dt.strftime('%Y-%m-%d %H:%M:%S.%f')
         
-        # FIX: Changed use_container_width=True to width='stretch' to eliminate warnings
         st.dataframe(ledger_df, width='stretch', hide_index=True)
 else:
     st.info("💡 Awaiting Pipeline Ingestion Initialization. Start your python streaming script to activate database nodes.")

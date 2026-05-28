@@ -86,11 +86,9 @@ except Exception as query_fault:
 # ==========================================
 # 6. ENTERPRISE DASHBOARD RENDER LAYER
 # ==========================================
-# Main app header structure
-header_col1, header_col2 = st.columns([0, 1])
-with header_col2:
-    st.title("📊 VAST DataBase Live Telemetry Suite")
-    st.markdown(f"Evaluating sub-millisecond market events directly out of table: `{config['VAST_TABLE_NAME']}`")
+# Main app header structure - Full Width
+st.title("📊 VAST DataBase Live Telemetry Suite")
+st.markdown(f"Evaluating sub-millisecond market events directly out of table: `{config['VAST_TABLE_NAME']}`")
 
 st.markdown("---")
 

@@ -102,10 +102,10 @@ except Exception as conn_error:
 # 4. INTERACTIVE SIDEBAR CONTROL PLANE
 # ==========================================
 # Dynamic Logo Verification Block
-LOGO_FILENAME = "vast_logo.svg"
+LOGO_FILENAME = "vast_logo.png"
 if os.path.exists(LOGO_FILENAME):
-    # Renders the uploaded local logo asset directly into the sidebar header frame
-    st.sidebar.image(LOGO_FILENAME, use_column_width=False, width=180)
+    # Fixed extension and removed the deprecated use_column_width parameter
+    st.sidebar.image(LOGO_FILENAME, width=180)
 else:
     # Text fallback branding layout if the logo file hasn't arrived yet
     st.sidebar.markdown(f"## ⚡ VAST DATA")

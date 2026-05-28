@@ -156,7 +156,7 @@ def on_error(ws, error):
     print(f"[WS ERROR] Connection encountered anomaly: {error}")
 
 def on_close(ws, close_status_code, close_msg):
-    print(f"[WS CLOSED] Stream connection broke off. Retrying... Status: {close_status_code}")
+    print(f"[WS CLOSED] Stream connection broke off. Status: {close_status_code}")
 
 def on_open(ws):
     print("WebSocket Handshake established. Subscribing to stock tickers...")
@@ -173,18 +173,39 @@ def on_open(ws):
     ws.send(json.dumps(subscribe_msg))
     print(f"Active Subscriptions pushed for: {SYMBOLS_TO_TRACK}")
 
+
+# ==========================================
+# REINFORCED MAIN ENTRY METRICS
+# ==========================================
 if __name__ == "__main__":
     # Launch background safety flushing thread
     timer_thread = threading.Thread(target=check_timer_loop, daemon=True)
     timer_thread.start()
 
-    # Create the WebSocket App
-    ws = websocket.WebSocketApp(
-        ALLTICK_WS_URL,
-        on_open=on_open,
-        on_message=on_message,
-        on_error=on_error,
-        on_close=on_close
-    )
-
-    ws.run_forever(ping_interval=10)
+    print("Starting persistent connection supervisor loop...")
+    
+    while True:
+        try:
+            # Instantiate a fresh connection profile inside the runtime loop
+            ws = websocket.WebSocketApp(
+                ALLTICK_WS_URL,
+                on_open=on_open,
+                on_message=on_message,
+                on_error=on_error,
+                on_close=on_close
+            )
+            
+            # This call blocks execution until the socket severs or encounters a network fault
+            ws.run_forever(ping_interval=10)
+            
+        except KeyboardInterrupt:
+            print("\nIngestion halted manually by user. Flushing remaining buffers...")
+            flush_buffer_to_vast()
+            break
+        except Exception as e:
+            print(f"[CRITICAL FAILURE] Exception hit inside connection management loop: {e}")
+            
+        # Throttling metric to stop the script from hammering AllTick's endpoints during systemic outages
+        RECONNECT_DELAY = 5
+        print(f"[RETRY] Attempting to re-establish market data feed in {RECONNECT_DELAY} seconds...")
+        time.sleep(RECONNECT_DELAY)

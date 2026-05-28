@@ -1,3 +1,4 @@
+import os
 import json
 import time
 import threading
@@ -8,18 +9,24 @@ import websocket
 from vastdb import connect
 
 # ==========================================
-# CONFIGURATION
+# LOAD EXTERNAL CONFIGURATION
 # ==========================================
-# VAST DataBase Connection Settings
-VAST_ENDPOINT = "http://var202.selab.vastdata.com:80"
-VAST_ACCESS_KEY = "TSSBZ5ZYQB1FXGVP12FW"
-VAST_SECRET_KEY = "UV8+lWJ1ZBJqdMzJe3q2H6Z1SKwXGeSVN4HSpyuc"
-VAST_BUCKET = "tickdata"
-VAST_SCHEMA = "realtime"
-VAST_TABLE_NAME = "alltick_ticks"
+CONFIG_PATH = os.path.expanduser("~/.vast-ingestor")
+
+if not os.path.exists(CONFIG_PATH):
+    raise FileNotFoundError(f"Configuration file not found at {CONFIG_PATH}. Please create it first.")
+
+with open(CONFIG_PATH, "r") as f:
+    config = json.load(f)
+
+VAST_ENDPOINT = config["VAST_ENDPOINT"]
+VAST_ACCESS_KEY = config["VAST_ACCESS_KEY"]
+VAST_SECRET_KEY = config["VAST_SECRET_KEY"]
+VAST_BUCKET = config["VAST_BUCKET"]
+VAST_SCHEMA = config["VAST_SCHEMA"]
+VAST_TABLE_NAME = config["VAST_TABLE_NAME"]
 
 # AllTick Configuration
-# Note: Substitute 'testtoken' with your free token from alltick.co if required
 ALLTICK_TOKEN = "testtoken" 
 ALLTICK_WS_URL = f"wss://quote.alltick.co/quote-stock-b-ws-api?token={ALLTICK_TOKEN}"
 SYMBOLS_TO_TRACK = ["AAPL.US", "TSLA.US", "NVDA.US", "MSFT.US"]
@@ -29,12 +36,11 @@ BATCH_SIZE_THRESHOLD = 1000  # Flush after 1,000 rows
 BATCH_TIME_THRESHOLD = 2.0    # Or flush every 2 seconds max
 
 # ==========================================
-# INITIALIZE VAST DATABASE SCHEMA
+# INITIALIZE VAST DATABASE SCHEMA & TABLE
 # ==========================================
 print("Connecting to VAST DataBase...")
-vast_session = connect(endpoint=VAST_ENDPOINT, access_key=VAST_ACCESS_KEY, secret_key=VAST_SECRET_KEY)
-bucket = vast_session.bucket(VAST_BUCKET)
-schema = bucket.schema(VAST_SCHEMA)
+# FIX: 'access_key' changed to 'access' and 'secret_key' changed to 'secret'
+vast_session = connect(endpoint=VAST_ENDPOINT, access=VAST_ACCESS_KEY, secret=VAST_SECRET_KEY)
 
 # Define the optimal PyArrow Schema matching AllTick's feed layout
 arrow_schema = pa.schema([
@@ -47,13 +53,24 @@ arrow_schema = pa.schema([
     ('seq', pa.string())
 ])
 
-# Safeguard table creation
-try:
-    vast_table = schema.table(VAST_TABLE_NAME)
-    print(f"Connected to existing VAST table: {VAST_TABLE_NAME}")
-except Exception:
-    print(f"Table {VAST_TABLE_NAME} not found. Creating it now...")
-    vast_table = schema.create_table(name=VAST_TABLE_NAME, schema=arrow_schema)
+# Metadata setup block inside an explicit transaction context
+with vast_session.transaction() as tx:
+    bucket = tx.bucket(VAST_BUCKET)
+    
+    # Try to resolve or create the schema
+    try:
+        schema = bucket.schema(VAST_SCHEMA)
+    except Exception:
+        print(f"Schema '{VAST_SCHEMA}' not found. Creating it...")
+        schema = bucket.create_schema(VAST_SCHEMA)
+        
+    # Enforce or create the streaming table
+    try:
+        vast_table = schema.table(VAST_TABLE_NAME)
+        print(f"Verified connection to VAST table: {VAST_TABLE_NAME}")
+    except Exception:
+        print(f"Table '{VAST_TABLE_NAME}' not found. Creating it now...")
+        vast_table = schema.create_table(VAST_TABLE_NAME, arrow_schema)
 
 # Thread-safe data buffer
 tick_buffer = collections.deque()
@@ -64,7 +81,7 @@ last_flush_time = time.time()
 # PIPELINE STREAM PROCESSING FUNCTIONS
 # ==========================================
 def flush_buffer_to_vast():
-    """Converts the active in-memory buffer into an Arrow Table and appends it to VAST."""
+    """Converts the active in-memory buffer into an Arrow Table and appends it via micro-transactions."""
     global last_flush_time
     with buffer_lock:
         if not tick_buffer:
@@ -84,10 +101,14 @@ def flush_buffer_to_vast():
         df['turnover'] = df['turnover'].astype(float)
         df['trade_direction'] = df['trade_direction'].astype(int)
 
-        # Build Arrow Table and commit to VAST
+        # Build Arrow Table 
         arrow_table = pa.Table.from_pandas(df, schema=arrow_schema)
-        vast_table.append(arrow_table)
-        print(f"[VAST] Flushed batch of {len(records)} ticks to storage successfully.")
+        
+        # Open a distinct, short-lived transaction block to append this batch
+        with vast_session.transaction() as tx:
+            tx.bucket(VAST_BUCKET).schema(VAST_SCHEMA).table(VAST_TABLE_NAME).append(arrow_table)
+            
+        print(f"[VAST] Transaction committed! {len(records)} ticks successfully stored.")
     except Exception as e:
         print(f"[ERROR] Failed to commit batch to VAST DataBase: {e}")
 
@@ -105,7 +126,6 @@ def check_timer_loop():
 def on_message(ws, message):
     data = json.loads(message)
     
-    # AllTick protocol pushes tick events with structural payload contents
     # Filter for standard market data pushes
     if "price" in data or ("data" in data and isinstance(data.get("data"), dict)):
         tick_payload = data if "price" in data else data.get("data")
@@ -165,7 +185,4 @@ if __name__ == "__main__":
         on_close=on_close
     )
 
-    # Maintain the execution loop. 
-    # AllTick drops connections if no activity occurs for 30s. 
-    # ping_interval=10 sends a native WebSocket ping frame every 10 seconds.
     ws.run_forever(ping_interval=10)

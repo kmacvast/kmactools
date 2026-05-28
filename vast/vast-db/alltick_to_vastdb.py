@@ -40,7 +40,7 @@ BATCH_TIME_THRESHOLD = 2.0    # Or flush every 2 seconds max
 # INITIALIZE VAST DATABASE SCHEMA & TABLE
 # ==========================================
 print("Connecting to VAST DataBase...")
-# FIX: 'access_key' changed to 'access' and 'secret_key' changed to 'secret'
+# 'access_key' changed to 'access' and 'secret_key' changed to 'secret' to match SDK spec
 vast_session = connect(endpoint=VAST_ENDPOINT, access=VAST_ACCESS_KEY, secret=VAST_SECRET_KEY)
 
 # Define the optimal PyArrow Schema matching AllTick's feed layout
@@ -82,7 +82,7 @@ last_flush_time = time.time()
 # PIPELINE STREAM PROCESSING FUNCTIONS
 # ==========================================
 def flush_buffer_to_vast():
-    """Converts the active in-memory buffer into an Arrow Table and appends it via micro-transactions."""
+    """Converts the active in-memory buffer into an Arrow Table and inserts it via micro-transactions."""
     global last_flush_time
     with buffer_lock:
         if not tick_buffer:
@@ -105,9 +105,10 @@ def flush_buffer_to_vast():
         # Build Arrow Table 
         arrow_table = pa.Table.from_pandas(df, schema=arrow_schema)
         
-        # Open a distinct, short-lived transaction block to append this batch
+        # Open a distinct, short-lived transaction block to commit this batch
         with vast_session.transaction() as tx:
-            tx.bucket(VAST_BUCKET).schema(VAST_SCHEMA).table(VAST_TABLE_NAME).append(arrow_table)
+            # FIX: Changed .append() to .insert() to call the appropriate VastDB Table endpoint
+            tx.bucket(VAST_BUCKET).schema(VAST_SCHEMA).table(VAST_TABLE_NAME).insert(arrow_table)
             
         print(f"[VAST] Transaction committed! {len(records)} ticks successfully stored.")
     except Exception as e:

@@ -20,9 +20,9 @@
 #
 # Examples:
 #   ./vast-nfstop.py
-#   ./vast-nfstop.py 10.10.10.10
-#   ./vast-nfstop.py 10.10.10.10 443
-#   ./vast-nfstop.py --vms 10.10.10.10 --user vastadmin --password secret
+#   ./vast-nfstop.py YOUR_VMS_IP_HERE
+#   ./vast-nfstop.py YOUR_VMS_IP_HERE 443
+#   ./vast-nfstop.py --vms YOUR_VMS_IP_HERE --user vastadmin --password secret
 #   ./vast-nfstop.py --sample-average 1h
 #   ./vast-nfstop.py --csv nfs_stats.csv
 #   ./vast-nfstop.py --discover-metrics
@@ -62,7 +62,7 @@ from datetime import datetime
 
 VERSION = "1.1.0"
 
-DEFAULT_VMS = "10.10.10.10"
+DEFAULT_VMS = "YOUR_VMS_IP_HERE"
 DEFAULT_PORT = 443
 DEFAULT_USER = "vastadmin"
 DEFAULT_PASSWORD = "V@5tP@55w0rd!"

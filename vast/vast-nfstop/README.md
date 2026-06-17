@@ -30,7 +30,7 @@ https://github.com/kmacvast/kmactools/blob/main/vast/vast-nfstop/images/vast-nfs
 ## Quick Start
 
 ```bash
-./vast-nfstop.py 10.10.10.10
+./vast-nfstop.py $YOUR_VMS_IP_HERE
 ./vast-nfstop.py --discover-metrics
 ```
 
@@ -43,7 +43,7 @@ vast-nfstop.py [options]
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `VMS_IP` | `10.10.10.10` | VMS hostname or IP (positional) |
+| `VMS_IP` | `YOUR_VMS_IP_HERE` | VMS hostname or IP (positional) |
 | `PORT` | `443` | VMS HTTPS port (positional) |
 | `--vms HOST` | — | VMS hostname or IP |
 | `--port N` | `443` | VMS HTTPS port |

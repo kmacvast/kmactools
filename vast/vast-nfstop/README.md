@@ -12,6 +12,14 @@ This script is based on the original work of **Jeff Mohler (J-Mo)**.
 
 J-Mo built the initial version of `vast-nfstop.py`, a real-time command-line monitoring tool that queries VAST VMS NFS performance counters and displays live NFS RPC operation rates and latency statistics for a VAST cluster. That was the hard part, everything else is just paint.
 
+## Display Layout
+
+Each refresh cycle renders:
+
+![vast-nfstop Screenshot](images/vast-nfstop.png)
+
+https://github.com/kmacvast/kmactools/blob/main/vast/vast-nfstop/images/vast-nfstop.png
+
 ## Requirements
 
 - Python 3.8+
@@ -62,12 +70,6 @@ vast-nfstop.py [options]
 | `t` | Enter tenant drill-down |
 | `x` | Exit drill-down, return to cluster view |
 | `q` | Quit |
-
-## Display Layout
-
-Each refresh cycle renders:
-
-![vast-nfstop Screenshot](images/vast-nfstop.png)
 
 ### Color Coding
 

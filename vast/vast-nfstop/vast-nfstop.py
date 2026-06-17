@@ -14,19 +14,17 @@
 # Date:        2026-06-17
 # Author:      JMo
 # Revised:     KMac
-#
+# 
 # Usage:
-#   ./vast-nfstop.py [VMS_IP] [PORT]
+#   ./vast-nfstop.py --vms <VMS_IP>
 #
 # Examples:
-#   ./vast-nfstop.py
-#   ./vast-nfstop.py YOUR_VMS_IP_HERE
-#   ./vast-nfstop.py YOUR_VMS_IP_HERE 443
-#   ./vast-nfstop.py --vms YOUR_VMS_IP_HERE --user vastadmin --password secret
-#   ./vast-nfstop.py --sample-average 1h
-#   ./vast-nfstop.py --csv nfs_stats.csv
-#   ./vast-nfstop.py --discover-metrics
-#   ./vast-nfstop.py --no-color
+#   ./vast-nfstop.py --vms <VMS_IP>
+#   ./vast-nfstop.py --vms <VMS_IP> --user vastadmin
+#   ./vast-nfstop.py --vms <VMS_IP> --sample-average 1h
+#   ./vast-nfstop.py --vms <VMS_IP> --csv nfs_stats.csv
+#   ./vast-nfstop.py --vms <VMS_IP> --discover-metrics
+#   ./vast-nfstop.py --vms <VMS_IP> --no-color
 #
 # Controls:
 #   Space  - Refresh immediately
@@ -46,6 +44,7 @@ import argparse
 import base64
 import csv
 import json
+import getpass
 import os
 import re
 import select
@@ -62,10 +61,8 @@ from datetime import datetime
 
 VERSION = "1.1.0"
 
-DEFAULT_VMS = "YOUR_VMS_IP_HERE"
 DEFAULT_PORT = 443
-DEFAULT_USER = "vastadmin"
-DEFAULT_PASSWORD = "V@5tP@55w0rd!"
+DEFAULT_USER = "admin"
 DEFAULT_REFRESH_SECONDS = 5
 DEFAULT_API_TIME_FRAME = "10m"
 
@@ -137,42 +134,40 @@ def new_argument_parser(description):
 def parse_args():
     parser = new_argument_parser("Live VAST NFS RPC procedure table")
 
-    parser.add_argument("positional_vms",  nargs="?", default=None)
-    parser.add_argument("positional_port", nargs="?", type=int, default=None)
-
-    parser.add_argument("--vms",      default=None,  help=f"VMS hostname or IP. Default: {DEFAULT_VMS}")
-    parser.add_argument("--port",     type=int, default=None, help=f"VMS HTTPS port. Default: {DEFAULT_PORT}")
-    parser.add_argument("--user",     default=DEFAULT_USER,     help=f"VMS username. Default: {DEFAULT_USER}")
-    parser.add_argument("--password", default=DEFAULT_PASSWORD, help="VMS password. Default: 123456")
-    parser.add_argument("--sample-average", default=None,
-                        help="Optional rolling sample-average window, such as 10m, 1h, or 4h.")
-    parser.add_argument("--refresh",  type=int, default=DEFAULT_REFRESH_SECONDS,
-                        help=f"Refresh interval in seconds. Default: {DEFAULT_REFRESH_SECONDS}")
-    parser.add_argument("--csv",      default=None, metavar="FILENAME",
-                        help="Write captured samples to the specified CSV file.")
-    parser.add_argument("--no-color", action="store_true",
-                        help="Disable ANSI color output.")
-    parser.add_argument("--discover-metrics", action="store_true",
-                        help="Enumerate NFS metrics and objects available from VMS, then exit.")
-    parser.add_argument("--version",  action="store_true",
-                        help="Print script version and exit.")
+    parser.add_argument("--vms", required=True, help="VMS hostname or IP")
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"VMS HTTPS port. Default: {DEFAULT_PORT}")
+    parser.add_argument("--user", default=DEFAULT_USER, help=f"VMS username. Default: {DEFAULT_USER}")
+    parser.add_argument("--password",default=None,help="VMS password. If omitted, you will be prompted securely.")
+    parser.add_argument("--sample-average", default=None, help="Optional rolling sample-average window, such as 10m, 1h, or 4h.")
+    parser.add_argument("--refresh", type=int, default=DEFAULT_REFRESH_SECONDS, help=f"Refresh interval in seconds. Default: {DEFAULT_REFRESH_SECONDS}")
+    parser.add_argument("--csv", default=None, metavar="FILENAME", help="Write captured samples to the specified CSV file.")
+    parser.add_argument("--no-color", action="store_true", help="Disable ANSI color output.")
+    parser.add_argument("--discover-metrics", action="store_true", help="Enumerate NFS metrics and objects available from VMS, then exit.")
+    parser.add_argument("--version", action="version", version=VERSION, help="Print script version and exit.")
 
     return parser.parse_args()
 
 
 ARGS = parse_args()
+if not ARGS.password:
+    ARGS.password = os.environ.get("VAST_PASSWORD")
 
-if ARGS.version:
-    print(VERSION)
-    sys.exit(0)
+if not ARGS.password:
+    try:
+        ARGS.password = getpass.getpass(
+            f"Password for {ARGS.user}@{ARGS.vms}: "
+        )
+    except KeyboardInterrupt:
+        print()
+        sys.exit(1)
 
-VMS             = ARGS.vms or ARGS.positional_vms or DEFAULT_VMS
-PORT            = ARGS.port or ARGS.positional_port or DEFAULT_PORT
-USER            = ARGS.user
-PASSWORD        = ARGS.password
-SAMPLE_AVERAGE  = ARGS.sample_average
+VMS = ARGS.vms
+PORT = ARGS.port
+USER = ARGS.user
+PASSWORD = ARGS.password
+SAMPLE_AVERAGE = ARGS.sample_average
 REFRESH_SECONDS = ARGS.refresh
-CSV_FILE        = ARGS.csv
+CSV_FILE = ARGS.csv
 
 API_TIME_FRAME     = SAMPLE_AVERAGE or DEFAULT_API_TIME_FRAME
 SAMPLE_AVERAGE_MODE = SAMPLE_AVERAGE is not None

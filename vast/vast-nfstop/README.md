@@ -6,6 +6,12 @@ Displays live NFS RPC operation statistics with health summaries, workload
 classification, latency metrics, throughput, I/O sizing, and delta tracking —
 in a curses-like terminal display that refreshes on an interval.
 
+## Credits
+
+This script is based on the original work of **Jeff Mohler (J-Mo)**.
+
+J-Mo built the initial version of `vast-nfstop.py`, a real-time command-line monitoring tool that queries VAST VMS NFS performance counters and displays live NFS RPC operation rates and latency statistics for a VAST cluster. That was the hard part, everything else is just paint.
+
 ## Requirements
 
 - Python 3.8+
@@ -16,9 +22,8 @@ in a curses-like terminal display that refreshes on an interval.
 ## Quick Start
 
 ```bash
-./vast-nfstop.py 10.143.14.210          # connect to VMS at this IP
-./vast-nfstop.py                         # uses default IP 10.143.14.210
-./vast-nfstop.py --discover-metrics      # enumerate available metrics and exit
+./vast-nfstop.py 10.10.10.10
+./vast-nfstop.py --discover-metrics
 ```
 
 ## Usage
@@ -30,12 +35,12 @@ vast-nfstop.py [options]
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `VMS_IP` | `10.143.14.210` | VMS hostname or IP (positional) |
+| `VMS_IP` | `10.10.10.10` | VMS hostname or IP (positional) |
 | `PORT` | `443` | VMS HTTPS port (positional) |
 | `--vms HOST` | — | VMS hostname or IP |
 | `--port N` | `443` | VMS HTTPS port |
-| `--user USER` | `admin` | VMS username |
-| `--password PASS` | `123456` | VMS password |
+| `--user USER` | `vastadmin` | VMS username |
+| `--password PASS` | `vastPassword!` | VMS password |
 | `--sample-average WIN` | — | Rolling average window (e.g. `10m`, `1h`, `4h`) |
 | `--refresh N` | `5` | Refresh interval in seconds |
 | `--csv FILENAME` | — | Append captured samples to a CSV file |
@@ -62,44 +67,7 @@ vast-nfstop.py [options]
 
 Each refresh cycle renders:
 
-```
-VAST NFS RPC Monitor  vX.Y.Z  VMS=...  cluster=...  refresh=5s
-mode=latest complete sample  frame=10m  sample=...
-sort=rpc name A-Z  [space]=refresh  r=rpc  o=ops  l=lat  w=work ...
-========================================================================
-== NFS HEALTH ==========================================================
-  Status   : HEALTHY               Total Ops  :    1234.56 ops/s
-  Workload : read-heavy workload   Throughput :      12.345 GB/s
-  Mix      : Meta  15%  Read  72%  Write  13%  Latency    :    412.34 us
-  Delta    : Ops +234.56/s  BW +1.234 GB/s  Lat -18.3 us [READ]
-------------------------------------------------------------------------
-== PERFORMANCE INSIGHTS ================================================
-  Top Contributor  : ACCESS (41.3% of ops)
-  Highest Latency  : WRITE  (1091 us)
-  Data Consumer    : READ   (12.345 GB/s  avg I/O  64.0 KiB)
-  Top Δ Ops        : GETATTR +89.32/s  Lat -12.1 us
-  Observation      : read-heavy large-block workload
-------------------------------------------------------------------------
-== DATA I/O ============================================================
-Procedure      operations/sec   % work  Avg Lat/us  ...  Avg GB/s  AvgIO-Size
-------------------------------------------------------------------------
-READ             1,234.56    72.1%      412.34  ...     12.345    64.0 KiB
-WRITE              234.56    13.4%      891.23  ...      2.345     8.0 KiB
-------------------------------------------------------------------------
-DATA TOTAL       1,469.12    85.5%     (weighted)            14.690
-  Δ prev: Ops +234.56/s  BW +1.234 GB/s
-
-== METADATA ============================================================
-Procedure      operations/sec   % work  Avg Lat/us  Min Lat/us  ...
-------------------------------------------------------------------------
-ACCESS               89.32     5.1%      123.45  ...
-GETATTR              67.12     3.8%       89.23  ...
-...
-------------------------------------------------------------------------
-META TOTAL          264.88    14.5%     (weighted)
-========================================================================
-TOTAL/COMBINED   1,734.00   100.0%      412.34             14.690
-```
+![vast-nfstop Screenshot](images/vast-nfstop.png)
 
 ### Color Coding
 

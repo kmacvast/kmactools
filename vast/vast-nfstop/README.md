@@ -18,8 +18,6 @@ Each refresh cycle renders:
 
 ![vast-nfstop Screenshot](images/vast-nfstop.png)
 
-https://github.com/kmacvast/kmactools/blob/main/vast/vast-nfstop/images/vast-nfstop.png
-
 ## Requirements
 
 - Python 3.8+

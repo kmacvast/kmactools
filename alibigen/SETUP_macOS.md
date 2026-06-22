@@ -9,6 +9,10 @@ Complete this guide before running any AlibiGen scripts. When finished, return t
 
 ## Step 1 — Install and configure the Slack CLI
 
+AlibiGen uses the **[Slack CLI](https://docs.slack.dev/tools/slack-cli/)** — an open-source command-line tool from Slack for creating, managing, and interacting with Slack apps and workspace APIs from your terminal.
+
+We did not build the Slack CLI. Credit and thanks to the Slack developer platform team for maintaining it. Install and authenticate it as described below; AlibiGen then uses it for setup tasks like generating a service token and verifying API access.
+
 The Slack CLI is used to authenticate, generate a service token for AlibiGen, resolve channel IDs, and verify API access.
 
 ### 1. Installation command
@@ -70,6 +74,25 @@ slack api conversations.list
 
 If these commands succeed, the Slack CLI is installed and authenticated.
 
+Try a few more commands to get comfortable with the tool:
+
+```bash
+# Browse available commands and flags
+slack help
+
+# List workspaces you are logged into
+slack auth list
+
+# Call Slack Web API methods directly from the terminal
+slack api conversations.list
+slack api users.list
+
+# Inspect a specific channel (replace CHANNEL_ID with a real ID)
+slack api conversations.info --query channel=CHANNEL_ID
+```
+
+See the [Slack CLI documentation](https://docs.slack.dev/tools/slack-cli/) for guides, command reference, and troubleshooting.
+
 ---
 
 ## Step 2 — Generate a Slack service token (for AlibiGen)
@@ -110,15 +133,10 @@ $ slack auth token
 
 1. Run `slack auth token` in your terminal.
 2. Copy the `/slackauthticket ...` slash command the CLI displays.
-3. Paste and send it in **any Slack channel or DM** in your workspace.
+3. Paste and send it in your **personal DM** — the direct message thread with yourself (in Slack's sidebar under **Direct messages**, click your own name; only you can see messages in that conversation). Using your personal DM avoids exposing the slash command to teammates if you mistype or paste it in the wrong place.
 4. Approve the permissions modal Slack opens.
 5. Copy the **service token** from the terminal output. It starts with **`xoxp-`**.
 6. Save it somewhere safe immediately — you may not be able to retrieve it again later.
-
-> **No browser cookie needed**
->
-> Tokens from `slack auth token` (`xoxp-...`) authenticate via `Authorization: Bearer` headers.
-> You do **not** need to extract a `d` cookie from Chrome dev tools when using this method.
 
 Keep the token private. Never commit it to git.
 
@@ -135,7 +153,7 @@ AlibiGen stores automation credentials in:
 Run the channel resolver; it prompts for your token:
 
 ```bash
-cd ~/git/kmactools
+cd ~/path/to/kmactools
 python3 alibigen/resolve_alibigen_channels.py
 ```
 
@@ -174,10 +192,6 @@ Create `~/.alibigen_cache/slack_channels.json`:
 
 Then run `resolve_alibigen_channels.py` to populate the `channels` map, or add channel name → ID pairs manually.
 
-> **Legacy browser tokens (`xoxc-`)**
->
-> Older setups may use a browser `xoxc-` token plus a `d` cookie from Chrome dev tools. That still works, but `slack auth token` is the recommended method.
-
 ---
 
 ## Step 4 — Python environment (macOS)
@@ -185,7 +199,7 @@ Then run `resolve_alibigen_channels.py` to populate the `channels` map, or add c
 From the repo root:
 
 ```bash
-cd ~/git/kmactools
+cd ~/path/to/kmactools
 python3 -m venv .venv
 source .venv/bin/activate
 pip install pytest   # for running tests
@@ -196,8 +210,8 @@ pip install pytest   # for running tests
 ## Step 5 — Verify AlibiGen end-to-end
 
 ```bash
-source ~/git/kmactools/.venv/bin/activate
-cd ~/git/kmactools
+source ~/path/to/kmactools/.venv/bin/activate
+cd ~/path/to/kmactools
 
 # Gather Slack messages (Gmail skipped if not configured)
 python3 alibigen/get_alibigen_messages.py --slack
@@ -226,14 +240,13 @@ pytest alibigen/tests/ -v
 | `Slack configuration not found` | Missing config file | Complete Step 3 |
 | `slack auth token` fails | CLI not logged in | Run `slack auth login` first |
 | Token expired | Service tokens rotate | Repeat Step 2 and update `slack_channels.json` |
-| `xoxc-` token fails | Missing `d` cookie | Use `slack auth token` instead, or add the browser `d` cookie |
 
 ---
 
 ## Security reminders
 
 - Never commit `~/.alibigen_cache/slack_channels.json` or tokens to git.
-- Treat `xoxp-` and `xoxc-` tokens like passwords — they grant access to your Slack workspace.
+- Treat `xoxp-` tokens like passwords — they grant access to your Slack workspace.
 - Raw message backups under `~/.alibigen_cache/` may contain sensitive content; keep that directory private.
 
 ---

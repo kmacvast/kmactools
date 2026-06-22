@@ -73,8 +73,8 @@ alibigen/
   "slack_token": "xoxp-...",
   "slack_d_cookie": "",
   "channels": {
-    "apple-openldap": "C06M4ERRSCT",
-    "orion-378849-macos-houdini": "C0B877CA7JB"
+    "your-workgroups-channel": "C01A2BCDEFG",
+    "a-quick-special-project-channel": "C02A2BCDEFG"
   }
 }
 ```
@@ -116,16 +116,6 @@ Or interactively resolve channels, people, and group DMs:
 ### 2. Gmail config (optional)
 
 Create `~/.alibigen_cache/gmail_config.json` as shown above.
-
-### 3. Migrate legacy data (if needed)
-
-If you previously used `~/.tps`:
-
-```bash
-mkdir -p ~/.alibigen_cache
-mv ~/.tps/* ~/.alibigen_cache/ 2>/dev/null
-mv ~/.tps_slack_channels.json ~/.alibigen_cache/slack_channels.json 2>/dev/null
-```
 
 ## Usage
 
@@ -214,20 +204,15 @@ Tips from live testing:
 - DM-based entries may have generic titles; rename to match how you want the journal to read.
 - Import into a separate calendar first if you want to delete or rework the batch easily.
 
-## Typical daily workflow
+## Typical weekly workflow
+
+AlibiGen defaults to a 7-day lookback, so a once-per-week run is a natural cadence:
 
 ```bash
 ./alibigen/get_alibigen_messages.py --slack
 ./alibigen/get_alibigen_candidates.py
 open ~/.alibigen_cache/calendar_review/calendar_candidates.md
 # review, edit JSON if needed, then import calendar_candidates.ics into Google Calendar
-```
-
-Optional cron:
-
-```cron
-0 18 * * * ~/git/kmactools/alibigen/get_alibigen_messages.py
-5 18 * * * ~/git/kmactools/alibigen/get_alibigen_candidates.py
 ```
 
 ## Testing

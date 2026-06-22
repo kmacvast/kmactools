@@ -1,0 +1,24 @@
+[
+  {
+    "user": "U111",
+    "type": "message",
+    "ts": "TS_C1",
+    "thread_ts": "TS_C1",
+    "reply_count": 2,
+    "text": "Decision: proceed with OpenLDAP config rollback in production tonight after change window approval."
+  },
+  {
+    "user": "U222",
+    "type": "message",
+    "ts": "TS_C2",
+    "thread_ts": "TS_C1",
+    "text": "yep"
+  },
+  {
+    "user": "U333",
+    "type": "message",
+    "ts": "TS_C3",
+    "thread_ts": "TS_C1",
+    "text": "sounds good"
+  }
+]

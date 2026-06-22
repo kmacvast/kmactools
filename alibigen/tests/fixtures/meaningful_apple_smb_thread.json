@@ -1,0 +1,31 @@
+[
+  {
+    "user": "U111",
+    "type": "message",
+    "ts": "TS_PARENT",
+    "thread_ts": "TS_PARENT",
+    "reply_count": 4,
+    "text": "Customer Apple reported SMB mount failures on macOS Houdini cluster ORION-378849. Starting investigation."
+  },
+  {
+    "user": "U222",
+    "type": "message",
+    "ts": "TS_REPLY1",
+    "thread_ts": "TS_PARENT",
+    "text": "I reproduced the mount error in staging. Logs show LDAP auth timeout during SMB handshake."
+  },
+  {
+    "user": "U333",
+    "type": "message",
+    "ts": "TS_REPLY2",
+    "thread_ts": "TS_PARENT",
+    "text": "RCA update: config change in OpenLDAP proxy caused the regression. Testing rollback patch now."
+  },
+  {
+    "user": "U111",
+    "type": "message",
+    "ts": "TS_REPLY3",
+    "thread_ts": "TS_PARENT",
+    "text": "Escalation ticket #45821 opened with support. Customer wants root cause summary by EOD."
+  }
+]

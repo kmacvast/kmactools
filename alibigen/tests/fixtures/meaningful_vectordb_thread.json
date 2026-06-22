@@ -1,0 +1,20 @@
+[
+  {
+    "user": "U111",
+    "type": "message",
+    "ts": "TS_V1",
+    "text": "Apple Vector DB opportunity: customer wants POC on ai-vectordb pipeline for semantic search."
+  },
+  {
+    "user": "U222",
+    "type": "message",
+    "ts": "TS_V2",
+    "text": "Engineering review scheduled. Need test plan for ingest throughput and latency benchmarks."
+  },
+  {
+    "user": "U333",
+    "type": "message",
+    "ts": "TS_V3",
+    "text": "Deal support: action item to deliver sizing doc and deployment checklist by Friday."
+  }
+]

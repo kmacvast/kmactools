@@ -1,0 +1,26 @@
+[
+  {
+    "user": "U111",
+    "type": "message",
+    "ts": "TS_T1",
+    "text": "lol"
+  },
+  {
+    "user": "U222",
+    "type": "message",
+    "ts": "TS_T2",
+    "text": "manana"
+  },
+  {
+    "user": "U111",
+    "type": "message",
+    "ts": "TS_T3",
+    "text": "thanks"
+  },
+  {
+    "user": "U222",
+    "type": "message",
+    "ts": "TS_T4",
+    "text": "sounds good"
+  }
+]

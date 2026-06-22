@@ -85,18 +85,25 @@ slack auth token
 The CLI prints instructions similar to:
 
 ```
+$ slack auth token
+
+
 📋 Run the following slash command in any Slack channel or DM
    This will open a modal with user permissions for you to approve
    Once approved, a challenge code will be generated in Slack
 
-/slackauthticket ...
+/slackauthticket REDACTED
+
 
 🔑 You've successfully authenticated!
    Service token:
 
-     xoxp-...
+     xoxp-REDACTED-OBFUSCATED
 
    Make sure to copy the token now and save it safely.
+
+💡 Get started by creating a new app with slack create my-app
+   Explore the details of available commands with slack help
 ```
 
 ### What to do

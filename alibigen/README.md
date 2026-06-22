@@ -18,6 +18,12 @@ resolve/init channels  →  get messages  →  get candidates  →  manual revie
 4. **Review** candidates in Markdown or JSON; mark approved/rejected.
 5. **Import** `calendar_candidates.ics` into Google Calendar (manual adjustments expected).
 
+## Architecture
+
+Candidate generation is **100% local and rule-based** — no LLMs, no network calls. `get_alibigen_candidates.py` loads Slack backups from disk, clusters conversations, scores them with weighted heuristics (participants, threads, keywords, ticket IDs, channel context), deduplicates overlapping work across channels, and writes reviewable calendar files.
+
+For the full pipeline — noise filtering, clustering windows, scoring table, Jaccard dedup, and time normalization — see **[HEURISTICS.md](HEURISTICS.md)**.
+
 ## Scripts
 
 Naming convention: `{verb}_alibigen_{purpose}.py`
@@ -42,6 +48,7 @@ Naming convention: `{verb}_alibigen_{purpose}.py`
 alibigen/
 ├── README.md
 ├── SETUP_macOS.md
+├── HEURISTICS.md
 ├── init_alibigen_channels.py
 ├── resolve_alibigen_channels.py
 ├── get_alibigen_messages.py

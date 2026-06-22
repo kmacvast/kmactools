@@ -4,6 +4,8 @@ AlibiGen ("Alibi Generator") builds a work journal from your Slack and Gmail act
 
 These are not fake meetings. They are evidence-backed work-journal blocks derived from real messages.
 
+> **macOS only.** First-time setup: see **[SETUP_macOS.md](SETUP_macOS.md)** (Slack CLI install, `slack auth token`, config).
+
 ## How it works
 
 ```
@@ -39,6 +41,7 @@ Naming convention: `{verb}_alibigen_{purpose}.py`
 ```
 alibigen/
 ├── README.md
+├── SETUP_macOS.md
 ├── init_alibigen_channels.py
 ├── resolve_alibigen_channels.py
 ├── get_alibigen_messages.py
@@ -67,8 +70,8 @@ alibigen/
 
 ```json
 {
-  "slack_token": "xoxc-...",
-  "slack_d_cookie": "...",
+  "slack_token": "xoxp-...",
+  "slack_d_cookie": "",
   "channels": {
     "apple-openldap": "C06M4ERRSCT",
     "orion-378849-macos-houdini": "C0B877CA7JB"
@@ -76,7 +79,7 @@ alibigen/
 }
 ```
 
-Obtain `slack_token` and `slack_d_cookie` from browser dev tools while logged into Slack.
+Obtain `slack_token` via `slack auth token` — see **[SETUP_macOS.md](SETUP_macOS.md)**.
 
 ### Gmail config example
 
@@ -93,6 +96,8 @@ Obtain `slack_token` and `slack_d_cookie` from browser dev tools while logged in
 Use a [Google App Password](https://myaccount.google.com/apppasswords) with IMAP enabled.
 
 ## Setup
+
+**New users:** complete **[SETUP_macOS.md](SETUP_macOS.md)** first (Slack CLI, `slack auth token`, Python venv).
 
 ### 1. Initial Slack channel config
 

@@ -34,7 +34,6 @@ def run_security_audit(config: dict, target_logical_path: str):
     
     with session.transaction() as tx:
         catalog_table = tx.catalog()
-        # Grabbing target POSIX security columns exposed by the VAST engine
         projection = ['name', 'parent_path', 'size', 'uid', 'owner_name', 'nfs_mode_bits', 'element_type']
         
         reader = catalog_table.select(
@@ -45,26 +44,20 @@ def run_security_audit(config: dict, target_logical_path: str):
         
     df = table.to_pandas()
     
-    # Isolate files for audit
     df_files = df[df['element_type'] == 'FILE'].copy()
     if df_files.empty:
         logging.warning("No files found to analyze. Ensure catalog index is warm.")
         return
 
     # --- Analysis 1: Bitwise POSIX Mode Calculations ---
-    # Standard POSIX mode bits include file-type flags. We mask out the lower 9 bits for permissions.
     df_files['perm_bits'] = df_files['nfs_mode_bits'].fillna(0).astype(int) & 0o777
-    
-    # Convert permission integer to standard human-readable octal string (e.g., 644, 755)
     df_files['perm_octal'] = df_files['perm_bits'].apply(lambda x: format(x, 'o').zfill(3))
     
-    # Identify World-Writable Files (where the final 'other' write bit is enabled: octal mask 002)
-    # This is a major corporate compliance trigger.
+    # Identify World-Writable Files (octal mask 002)
     world_writable_mask = (df_files['perm_bits'] & 0o002) > 0
     df_exposed = df_files[world_writable_mask]
     
     # --- Analysis 2: Ownership Allocation Profiles ---
-    # Group capacity consumption and file counts by the system Owner Name / UID
     owner_summary = df_files.groupby('owner_name').agg(
         file_count=('name', 'count'),
         total_bytes=('size', 'sum')
@@ -81,7 +74,8 @@ def run_security_audit(config: dict, target_logical_path: str):
     print("DATA CAPACITY ALLOCATION BY POSIX OWNER:")
     print("-"*80)
     for idx, row in owner_summary.iterrows():
-        print(f" Owner: {row['owner_name']:<15} | Files: {row['file_count']:,:<6} | Capacity Used: {row['readable_size']}")
+        file_count_str = f"{row['file_count']:,}"
+        print(f" Owner: {row['owner_name']:<15} | Files: {file_count_str:<8} | Capacity Used: {row['readable_size']}")
         
     print("-"*80)
     print("RISK DETECTION: WORLD-WRITABLE SECURITY EXPOSURES (Mask o+w):")

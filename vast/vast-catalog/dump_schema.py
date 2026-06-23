@@ -23,14 +23,13 @@ def main():
     
     with session.transaction() as tx:
         catalog_table = tx.catalog()
-        # Pull a single row to inspect the PyArrow schema layout
-        reader = catalog_table.select(limit=1)
-        table = reader.read_all()
+        # Direct property lookup provided by VAST DB
+        schema = catalog_table.arrow_schema
         
     print("\n" + "="*60)
     print("               AVAILABLE VAST CATALOG COLUMNS              ")
     print("="*60)
-    for field in table.schema:
+    for field in schema:
         print(f" Column Name: {field.name:<22} | Type: {str(field.type)}")
     print("="*60 + "\n")
 

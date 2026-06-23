@@ -28,14 +28,12 @@ def tag_files_via_s3(config: dict):
     )
     
     bucket_name = "kmacs-vast-catalog-test-bucket"
-    
-    # Let's find 5 temporary files using standard local scanning to tag as samples
     target_mount = config.get("mount_path")
     files_to_tag = []
+    
     for root, _, files in os.walk(target_mount):
         for file in files:
             if file.endswith('.tmp'):
-                # Convert the full local path to its matching S3 Object Key relative path
                 relative_key = os.path.relpath(os.path.join(root, file), target_mount)
                 files_to_tag.append(relative_key)
                 if len(files_to_tag) >= 5:
@@ -70,8 +68,8 @@ def query_custom_tags(config: dict):
     
     with session.transaction() as tx:
         catalog_table = tx.catalog()
-        # Pull down the path, name, and s3_tags map column
-        projection = ['name', 'parent_path', 's3_tags', 'element_type']
+        # Corrected: Using 'user_tags' as verified by your dump_schema output
+        projection = ['name', 'parent_path', 'user_tags', 'element_type']
         
         reader = catalog_table.select(
             columns=projection,
@@ -81,19 +79,20 @@ def query_custom_tags(config: dict):
         
     df = table.to_pandas()
     
-    # Parse the s3_tags column (which converts from a PyArrow Map into lists of dicts/tuples)
-    def matches_tag(tag_list):
-        if not tag_list or not isinstance(tag_list, (list, bytes, iter)):
+    # Safe parser handling for PyArrow Map layouts inside Pandas
+    def matches_tag(tags):
+        if not tags:
             return False
-        # Look for our key/value pair inside the object's indexed S3 metadata map
-        for tag in tag_list:
-            if isinstance(tag, dict) and tag.get('key') == 'security_review' and tag.get('value') == 'quarantined':
+        if isinstance(tags, dict):
+            return tags.get('security_review') == 'quarantined'
+        for item in tags:
+            if isinstance(item, dict) and item.get('key') == 'security_review' and item.get('value') == 'quarantined':
                 return True
-            if isinstance(tag, tuple) and len(tag) >= 2 and tag[0] == 'security_review' and tag[1] == 'quarantined':
+            if isinstance(item, tuple) and len(item) >= 2 and item[0] == 'security_review' and item[1] == 'quarantined':
                 return True
         return False
 
-    df['is_quarantined'] = df['s3_tags'].apply(matches_tag)
+    df['is_quarantined'] = df['user_tags'].apply(matches_tag)
     df_results = df[df['is_quarantined'] == True]
     
     print("\n" + "="*80)
@@ -101,8 +100,11 @@ def query_custom_tags(config: dict):
     print("="*80)
     print(f"Total Quarantined Files Located via Catalog: {len(df_results)}")
     print("-"*80)
-    for idx, row in df_results.head(10).iterrows():
-        print(f" FILE: {row['name']:<30} | PATH: {row['parent_path']}")
+    if df_results.empty:
+        print(" [!] No indexed tags matched yet. (Waiting on background crawler sync...)")
+    else:
+        for idx, row in df_results.head(10).iterrows():
+            print(f" FILE: {row['name']:<30} | PATH: {row['parent_path']}")
     print("="*80 + "\n")
 
 def main():
@@ -111,11 +113,7 @@ def main():
     # 1. Apply tags via S3 data plane
     tag_files_via_s3(config)
     
-    # 2. Wait or notify user to query
-    print("\n[Notice] S3 Tags applied successfully. Note that the VAST Catalog background")
-    print("crawler must complete its cycle before changes appear in the database.\n")
-    
-    # 3. Query the catalog database
+    # 2. Query the catalog database
     query_custom_tags(config)
 
 if __name__ == "__main__":

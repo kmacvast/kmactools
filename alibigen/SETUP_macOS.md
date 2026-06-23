@@ -99,44 +99,62 @@ See the [Slack CLI documentation](https://docs.slack.dev/tools/slack-cli/) for g
 
 AlibiGen needs a **user service token** to read channel history. The easiest way to get one is through the Slack CLI — no browser dev tools required.
 
-Run:
+# Guide: Extracting Slack Browser Credentials for Thread Harvesting
 
-```bash
-slack auth token
+This guide provides step-by-step instructions for extracting high-privilege Slack session credentials (`xoxc` tokens and `xoxd` cookies) from your web browser to use with `threadharvest.py`.
+
+## Prerequisites
+* A desktop web browser (Google Chrome, Microsoft Edge, Mozilla Firefox, or Apple Safari).
+* Logged into your target Slack workspace via the web app (`https://app.slack.com/client/...`).
+
+---
+
+## Step-by-Step Instructions
+
+### Step 1: Open Developer Tools
+1. Navigate to your Slack workspace in your browser.
+2. Open the browser's Developer Tools panel:
+   * **Mac:** Press `Cmd + Option + I`
+   * **Windows / Linux:** Press `F12` or `Ctrl + Shift + I`
+
+### Step 2: Configure the Network Tab
+1. Look at the top menu bar of the Developer Tools panel and click on the **Network** tab.
+2. Find the **Filter** box (usually in the upper-left corner of the Network pane).
+3. Type `client.counts` into the Filter box to isolate the exact API traffic needed.
+
+### Step 3: Trigger Slack API Activity
+1. Go back to your active Slack window on the left side of the screen.
+2. Click on a different channel or direct message in your sidebar.
+3. You will see a new request named `client.counts?...` appear in the Network list box. Click on it once to open its details pane.
+
+### Step 4: Extract the `xoxd` Session Cookie
+1. In the right-hand details pane that opened for `client.counts`, click on the **Cookies** sub-tab (located on the horizontal bar with Headers, Payload, Preview, etc.).
+2. Look at the table of Request Cookies. Find the row under the **Name** column labeled **`d`**.
+3. Double-click or select the entire corresponding value in the **Value** column. It will be a long string starting with **`xoxd-`** and will contain URL-encoded characters (like `%2F` or `%2B`).
+4. Copy this string entirely.
+
+### Step 5: Extract the `xoxc` Auth Token
+1. Switch from the Cookies sub-tab to the **Payload** sub-tab (or **Form Data** under Headers depending on your browser version).
+2. Look down the list of parameter keys until you find the row explicitly named **`token`**.
+3. Copy the entire value next to it. This string will start with **`xoxc-`** and is a clean alphanumeric string.
+
+---
+
+## Step 6: Update Your Credentials Configuration
+
+Open your local credentials file (`~/.slack/credentials.json`) and update it with the following JSON layout, ensuring you paste your extracted values cleanly:
+
+```json
+{
+  "YOUR_TEAM_ID_HERE": {
+    "token": "PASTE_YOUR_xoxc-_TOKEN_HERE",
+    "refresh_token": "PASTE_YOUR_xoxd-_COOKIE_HERE",
+    "team_domain": "vastdata",
+    "team_id": "YOUR_TEAM_ID_HERE",
+    "user_id": "YOUR_USER_ID_HERE"
+  }
+}
 ```
-
-The CLI prints instructions similar to:
-
-```
-$ slack auth token
-
-
-📋 Run the following slash command in any Slack channel or DM
-   This will open a modal with user permissions for you to approve
-   Once approved, a challenge code will be generated in Slack
-
-/slackauthticket REDACTED
-
-
-🔑 You've successfully authenticated!
-   Service token:
-
-     xoxp-REDACTED-OBFUSCATED
-
-   Make sure to copy the token now and save it safely.
-
-💡 Get started by creating a new app with slack create my-app
-   Explore the details of available commands with slack help
-```
-
-### What to do
-
-1. Run `slack auth token` in your terminal.
-2. Copy the `/slackauthticket ...` slash command the CLI displays.
-3. Paste and send it in your **personal DM** — the direct message thread with yourself (in Slack's sidebar under **Direct messages**, click your own name; only you can see messages in that conversation). Using your personal DM avoids exposing the slash command to teammates if you mistype or paste it in the wrong place.
-4. Approve the permissions modal Slack opens.
-5. Copy the **service token** from the terminal output. It starts with **`xoxp-`**.
-6. Save it somewhere safe immediately — you may not be able to retrieve it again later.
 
 Keep the token private. Never commit it to git.
 

@@ -39,41 +39,84 @@
 #
 # ==============================================================================
 
-# --- Virtual Environment Auto-Activation ---
-VENV_PATH="$HOME/ingestor-venv/bin/activate"
-if [ -f "$VENV_PATH" ]; then
-    source "$VENV_PATH"
+# --- Path Configurations ---
+MOUNT_ROOT="/mnt/kmacs-root/vast-catalog"
+SRC_WS1="${MOUNT_ROOT}/workspace_1a"
+SRC_WS2="${MOUNT_ROOT}/workspace_2a"
+LOG_DIR="./logs"
+
+# --- Global Signal Trap ---
+# Ensures hitting Ctrl+C cleanly terminates background workers instead of leaving orphans
+trap 'echo -e "\n[!] Interrupt Signal Captured! Killing active background engines..."; kill $pid_ws1 $pid_ws2 2>/dev/null; exit 1' SIGINT SIGTERM
+
+# --- Phase 1: Pre-Flight Integrity Audits ---
+echo "====================================================================="
+echo " RUNTIME INTEGRITY CHECK"
+echo "====================================================================="
+
+# 1. Verify binary availability
+if ! command -v fpsync &> /dev/null; then
+    echo "[!] Error: 'fpsync' utility is not installed or missing from PATH."
+    exit 1
 fi
 
-# Pre-create the local logging tier directory
-LOG_DIR="logs"
+# 2. Verify active mount framework accessibility
+if [ ! -d "$MOUNT_ROOT" ]; then
+    echo "[!] Error: Target VAST mount point missing or stale: $MOUNT_ROOT"
+    exit 1
+fi
+
+# 3. Validate presence of core seed layer sources
+if [ ! -d "$SRC_WS1" ] || [ ! -d "$SRC_WS2" ]; then
+    echo "[!] Error: Core seed source layers missing!"
+    echo "    Looking for: $SRC_WS1"
+    echo "    Looking for: $SRC_WS2"
+    exit 1
+fi
+
+# 4. Ensure runtime log directories exist
 mkdir -p "$LOG_DIR"
+echo "[✓] Environment checked. Pre-flight checks passed."
 
-# Dynamic Loop processing alphabetical horizons from d through z
+# --- Phase 2: Concurrent Alpha Multiplication Loop ---
 for char in {d..z}; do
-    echo "====================================================================="
-    echo " DISPATCHING CONCURRENT ALPHA BLOCK: Workspace 1${char} & 2${char}"
-    echo "====================================================================="
+    echo "---------------------------------------------------------------------"
+    echo " STARTING CONCURRENT ALPHA BLOCK: Workspace 1${char} & 2${char}"
+    echo "---------------------------------------------------------------------"
 
-    # Define distinct out-of-band log paths
-    LOG_WS1="$LOG_DIR/fpsync_ws1${char}.log"
-    LOG_WS2="$LOG_DIR/fpsync_ws2${char}.log"
+    DEST_WS1="${MOUNT_ROOT}/workspace_1${char}/"
+    DEST_WS2="${MOUNT_ROOT}/workspace_2${char}/"
+    LOG_WS1="${LOG_DIR}/fpsync_ws1${char}.log"
+    LOG_WS2="${LOG_DIR}/fpsync_ws2${char}.log"
 
-    echo "[+] Launching Workspace 1${char} -> Log: $LOG_WS1"
-    # Fully detach by redirecting stdout/stderr to log and stdin to /dev/null
-    fpsync -n 32 -v /mnt/kmacs-root/vast-catalog/workspace_1a/ /mnt/kmacs-root/vast-catalog/workspace_1${char}/ > "$LOG_WS1" 2>&1 < /dev/null &
+    # 1. Fire Workspace 1 Copy - Detach stdin (</dev/null) to prevent terminal freezing
+    fpsync -n 32 -v "$SRC_WS1" "$DEST_WS1" < /dev/null > "$LOG_WS1" 2>&1 &
     pid_ws1=$!
+    echo "[+] Launched Workspace 1${char} Stream (PID: $pid_ws1) -> Log: $LOG_WS1"
 
-    echo "[+] Launching Workspace 2${char} -> Log: $LOG_WS2"
-    fpsync -n 32 -v /mnt/kmacs-root/vast-catalog/workspace_2a/ /mnt/kmacs-root/vast-catalog/workspace_2${char}/ > "$LOG_WS2" 2>&1 < /dev/null &
+    # 2. Fire Workspace 2 Copy - Detach stdin (</dev/null) to prevent terminal freezing
+    fpsync -n 32 -v "$SRC_WS2" "$DEST_WS2" < /dev/null > "$LOG_WS2" 2>&1 &
     pid_ws2=$!
+    echo "[+] Launched Workspace 2${char} Stream (PID: $pid_ws2) -> Log: $LOG_WS2"
 
-    echo "[*] Processing 64 combined network streams out-of-band. Synchronizing..."
+    echo "[*] Synchronizing parallel threads... Processing 64 cluster operations."
 
-    # Wait safely for both isolated background streams to finish before looping
-    wait $pid_ws1 $pid_ws2
+    # 3. Wait securely for both active transfers to finish before shifting letters
+    wait $pid_ws1
+    exit_ws1=$?
 
-    echo -e "[✓] Finished Alpha Block '${char}'. Stepping to next horizon...\n"
+    wait $pid_ws2
+    exit_ws2=$?
+
+    # 4. Audit execution return status codes
+    if [ $exit_ws1 -ne 0 ] || [ $exit_ws2 -ne 0 ]; then
+        echo "[!] Warning: Alpha block '${char}' finished with errors."
+        echo "    WS1 Exit Code: $exit_ws1 | WS2 Exit Code: $exit_ws2"
+        echo "    Inspect files inside $LOG_DIR for specific network error traces."
+    else
+        echo "[✓] Finished Alpha Block '${char}' successfully."
+    fi
+    echo ""
 done
 
 echo "====================================================================="

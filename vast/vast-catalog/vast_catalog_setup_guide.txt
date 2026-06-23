@@ -1,0 +1,121 @@
+==============================================================================
+VAST DATA CATALOG USER CONFIGURATION GUIDE
+Configuration File: ~/.vast-catalog-config.json
+==============================================================================
+
+1. OVERVIEW
+------------------------------------------------------------------------------
+The VAST Data Catalog Metadata Search Engine and multi-threaded seeding utilities
+rely on a centralized, user-specific JSON configuration profile. This file 
+stores the API cluster endpoints, privileged S3 credentials required to open
+relational database transaction blocks, and the local filesystem NFS mount paths.
+
+Because this file contains highly sensitive S3 access keys that unlock direct 
+database access to the cluster's distributed NVMe fabric, it MUST be secured 
+using strict POSIX file permissions.
+
+2. EXPECTED JSON SCHEMA
+------------------------------------------------------------------------------
+The file must be named exactly `.vast-catalog-config.json` and reside in the 
+root of the user's home directory (`~` or `/home/username/`). 
+
+It must follow this strict JSON structural schema:
+
+{
+  "vast_endpoint": "http://<CLUSTER_MANAGEMENT_VIP_OR_DNS>",
+  "access_key": "<PRUVILEGED_S3_ACCESS_KEY>",
+  "secret_key": "<PRIVILEGED_S3_SECRET_KEY>",
+  "mount_path": "<LOCAL_NFS_OR_E_REAF_MOUNT_POINT>"
+}
+
+3. FIELD PARAMETER DEFINITIONS
+------------------------------------------------------------------------------
+* vast_endpoint (String)
+  The base HTTP/HTTPS URL of the VAST Cluster management network interface 
+  or floating Virtual IP (VIP). The Python SDK routes its initial transaction 
+  handshake (e.g., /?transaction) here before initiating parallel Arrow stream 
+  heuristics. Do not append a trailing slash.
+  Example: "http://172.200.202.3"
+
+* access_key (String)
+  The S3 access key ID associated with a user or service account role that 
+  holds high-privileged catalog transaction capability. 
+  Example: "O67W95HATTO1QCCS8PLB"
+
+* secret_key (String)
+  The cryptographic S3 secret access key string used to sign client REST 
+  requests to the cluster's VAST DB relational transaction manager.
+  Example: "K12srukWVMWTOpImwelsMe1K1Cy8rHous2DY9lkH"
+
+* mount_path (String)
+  The absolute path on your local Linux client machine where the VAST storage 
+  view namespace has been mounted over NFS (using optimized settings like 
+  vers=3,tcp,nconnect=16).
+  Example: "/mnt/kmacs-root/vast-catalog"
+
+4. STEP-BY-STEP CREATION INSTRUCTIONS
+------------------------------------------------------------------------------
+Follow these exact shell operations to securely initialize your configuration:
+
+Step 4.1: Navigate to your home directory and initialize an empty file:
+  $ cd ~
+  $ touch .vast-catalog-config.json
+
+Step 4.2: Open the file with your preferred text editor (e.g., nano or vi):
+  $ nano .vast-catalog-config.json
+
+Step 4.3: Paste the populated schema template. Replace placeholders with your 
+          actual verified lab environment credentials:
+
+{
+  "vast_endpoint": "http://172.200.202.3",
+  "access_key": "O67W95HATTO1QCCS8PLB",
+  "secret_key": "K12srukWVMWTOpImwelsMe1K1Cy8rHous2DY9lkH",
+  "mount_path": "/mnt/kmacs-root/vast-catalog"
+}
+
+Step 4.4: Save and exit the text editor (In nano: Ctrl+O, Enter, then Ctrl+X).
+
+5. CRITICAL SECURITY LOCKDOWN (POSIX PERMISSIONS)
+------------------------------------------------------------------------------
+By default, newly created files in Linux can often be read by other users on 
+the same system (e.g., permissions 644 or 664). To ensure other unprivileged 
+system context processes or users cannot scrape your corporate VAST DB access keys, 
+execute a strict chmod 600 lockdown:
+
+  $ chmod 600 ~/.vast-catalog-config.json
+
+Verify the file security topology by listing the file attributes:
+  $ ls -la ~/.vast-catalog-config.json
+
+The permissions flag output at the far left must look exactly like this:
+  -rw------- 1 vastdata vastdata ... .vast-catalog-config.json
+
+(This guarantees that ONLY your explicit Linux user context can read or write 
+to this configuration matrix).
+
+6. DIAGNOSTIC VALIDATION & COMPLIANCE VERIFICATION
+------------------------------------------------------------------------------
+To quickly confirm your environment is formatted correctly and ready for high-
+velocity search operations, run these simple sanity tests:
+
+* Test JSON Structure Validity:
+  $ python3 -m json.tool ~/.vast-catalog-config.json > /dev/null
+  (If this command returns an error, you have a syntax issue such as a missing 
+   comma, mismatched quotes, or a trailing comma).
+
+* Test Transaction Plane Accessibility via 'vast_search.py':
+  $ ./vast_search.py --ext c --limit 1
+  
+  - SUCCESS CONTEXT: The script returns a clean tabular dashboard window.
+  - FAILURE CONTEXT (403 Forbidden): Your configuration file is formatted 
+    correctly, but the cluster's identity engine actively rejected your 
+    S3 credentials. Re-check your access/secret keys.
+  - FAILURE CONTEXT (Connection Error): The host machine cannot route network 
+    payloads to the IP specified in 'vast_endpoint'. Verify your VPN, firewall, 
+    or check cluster status.
+
+==============================================================================
+END OF CONFIGURATION SETUP GUIDE
+==============================================================================
+

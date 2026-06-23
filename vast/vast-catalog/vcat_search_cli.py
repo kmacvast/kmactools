@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 #!/usr/bin/env python3
 # ==============================================================================
-# SCRIPT NAME : vast_search.py
+# SCRIPT NAME : vcat_search_cli.py
 # DESCRIPTION : High-velocity database pushdown search client leveraging the
 #               VAST Data Catalog relational engine. Enables multi-dimensional
 #               POSIX, space-efficiency, and rolling chrono-aging filtering
@@ -25,8 +25,8 @@
 # 2026-06-23 | 1.0.0   | KMac & Sheila  | Initial deployment of baseline search.
 # ==============================================================================
 # USAGE EXAMPLES:
-#   ./vast_search.py --ext JPEG --limit 0 > /tmp/jpeg_images.txt
-#   ./vast_search.py --min-size 10M --mmin 30 --limit 20
+#   ./vcat_search_cli.py --ext JPEG --limit 0 > /tmp/jpeg_images.txt
+#   ./vcat_search_cli.py --min-size 10M --mmin 30 --limit 20
 # ==============================================================================
 
 import os

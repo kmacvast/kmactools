@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# SCRIPT NAME : get_numfiles.sh
+# SCRIPT NAME : vcat_audit_quotas.sh
 # DESCRIPTION : Automated multi-workspace discovery and telemetry aggregation 
 #               engine. Dynamically scans the storage tier mount layer, auto-
 #               registers newly created alpha/numeric testing blocks into the 
@@ -26,13 +26,13 @@
 # ==============================================================================
 # USAGE EXAMPLES:
 #   # 1. Standard execution (Will interactively prompt securely for VMS password):
-#   ./get_numfiles.sh
+#   ./vcat_audit_quotas.sh
 #
 #   # 2. Automated inline injection (Pass password directly as argument string):
-#   ./get_numfiles.sh "SecretClusterPassword123"
+#   ./vcat_audit_quotas.sh "SecretClusterPassword123"
 #
 #   # 3. Environment Variable Injection (For non-interactive crons/pipelines):
-#   export VMS_PASSWORD="SecretClusterPassword123" && ./get_numfiles.sh
+#   export VMS_PASSWORD="SecretClusterPassword123" && ./vcat_audit_quotas.sh
 # ==============================================================================
 
 VENV_PATH="$HOME/ingestor-venv/bin/activate"
@@ -61,7 +61,7 @@ fi
 echo -e "\n========================================================"
 echo -e " STEP 1: Fetching Initial Quota Status"
 echo -e "========================================================"
-vastpy-cli get quotas fields=path,used_capacity_tb,used_inodes | grep -E "path|kmacs"
+vastpy-cli get quotas fields=path,used_capacity_tb,used_inodes | grep -E "used_inodes|kmacs"
 
 echo -e "\n========================================================"
 echo -e " STEP 2: Dynamically Discovering & Registering Workspaces"

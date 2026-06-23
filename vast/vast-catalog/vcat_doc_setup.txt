@@ -158,8 +158,8 @@ velocity search operations, run these simple sanity tests:
   (If this command returns an error, you have a syntax issue such as a missing 
    comma, mismatched quotes, or a trailing comma).
 
-* Test Transaction Plane Accessibility via 'vast_search.py':
-  $ ./vast_search.py --ext c --limit 1
+* Test Transaction Plane Accessibility via 'vcat_search_cli.py':
+  $ ./vcat_search_cli.py --ext c --limit 1
   
   - SUCCESS CONTEXT: The script returns a clean tabular dashboard window.
   - FAILURE CONTEXT (403 Forbidden): Your configuration file is formatted 

@@ -1,6 +1,40 @@
 #!/bin/bash
+# ==============================================================================
+# SCRIPT NAME : get_numfiles.sh
+# DESCRIPTION : Automated multi-workspace discovery and telemetry aggregation 
+#               engine. Dynamically scans the storage tier mount layer, auto-
+#               registers newly created alpha/numeric testing blocks into the 
+#               VAST Cluster management plane via vastpy-cli quotas, and renders 
+#               a cleanly sorted real-time inode and capacity dashboard.
+#
+# AUTHOR      : KMac & Sheila
+# DATE        : June 23, 2026
+# VERSION     : 2.0.0
+# LICENSE     : MIT / Enterprise Internal
+#
+# DEPENDENCIES: bash, vastpy-cli, ingestor-venv (Python Venv)
+#
+# ==============================================================================
+# REVISION HISTORY:
+# Date       | Version | Author         | Summary of Changes
+# -----------+---------+----------------+---------------------------------------
+# 2026-06-23 | 2.0.0   | KMac & Sheila  | Fixed ASCII table sorting collision, 
+#            |         |                | decoupled the headers from sort pipelines,
+#            |         |                | and filtered out rogue test paths.
+# 2026-06-23 | 1.0.0   | KMac & Sheila  | Initial framework deployment with 
+#            |         |                | workspace discovery loop automation.
+# ==============================================================================
+# USAGE EXAMPLES:
+#   # 1. Standard execution (Will interactively prompt securely for VMS password):
+#   ./get_numfiles.sh
+#
+#   # 2. Automated inline injection (Pass password directly as argument string):
+#   ./get_numfiles.sh "SecretClusterPassword123"
+#
+#   # 3. Environment Variable Injection (For non-interactive crons/pipelines):
+#   export VMS_PASSWORD="SecretClusterPassword123" && ./get_numfiles.sh
+# ==============================================================================
 
-# --- Virtual Environment Auto-Activation ---
 VENV_PATH="$HOME/ingestor-venv/bin/activate"
 if [ -f "$VENV_PATH" ]; then
     source "$VENV_PATH"
@@ -9,7 +43,6 @@ fi
 export VMS_ADDRESS="var202.selab.vastdata.com"
 export VMS_USER="admin"
 
-# --- Credential Ingestion Layer ---
 if [ -n "$1" ]; then
     export VMS_PASSWORD="$1"
 elif [ -n "$VMS_PASSWORD" ]; then
@@ -34,17 +67,14 @@ echo -e "\n========================================================"
 echo -e " STEP 2: Dynamically Discovering & Registering Workspaces"
 echo -e "========================================================"
 
-# Register base anchor pathways
 vastpy-cli post quotas path="/kmacs/vast-catalog/linux-2.6.11" name="idx_linux" > /dev/null 2>&1
 vastpy-cli post quotas path="/kmacs/vast-catalog/workspace_1" name="idx_ws1" > /dev/null 2>&1
 
-# Define the local mount root to scan for active directories
 MOUNT_SCAN_ZONE="/mnt/kmacs-root/vast-catalog"
 
 if [ -d "$MOUNT_SCAN_ZONE" ]; then
     echo "[*] Scanning active mount layer: $MOUNT_SCAN_ZONE"
     
-    # Loop through anything matching workspace_* (covers alpha, numeric, or custom markers)
     for dir in "$MOUNT_SCAN_ZONE"/workspace_*; do
         if [ -d "$dir" ]; then
             folder_name=$(basename "$dir")
@@ -68,5 +98,10 @@ sleep 3
 echo -e "\n========================================================"
 echo -e " STEP 4: Final File Count Breakdown (used_inodes)"
 echo -e "========================================================"
-vastpy-cli get quotas fields=path,used_capacity_tb,used_inodes | grep -E "path|kmacs" | sort -k3 -t'|'
+
+echo "used_inodes |used_capacity_tb |path"
+echo "------------+-----------------+---------------------------------+"
+
+vastpy-cli get quotas fields=path,used_capacity_tb,used_inodes | grep "kmacs" | sort -k3 -t'|'
 echo -e "========================================================\n"
+

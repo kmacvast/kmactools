@@ -14,7 +14,61 @@ Because this file contains highly sensitive S3 access keys that unlock direct
 database access to the cluster's distributed NVMe fabric, it MUST be secured 
 using strict POSIX file permissions.
 
-2. EXPECTED JSON SCHEMA
+2. VAST WEBUI PRE-REQUISITES & CLUSTER PROVISIONING RUNBOOK
+------------------------------------------------------------------------------
+Before any API requests can interact with the VAST DB transaction manager, an
+administrator must fully configure five interdependent infrastructure components 
+within the VAST WebUI management console. 
+
+* STEP 2.1: ACTIVATE THE GLOBAL CATALOG FEATURE
+  Navigate to 'DataBase' -> 'VAST Catalog' in the left menu. Locate your target 
+  Tenant (e.g., 'default') and switch the state to ENABLED. This initializes an 
+  out-of-band metadata indexing task that continuously builds relational tables 
+  from the Element Store snapshot timeline.
+
+* STEP 2.2: PROVISION THE IDENTITY ACCESS CONTROL POLICY
+  By default, S3 credentials lack database query visibility. Navigate to 
+  'User Management' -> 'Identity Policies' and create a new custom policy string. 
+  You must paste a functional JSON statement that explicitly allows the 
+  relational transaction query action:
+
+  {
+    "Version": "2012-10-17",
+    "Id": "CatalogQueryAccessPolicy",
+    "Statement": [
+      {
+        "Sid": "AllowTabularQueryData",
+        "Effect": "Allow",
+        "Action": "s3:TabularQueryData",
+        "Resource": "arn:aws:s3:::*"
+      }
+    ]
+  }
+
+* STEP 2.3: ASSIGN CREDENTIALS AND BIND THE IDENTITY POLICY
+  Navigate to 'User Management' -> 'Users'. Create or select your client 
+  system operator account (e.g., 'vastdata').
+  1. Under S3 Policies, select and attach the policy built in STEP 2.2.
+  2. Under Credentials, generate a unique S3 Access Key and Secret Key pair.
+  3. Ensure the user's primary Tenant assignment aligns with the targeted data.
+
+* STEP 2.4: CONFIGURE THE DISTRIBUTED CATALOG VIP POOL
+  Navigate to 'Settings' -> 'Network' -> 'VIP Pools'. Create an independent VIP 
+  pool assigned to handle data analytics workloads:
+  1. Set the role constraint to "VAST Catalog" or "S3/Tabular Endpoint".
+  2. Enable the cluster-integrated DNS Service (Required by the Python Arrow SDK 
+     to dynamically calculate network path concurrency heuristics).
+  3. Map the pool to the correct network interfaces on your front-end nodes.
+
+* STEP 2.5: ALIGN MULTI-PROTOCOL VIEW POLICIES
+  Navigate to 'Element Store' -> 'Views' and inspect the path view controlling 
+  your data repository (e.g., /kmacs). Open the attached View Policy:
+  1. Ensure the Security Flavor supports "S3 Native" or "Mixed Last Wins" multi-
+     protocol translation so S3 queries can see POSIX files.
+  2. Under S3 Read-Write and S3 Read-Only host lists, ensure an asterisk (*) 
+     or your specific client subnet is allowed full access.
+
+3. EXPECTED JSON SCHEMA
 ------------------------------------------------------------------------------
 The file must be named exactly `.vast-catalog-config.json` and reside in the 
 root of the user's home directory (`~` or `/home/username/`). 
@@ -28,7 +82,7 @@ It must follow this strict JSON structural schema:
   "mount_path": "<LOCAL_NFS_OR_E_REAF_MOUNT_POINT>"
 }
 
-3. FIELD PARAMETER DEFINITIONS
+4. FIELD PARAMETER DEFINITIONS
 ------------------------------------------------------------------------------
 * vast_endpoint (String)
   The base HTTP/HTTPS URL of the VAST Cluster management network interface 
@@ -53,18 +107,18 @@ It must follow this strict JSON structural schema:
   vers=3,tcp,nconnect=16).
   Example: "/mnt/kmacs-root/vast-catalog"
 
-4. STEP-BY-STEP CREATION INSTRUCTIONS
+5. STEP-BY-STEP CREATION INSTRUCTIONS
 ------------------------------------------------------------------------------
 Follow these exact shell operations to securely initialize your configuration:
 
-Step 4.1: Navigate to your home directory and initialize an empty file:
+Step 5.1: Navigate to your home directory and initialize an empty file:
   $ cd ~
   $ touch .vast-catalog-config.json
 
-Step 4.2: Open the file with your preferred text editor (e.g., nano or vi):
+Step 5.2: Open the file with your preferred text editor (e.g., nano or vi):
   $ nano .vast-catalog-config.json
 
-Step 4.3: Paste the populated schema template. Replace placeholders with your 
+Step 5.3: Paste the populated schema template. Replace placeholders with your 
           actual verified lab environment credentials:
 
 {
@@ -74,9 +128,9 @@ Step 4.3: Paste the populated schema template. Replace placeholders with your
   "mount_path": "/mnt/kmacs-root/vast-catalog"
 }
 
-Step 4.4: Save and exit the text editor (In nano: Ctrl+O, Enter, then Ctrl+X).
+Step 5.4: Save and exit the text editor (In nano: Ctrl+O, Enter, then Ctrl+X).
 
-5. CRITICAL SECURITY LOCKDOWN (POSIX PERMISSIONS)
+6. CRITICAL SECURITY LOCKDOWN (POSIX PERMISSIONS)
 ------------------------------------------------------------------------------
 By default, newly created files in Linux can often be read by other users on 
 the same system (e.g., permissions 644 or 664). To ensure other unprivileged 
@@ -94,7 +148,7 @@ The permissions flag output at the far left must look exactly like this:
 (This guarantees that ONLY your explicit Linux user context can read or write 
 to this configuration matrix).
 
-6. DIAGNOSTIC VALIDATION & COMPLIANCE VERIFICATION
+7. DIAGNOSTIC VALIDATION & COMPLIANCE VERIFICATION
 ------------------------------------------------------------------------------
 To quickly confirm your environment is formatted correctly and ready for high-
 velocity search operations, run these simple sanity tests:

@@ -1,30 +1,26 @@
 #!/bin/bash
 # ==============================================================================
 # SCRIPT NAME : fpart_copy.sh
-# DESCRIPTION : High-velocity, concurrent data multiplication engine designed
+# DESCRIPTION : Enterprise-grade, concurrent data multiplication engine designed
 #               to scale storage testing sandboxes to tens of millions of files.
-#               Leverages fpart directory splitting and fpsync backgrounding
-#               (&) to orchestrate 64 simultaneous network execution streams,
-#               fully saturating nconnect=16 NFS pipes straight to the VAST Data
-#               distributed NVMe fabric.
+#               Features automatic TTY session detachment via setsid, active
+#               background log polling, and smart directory skip logic.
 #
 # AUTHOR      : KMac & Sheila
 # DATE        : June 23, 2026
-# VERSION     : 3.1.0
+# VERSION     : 4.3.0
 # LICENSE     : MIT / Enterprise Internal
 #
-# DEPENDENCIES: bash, fpart, ffp_sync (part of fpart utility suite), rsync
-# STORAGE ZONE: /mnt/kmacs-root/vast-catalog/
+# DEPENDENCIES: bash, fpart, ffp_sync, rsync, util-linux (setsid)
+# STORAGE ZONE: /mnt/kmacs-root/vast-catalog
 # ==============================================================================
 # REVISION HISTORY:
 # Date       | Version | Author         | Summary of Changes
 # -----------+---------+----------------+---------------------------------------
-# 2026-06-23 | 3.1.0   | KMac & Sheila  | Refactored to dual background jobs
-#            |         |                | with PID tracking and 'wait' blocks
-#            |         |                | for full concurrent execution.
-# 2026-06-23 | 2.0.0   | KMac & Sheila  | Implemented alphabetical brace loops
-#            |         |                | ({d..z}) for automated alpha expansion.
-# 2026-06-23 | 1.0.0   | KMac & Sheila  | Initial sequential workspace_1b copy.
+# 2026-06-23 | 4.3.0   | KMac & Sheila  | Added live log status polling loop to
+#            |         |                | provide real-time foreground visibility.
+# 2026-06-23 | 4.2.0   | KMac & Sheila  | Embedded 'setsid -w' to bypass kernel 
+#            |         |                | SIGTTOU job control halts entirely.
 # ==============================================================================
 # USAGE EXAMPLES:
 #   # Run as standard utility (Ensure mount is active prior to launch):
@@ -46,7 +42,6 @@ SRC_WS2="${MOUNT_ROOT}/workspace_2a"
 LOG_DIR="./logs"
 
 # --- Global Signal Trap ---
-# Ensures hitting Ctrl+C cleanly terminates background workers instead of leaving orphans
 trap 'echo -e "\n[!] Interrupt Signal Captured! Killing active background engines..."; kill $pid_ws1 $pid_ws2 2>/dev/null; exit 1' SIGINT SIGTERM
 
 # --- Phase 1: Pre-Flight Integrity Audits ---
@@ -54,65 +49,81 @@ echo "====================================================================="
 echo " RUNTIME INTEGRITY CHECK"
 echo "====================================================================="
 
-# 1. Verify binary availability
 if ! command -v fpsync &> /dev/null; then
     echo "[!] Error: 'fpsync' utility is not installed or missing from PATH."
     exit 1
 fi
 
-# 2. Verify active mount framework accessibility
 if [ ! -d "$MOUNT_ROOT" ]; then
     echo "[!] Error: Target VAST mount point missing or stale: $MOUNT_ROOT"
     exit 1
 fi
 
-# 3. Validate presence of core seed layer sources
 if [ ! -d "$SRC_WS1" ] || [ ! -d "$SRC_WS2" ]; then
     echo "[!] Error: Core seed source layers missing!"
-    echo "    Looking for: $SRC_WS1"
-    echo "    Looking for: $SRC_WS2"
     exit 1
 fi
 
-# 4. Ensure runtime log directories exist
 mkdir -p "$LOG_DIR"
 echo "[✓] Environment checked. Pre-flight checks passed."
 
 # --- Phase 2: Concurrent Alpha Multiplication Loop ---
 for char in {d..z}; do
+    DEST_WS1="${MOUNT_ROOT}/workspace_1${char}"
+    DEST_WS2="${MOUNT_ROOT}/workspace_2${char}"
+
+    # Idempotency Filter
+    if [ -d "$DEST_WS1" ] && [ -d "$DEST_WS2" ]; then
+        echo "[-] Alpha Block '${char}': Target paths already exist on storage tier. Skipping..."
+        echo ""
+        continue
+    fi
+
     echo "---------------------------------------------------------------------"
     echo " STARTING CONCURRENT ALPHA BLOCK: Workspace 1${char} & 2${char}"
     echo "---------------------------------------------------------------------"
-
-    DEST_WS1="${MOUNT_ROOT}/workspace_1${char}/"
-    DEST_WS2="${MOUNT_ROOT}/workspace_2${char}/"
+    
     LOG_WS1="${LOG_DIR}/fpsync_ws1${char}.log"
     LOG_WS2="${LOG_DIR}/fpsync_ws2${char}.log"
 
-    # 1. Fire Workspace 1 Copy - Detach stdin (</dev/null) to prevent terminal freezing
-    fpsync -n 32 -v "$SRC_WS1" "$DEST_WS1" < /dev/null > "$LOG_WS1" 2>&1 &
+    # Initialize empty log targets so the monitor loop doesn't trip
+    :> "$LOG_WS1"
+    :> "$LOG_WS2"
+
+    # 1. Dispatch workers silently into isolated sessions
+    setsid -w fpsync -n 32 -v "$SRC_WS1" "${DEST_WS1}/" > "$LOG_WS1" 2>&1 &
     pid_ws1=$!
-    echo "[+] Launched Workspace 1${char} Stream (PID: $pid_ws1) -> Log: $LOG_WS1"
-
-    # 2. Fire Workspace 2 Copy - Detach stdin (</dev/null) to prevent terminal freezing
-    fpsync -n 32 -v "$SRC_WS2" "$DEST_WS2" < /dev/null > "$LOG_WS2" 2>&1 &
+    
+    setsid -w fpsync -n 32 -v "$SRC_WS2" "${DEST_WS2}/" > "$LOG_WS2" 2>&1 &
     pid_ws2=$!
-    echo "[+] Launched Workspace 2${char} Stream (PID: $pid_ws2) -> Log: $LOG_WS2"
+    
+    echo "[+] Workers deployed. WS1 Key (PID: $pid_ws1) | WS2 Key (PID: $pid_ws2)"
+    echo "[*] Tailoring active progress logs (polling intervals: 5s)..."
 
-    echo "[*] Synchronizing parallel threads... Processing 64 cluster operations."
+    # 2. Active Log Polling Loop (Replaces the silent blind wait)
+    while kill -0 $pid_ws1 2>/dev/null || kill -0 $pid_ws2 2>/dev/null; do
+        sleep 5
+        
+        # Pull the last meaningful progress metric line from each worker log
+        STAT1=$(tail -n 15 "$LOG_WS1" | grep -E 'Parts done|Analyzing|crawling' | tail -n 1)
+        STAT2=$(tail -n 15 "$LOG_WS2" | grep -E 'Parts done|Analyzing|crawling' | tail -n 1)
+        
+        # Clean up strings if files are still spooling
+        STAT1_CLEAN=$(echo "$STAT1" | sed 's/^.*<=== //; s/^.*===> //')
+        STAT2_CLEAN=$(echo "$STAT2" | sed 's/^.*<=== //; s/^.*===> //')
+        
+        # Print telemetry line
+        echo "    [$(date +%T)] 1${char}: ${STAT1_CLEAN:-Syncing...} | 2${char}: ${STAT2_CLEAN:-Syncing...}"
+    done
 
-    # 3. Wait securely for both active transfers to finish before shifting letters
-    wait $pid_ws1
-    exit_ws1=$?
-
-    wait $pid_ws2
-    exit_ws2=$?
+    # 3. Collect final exit statuses securely
+    wait $pid_ws1; exit_ws1=$?
+    wait $pid_ws2; exit_ws2=$?
 
     # 4. Audit execution return status codes
     if [ $exit_ws1 -ne 0 ] || [ $exit_ws2 -ne 0 ]; then
         echo "[!] Warning: Alpha block '${char}' finished with errors."
         echo "    WS1 Exit Code: $exit_ws1 | WS2 Exit Code: $exit_ws2"
-        echo "    Inspect files inside $LOG_DIR for specific network error traces."
     else
         echo "[✓] Finished Alpha Block '${char}' successfully."
     fi

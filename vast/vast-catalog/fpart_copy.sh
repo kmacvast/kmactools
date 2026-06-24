@@ -8,19 +8,21 @@
 #
 # AUTHOR      : KMac & Sheila
 # DATE        : June 23, 2026
-# VERSION     : 5.3.0
+# VERSION     : 5.2.0
 # LICENSE     : MIT / Enterprise Internal
 #
 # DEPENDENCIES: bash, fpart, ffp_sync, rsync, util-linux (setsid), coreutils (stdbuf)
-# STORAGE ZONE: /mnt/kmacs-root/vast-catalog
+#
 # ==============================================================================
 # REVISION HISTORY:
 # Date       | Version | Author         | Summary of Changes
 # -----------+---------+----------------+---------------------------------------
-# 2026-06-23 | 5.3.0   | KMac & Sheila  | Added explicit WORD reset at top of 
-#            |         |                | loop to prevent infinite continue spins.
 # 2026-06-23 | 5.2.0   | KMac & Sheila  | Added 'stdbuf -oL' line-buffering fix
 #            |         |                | to force immediate log flush metrics.
+# 2026-06-23 | 5.1.0   | KMac & Sheila  | Muted annoying tty warning noise via
+#            |         |                | stderr process substitution filters.
+# 2026-06-23 | 5.0.0   | KMac & Sheila  | Shifted from finite {d..z} loop to
+#            |         |                | infinite random word generation loop.
 # ==============================================================================
 # USAGE EXAMPLES:
 #   # Run as standard interactive engine (Hit Ctrl+C to terminate cleanly):
@@ -28,6 +30,9 @@
 #
 #   # Run as detached overnight background daemon:
 #   nohup ./vcat_seed_infinite.sh > /tmp/fpart_multiplier.log 2>&1 &
+#
+# How to manually run fpsync with 32 parallel execution workers
+# fpsync -n 32 -v /mnt/kmacs-root/vast-catalog/workspace_1a/ /mnt/kmacs-root/vast-catalog/workspace_1c/
 # ==============================================================================
 
 # --- Path Configurations ---
@@ -68,9 +73,6 @@ echo -e "\n[*] Initialization complete. Entering non-stop multi-million file cop
 echo "[*] Press [Ctrl+C] at any time to freeze pipelines and exit cleanly.\n"
 
 while true; do
-    # State Reset: Clear out the old suffix to prevent tracking stale parameters
-    WORD=""
-
     # 1. Generate a clean, lowercase, alphanumeric random word
     if [ -f "$DICT_FILE" ]; then
         WORD=$(shuf -n 1 "$DICT_FILE" | tr -cd '[:alnum:]' | tr '[:upper:]' '[:lower:]')

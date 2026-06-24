@@ -20,7 +20,7 @@ import vastdb
 from ibis import _
 
 # --- Configuration Settings ---
-LOOKBACK_MINUTES = 15
+LOOKBACK_MINUTES = 45
 CATALOG_PATH_PREFIX = "/kmacs/vast-catalog"
 DEFAULT_CONFIG_PATH = os.path.expanduser("~/.vast-catalog-config.json")
 

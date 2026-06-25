@@ -391,6 +391,39 @@ class TestTranslatePathEngine(unittest.TestCase):
         self.assertEqual(coords.nfs_path, f"{self.MOUNT}/workspace_1/image.JPEG")
 
 
+class TestVmsCredentials(unittest.TestCase):
+    @patch.object(tool, "load_vast_config")
+    def test_resolve_vms_credentials_prefers_vastconf(self, mock_load):
+        mock_load.return_value = {
+            "vms": "vms.lab.example",
+            "user": "admin",
+            "password": "from-vastconf",
+            "tenant": "default",
+        }
+        ctx = tool.ToolContext(
+            config={"vms_address": "wrong.host", "vms_user": "wrong", "token": "stale"},
+            config_path="/tmp/cfg", catalog_prefix="/kmacs/vast-catalog",
+            mount_path="/mnt/test", bucket_name="b", vms_address="wrong.host", vms_user="wrong",
+        )
+        creds = tool.resolve_vms_credentials(ctx)
+        self.assertEqual(creds["address"], "vms.lab.example")
+        self.assertEqual(creds["user"], "admin")
+        self.assertEqual(creds["password"], "from-vastconf")
+        self.assertIsNone(creds["token"])
+        self.assertIsNone(creds["tenant"])
+
+    @patch.object(tool, "load_vast_config", side_effect=FileNotFoundError("missing"))
+    def test_resolve_vms_credentials_falls_back_to_catalog(self, mock_load):
+        ctx = tool.ToolContext(
+            config={"vms_address": "vms.catalog", "vms_user": "admin", "vms_password": "secret"},
+            config_path="/tmp/cfg", catalog_prefix="/kmacs/vast-catalog",
+            mount_path="/mnt/test", bucket_name="b", vms_address="vms.catalog", vms_user="admin",
+        )
+        creds = tool.resolve_vms_credentials(ctx)
+        self.assertEqual(creds["address"], "vms.catalog")
+        self.assertEqual(creds["password"], "secret")
+
+
 class TestDRREngine(unittest.TestCase):
     def test_compute_drr_metrics_exact(self):
         drr, savings = tool.compute_drr_metrics(400, 100)

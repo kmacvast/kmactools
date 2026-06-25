@@ -5,7 +5,7 @@
 #              and S3 tag mutation tool consolidating 12 legacy scripts.
 #
 # Author: KMac kmac@vastdata.com
-# Version: 1.3.3
+# Version: 1.3.4
 ################################################################################
 
 from __future__ import annotations
@@ -684,39 +684,88 @@ def compute_drr_metrics(total_logical: int, total_physical: int) -> tuple[str, s
 # VMS REST API — data reduction rates (--show-data-reduction-rates)
 # ---------------------------------------------------------------------------
 
-def get_vastpy_client(ctx: ToolContext) -> Any:
-    """Build an authenticated vastpy client from tool or ~/.vastconf credentials."""
-    from vastpy import VASTClient
+def resolve_vms_credentials(
+    ctx: ToolContext, vms_password: str | None = None,
+) -> dict[str, Any]:
+    """Resolve VMS REST credentials; prefer ~/.vastconf over catalog config.
 
-    cfg = dict(ctx.config)
+    Args:
+        ctx: Resolved tool context.
+        vms_password: Optional CLI/env override for the VMS password.
+
+    Returns:
+        Dict with address, user, password, token, and tenant keys for VASTClient.
+
+    Raises:
+        ValueError: When neither token nor password is available.
+    """
+    vastconf: dict[str, Any] = {}
     try:
-        vconf = load_vast_config("~/.vastconf")
-        for key, value in vconf.items():
-            cfg.setdefault(key, value)
+        vastconf = load_vast_config("~/.vastconf")
     except FileNotFoundError:
         pass
 
-    address = cfg.get("vms") or cfg.get("vms_address") or ctx.vms_address
-    tenant = cfg.get("tenant")
+    cfg = ctx.config
+    if vastconf:
+        address = vastconf.get("vms") or vastconf.get("vms_address") or cfg.get("vms_address") or ctx.vms_address
+        user = vastconf.get("user") or vastconf.get("vms_user") or cfg.get("vms_user") or ctx.vms_user
+        token = vastconf.get("token")
+        password = vastconf.get("password") or cfg.get("vms_password")
+        tenant = vastconf.get("tenant")
+    else:
+        address = cfg.get("vms_address") or ctx.vms_address
+        user = cfg.get("vms_user") or ctx.vms_user
+        token = cfg.get("token")
+        password = cfg.get("vms_password")
+        tenant = cfg.get("tenant")
+
+    password = vms_password or os.environ.get("VMS_PASSWORD") or password
+    if not password and not token:
+        import getpass
+        password = getpass.getpass("VMS password: ")
+
     if not tenant or str(tenant).lower() == "default":
         tenant = None
 
-    if cfg.get("token"):
-        return VASTClient(address=address, token=cfg["token"], tenant=tenant)
-
-    user = cfg.get("user") or cfg.get("vms_user") or ctx.vms_user
-    password = cfg.get("password") or cfg.get("vms_password")
-    if not password:
+    if not token and not password:
         raise ValueError(
-            "VMS credentials missing: set token or user/password in "
-            f"{ctx.config_path} or ~/.vastconf"
+            "VMS credentials missing: configure token or user/password in "
+            "~/.vastconf or pass --vms-password"
         )
-    return VASTClient(address=address, user=user, password=password, tenant=tenant)
+
+    return {
+        "address": address,
+        "user": user,
+        "password": password,
+        "token": token,
+        "tenant": tenant,
+    }
+
+
+def get_vastpy_client(ctx: ToolContext, vms_password: str | None = None) -> Any:
+    """Build an authenticated vastpy client from ~/.vastconf or catalog config."""
+    from vastpy import VASTClient
+
+    creds = resolve_vms_credentials(ctx, vms_password)
+    if creds.get("token"):
+        return VASTClient(
+            address=creds["address"], token=creds["token"], tenant=creds["tenant"],
+        )
+    return VASTClient(
+        address=creds["address"],
+        user=creds["user"],
+        password=creds["password"],
+        tenant=creds["tenant"],
+    )
 
 
 def fetch_quota_for_path(client: Any, path: str) -> dict | None:
     """Query GET /api/quotas/ for a logical path."""
-    quotas = client.quotas.get(path=path.rstrip("/"))
+    try:
+        quotas = client.quotas.get(path=path.rstrip("/"))
+    except Exception as exc:
+        logger.error("Quotas API failed for %s: %s", path, exc)
+        raise
     if not quotas:
         return None
     for quota in quotas:
@@ -810,7 +859,13 @@ def resolve_reduction_scan_paths(ctx: ToolContext, directories: list[str] | None
 def fetch_path_reduction_metrics(client: Any, path: str) -> dict[str, Any]:
     """Merge capacity estimation and quota metrics for one directory path."""
     capacity = fetch_capacity_for_path(client, path)
-    quota = fetch_quota_for_path(client, path)
+    try:
+        quota = fetch_quota_for_path(client, path)
+    except Exception as exc:
+        return {
+            "path": path,
+            "error": f"VMS authentication or quotas API failure: {exc}",
+        }
     quota_logical, quota_physical, inodes = parse_quota_bytes(quota) if quota else (0, 0, 0)
 
     if capacity:
@@ -979,14 +1034,19 @@ def print_data_reduction_rates_dashboard(report: DataReductionRatesReport) -> No
 
 
 def run_show_data_reduction_rates(
-    ctx: ToolContext, directories: list[str] | None = None,
+    ctx: ToolContext,
+    directories: list[str] | None = None,
+    vms_password: str | None = None,
 ) -> int:
     """Profile deduplication, similarity, and compression via VMS capacity/quotas APIs."""
     paths = resolve_reduction_scan_paths(ctx, directories)
     try:
-        client = get_vastpy_client(ctx)
+        client = get_vastpy_client(ctx, vms_password)
     except ValueError as exc:
         print(f"\n{BOLD_RED}Error:{RESET} {exc}\n")
+        return 1
+    except Exception as exc:
+        print(f"\n{BOLD_RED}VMS connection failed{RESET}: {exc}\n")
         return 1
 
     exit_code = 0
@@ -1765,7 +1825,7 @@ def print_about() -> None:
     """Print customer-facing VAST platform guide tied to each CLI option."""
     width = MATRIX_WIDTH
     print(_matrix_hr())
-    print(f" {BOLD_GREEN}VAST DATA PLATFORM GUIDE — VCATALOG_TOOL REFERENCE (v1.3.3){RESET}")
+    print(f" {BOLD_GREEN}VAST DATA PLATFORM GUIDE — VCATALOG_TOOL REFERENCE (v1.3.4){RESET}")
     print(_matrix_hr())
 
     print(
@@ -2200,7 +2260,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.show_data_reduction:
         return run_show_data_reduction(ctx, args.show_data_reduction)
     if args.show_data_reduction_rates:
-        return run_show_data_reduction_rates(ctx, args.directories)
+        return run_show_data_reduction_rates(ctx, args.directories, args.vms_password)
 
     # S3 tag mutations
     s3_ops = sum(1 for x in (args.add_s3_tag, args.modify_s3_tag, args.delete_s3_tag) if x)

@@ -5,7 +5,7 @@
 #              and S3 tag mutation tool consolidating 12 legacy scripts.
 #
 # Author: KMac kmac@vastdata.com
-# Version: 1.0.0
+# Version: 1.1.0
 ################################################################################
 
 from __future__ import annotations
@@ -195,6 +195,166 @@ def fetch_catalog_df(ctx: ToolContext, columns: list[str], predicate=None) -> pd
 def nfs_path_to_s3_key(abs_path: str, mount_path: str) -> str:
     """Translate an absolute NFS path to an S3 object key."""
     return os.path.relpath(abs_path, mount_path)
+
+
+MATRIX_WIDTH = 90
+
+
+def _matrix_hr() -> str:
+    return "=" * MATRIX_WIDTH
+
+
+@dataclass
+class PathCoordinates:
+    """Cross-protocol path representation for a single object."""
+
+    nfs_path: str
+    catalog_path: str
+    s3_uri: str
+    relative_key: str
+
+
+def translate_path_coordinates(
+    input_path: str, mount_path: str, catalog_prefix: str, bucket_name: str,
+) -> PathCoordinates:
+    """Map a POSIX, catalog logical, or S3 URI path to all three protocol views.
+
+    Args:
+        input_path: User-supplied path in any supported format.
+        mount_path: Local NFS mount root.
+        catalog_prefix: VAST Catalog logical parent_path prefix.
+        bucket_name: S3 bucket name for URI construction.
+
+    Returns:
+        PathCoordinates with nfs_path, catalog_path, s3_uri, and relative_key.
+    """
+    mount = os.path.normpath(mount_path.rstrip("/"))
+    prefix = catalog_prefix.rstrip("/")
+    normalized = input_path.strip()
+
+    if normalized.startswith("s3://"):
+        without_scheme = normalized[5:]
+        slash_idx = without_scheme.find("/")
+        if slash_idx == -1:
+            relative = ""
+        else:
+            relative = without_scheme[slash_idx + 1 :]
+    elif os.path.normpath(normalized).startswith(mount):
+        relative = os.path.relpath(os.path.normpath(normalized), mount)
+        if relative == ".":
+            relative = ""
+    elif normalized.startswith(prefix) or normalized == prefix:
+        relative = normalized.removeprefix(prefix).lstrip("/")
+    else:
+        raise ValueError(
+            f"Unrecognized path format: {input_path!r}. "
+            f"Expected mount ({mount}), catalog ({prefix}), or s3:// URI."
+        )
+
+    catalog = f"{prefix}/{relative}" if relative else prefix
+    nfs = os.path.join(mount, relative) if relative else mount
+    s3_uri = f"s3://{bucket_name}/{relative}" if relative else f"s3://{bucket_name}/"
+    return PathCoordinates(nfs_path=nfs, catalog_path=catalog, s3_uri=s3_uri, relative_key=relative)
+
+
+def normalize_to_catalog_path(input_path: str, mount_path: str, catalog_prefix: str) -> str:
+    """Normalize a local mount or logical path to a catalog parent_path prefix."""
+    coords = translate_path_coordinates(input_path, mount_path, catalog_prefix, "bucket")
+    catalog = coords.catalog_path.rstrip("/")
+    basename = os.path.basename(catalog)
+    if basename and "." in basename and not basename.startswith("."):
+        parent = os.path.dirname(catalog)
+        prefix = catalog_prefix.rstrip("/")
+        if parent and (parent == prefix or parent.startswith(prefix + "/")):
+            return parent
+    return catalog
+
+
+def compute_drr_metrics(total_logical: int, total_physical: int) -> tuple[str, str]:
+    """Calculate DRR ratio string and net space saved percentage.
+
+    Returns:
+        Tuple of (drr_ratio, savings_pct) e.g. ('4.00:1', '75.00%').
+    """
+    if total_physical <= 0:
+        return "N/A", "0.00%"
+    ratio = total_logical / total_physical
+    drr = f"{ratio:.2f}:1"
+    if total_logical <= 0:
+        return drr, "0.00%"
+    savings = ((total_logical - total_physical) / total_logical) * 100
+    return drr, f"{savings:.2f}%"
+
+
+def print_path_translation_matrix(coords: PathCoordinates) -> None:
+    """Render the cross-protocol translation block."""
+    print(_matrix_hr())
+    print("                 VAST PROTOCOL PATH TRANSLATION MATRIX")
+    print(_matrix_hr())
+    print(f" NFS Local Client Mount : {coords.nfs_path}")
+    print(f" VAST Catalog DB Logic  : {coords.catalog_path}")
+    print(f" S3 Bucket Object Key   : {coords.s3_uri}")
+    print(_matrix_hr())
+
+
+def print_drr_profiler_report(
+    target_path: str, file_count: int, total_logical: int, total_physical: int,
+) -> None:
+    """Render the directory data reduction profiler summary."""
+    drr, savings = compute_drr_metrics(total_logical, total_physical)
+    print(_matrix_hr())
+    print("                 VAST CATALOG: DIRECTORY DATA REDUCTION PROFILER")
+    print(_matrix_hr())
+    print(f" Target Target Path    : {target_path}")
+    print(f" Total Files Profiled  : {file_count:,}")
+    print(f" Logical Dataset Mass  : {format_bytes(total_logical)}")
+    print(f" Physical Block Space  : {format_bytes(total_physical)}")
+    print(" " + "-" * 86)
+    print(f" VAST Global Similarity Data Reduction Ratio : {drr}")
+    print(f" Net Storage Space Saved Overhead            : {savings}")
+    print(_matrix_hr())
+
+
+def run_translate_path(ctx: ToolContext, input_path: str) -> int:
+    """Translate a path across NFS, catalog, and S3 protocol views."""
+    try:
+        coords = translate_path_coordinates(
+            input_path, ctx.mount_path, ctx.catalog_prefix, ctx.bucket_name,
+        )
+    except ValueError as exc:
+        print(f"\n{BOLD_RED}Error:{RESET} {exc}\n")
+        return 1
+    print()
+    print_path_translation_matrix(coords)
+    print()
+    return 0
+
+
+def run_show_data_reduction(ctx: ToolContext, input_path: str) -> int:
+    """Profile logical vs physical consumption for a catalog subtree."""
+    try:
+        catalog_target = normalize_to_catalog_path(
+            input_path, ctx.mount_path, ctx.catalog_prefix,
+        )
+    except ValueError as exc:
+        print(f"\n{BOLD_RED}Error:{RESET} {exc}\n")
+        return 1
+
+    logger.info("Profiling data reduction under %s", catalog_target)
+    df = fetch_catalog_df(
+        ctx,
+        ["name", "parent_path", "size", "used", "element_type"],
+        predicate=_.parent_path.startswith(catalog_target),
+    )
+    df_files = df[df["element_type"] == "FILE"]
+    total_logical = int(df_files["size"].sum())
+    total_physical = int(df_files["used"].sum())
+    file_count = len(df_files)
+
+    print()
+    print_drr_profiler_report(catalog_target, file_count, total_logical, total_physical)
+    print()
+    return 0
 
 
 def parse_tag_pair(tag_str: str) -> tuple[str, str]:
@@ -849,6 +1009,8 @@ def build_parser() -> argparse.ArgumentParser:
             "  %(prog)s --seed-baseline\n"
             "  %(prog)s --seed-bulk --copies 3\n"
             "  %(prog)s --show-schema\n"
+            "  %(prog)s --translate-path /mnt/kmacs-root/vast-catalog/workspace_1/file.JPEG\n"
+            "  %(prog)s --show-data-reduction /kmacs/vast-catalog/workspace_1\n"
             "  %(prog)s --add-s3-tag 'owner=team' --s3-target /mnt/.../file.tmp\n"
         ),
     )
@@ -869,6 +1031,11 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--seed-bulk", action="store_true", help="Bulk Enron + ImageNet workspace clone")
     mode.add_argument("--copy-infinitely", action="store_true", help="Infinite dictionary-driven copy loop")
     mode.add_argument("--show-schema", action="store_true", help="Print catalog arrow_schema columns")
+    mode.add_argument("--translate-path", type=str, metavar="PATH", help="Cross-protocol path translation")
+    mode.add_argument(
+        "--show-data-reduction", type=str, metavar="PATH",
+        help="Directory DRR profiler for a catalog or mount path",
+    )
     mode.add_argument("--add-s3-tag", type=str, metavar="KEY=VALUE", help="Add S3 tag to --s3-target file")
     mode.add_argument("--modify-s3-tag", type=str, metavar="KEY=VALUE", help="Modify existing S3 tag")
     mode.add_argument("--delete-s3-tag", type=str, metavar="KEY", help="Delete S3 tag key")
@@ -940,6 +1107,10 @@ def main(argv: list[str] | None = None) -> int:
         return run_copy_infinitely(ctx)
     if args.show_schema:
         return run_show_schema(ctx)
+    if args.translate_path:
+        return run_translate_path(ctx, args.translate_path)
+    if args.show_data_reduction:
+        return run_show_data_reduction(ctx, args.show_data_reduction)
 
     # S3 tag mutations
     s3_ops = sum(1 for x in (args.add_s3_tag, args.modify_s3_tag, args.delete_s3_tag) if x)

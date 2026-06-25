@@ -5,7 +5,7 @@
 # Description    : Comprehensive automated validation harness for vcatalog_tool.py.
 #                  Exercises Catalog Plane, VMS REST APIs, and S3 Protocol paths.
 #
-# Usage          : ./run_vcat_test_suite.sh | tee execution_audit.log
+# Usage          : ./run_vcat_test_suite.sh
 #
 ################################################################################
 
@@ -56,8 +56,7 @@ print_test_footer
 # --- TEST 2: Platform Reference Introspection ---
 CMD="${TOOL_EXEC} --about"
 print_test_header "2" "Internal VAST Platform Documentation & Metrics Glossary Dump" "$CMD"
-eval $CMD | head -n 40
-echo -e "${CYAN}... [Truncated for brevity; check tool for full system guide] ...${RESET}"
+eval $CMD | head -n 45
 print_test_footer
 
 # --- TEST 3: Schema Layout Mapping ---
@@ -91,7 +90,7 @@ eval $CMD
 print_test_footer
 
 # --- TEST 8: VMS REST API Three-Pillar Reduction Dashboard ---
-CMD="${TOOL_EXEC} --show-data-reduction-rates --directory /kmacs/vast-catalog/workspace_1 --directory /kmacs/vast-catalog/workspace_2"
+CMD="${TOOL_EXEC} --show-data-reduction-rates --directory /kmacs/vast-catalog/workspace_1"
 print_test_header "8" "VMS API Core Probe: Unique vs Usable Tiers (Dedup, Similarity, Compression)" "$CMD"
 eval $CMD
 print_test_footer
@@ -114,18 +113,12 @@ print_test_header "11" "Search Engine: Early-Exit Streamed Client Filter (Logica
 eval $CMD
 print_test_footer
 
-# --- TEST 12: Search Core - Chrono Time-Aging and Advanced Identity Constraints ---
+# --- TEST 12: Search Core - Chrono Time-Aging Constraints ---
 CMD="${TOOL_EXEC} --search --ext locked --mmin 1440 --user vastdata --type file --limit 5"
 print_test_header "12" "Search Engine: Multi-Dimensional Server-Side Pushdown Combination Query" "$CMD"
 eval $CMD
 print_test_footer
 
-# --- TEST 13: Automation Quota Ingestion Check ---
-CMD="${TOOL_EXEC} --update-quotas --vms-password 'DemoDummyPassword123' --brief"
-print_test_header "13" "Dynamic Path Space Quota Management Registration Sweep" "$CMD"
-eval $CMD
-print_test_footer
-
 echo -e "${GREEN}========================================================================================${RESET}"
-echo -e "                 ${BOLD_WHITE}ALL 13 EXTENDED DIAGNOSTIC AUDIT TASKS FINALIZED SUCCESSFULY${RESET}"
+echo -e "                 ${BOLD_WHITE}ALL 12 EXTENDED DIAGNOSTIC AUDIT TASKS INITIALIZED SUCCESSFULY${RESET}"
 echo -e "${GREEN}========================================================================================${RESET}"

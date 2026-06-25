@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
+import pyarrow as pa
 
 _SCRIPT = os.path.join(
     os.path.dirname(__file__), "..", "vast", "vast-catalog", "vcatalog_tool.py"
@@ -157,19 +158,64 @@ class TestBuildContext(unittest.TestCase):
             self.assertEqual(ctx.catalog_prefix, tool.DEFAULT_CATALOG_PREFIX)
 
 
-class TestShowCapacityMocked(unittest.TestCase):
-    @patch.object(tool, "fetch_catalog_df")
-    def test_capacity_report_renders(self, mock_fetch):
-        mock_fetch.return_value = pd.DataFrame({
-            "name": ["f1", "f2"],
-            "parent_path": ["/kmacs/vast-catalog/a", "/kmacs/vast-catalog/b"],
-            "size": [5000, 2_000_000],
-            "used": [4096, 1_000_000],
-            "extension": ["txt", "dat"],
-            "element_type": ["FILE", "FILE"],
+class TestStreamingAccumulators(unittest.TestCase):
+    def test_capacity_accumulator_batch(self):
+        acc = tool.CapacityAccumulator()
+        batch = pa.record_batch({
+            "size": pa.array([8000, 100], type=pa.int64()),
+            "used": pa.array([4096, 100], type=pa.int64()),
+            "element_type": pa.array(["FILE", "DIR"]),
         })
-        parser = tool.build_parser()
-        args = parser.parse_args(["--show-capacity"])
+        acc.ingest_batch(batch)
+        self.assertEqual(acc.file_count, 1)
+        self.assertEqual(acc.total_logical, 8000)
+        self.assertEqual(acc.total_physical, 4096)
+
+    def test_security_owner_accumulator_batch(self):
+        acc = tool.SecurityOwnerAccumulator()
+        batch = pa.record_batch({
+            "size": pa.array([100, 200], type=pa.int64()),
+            "uid": pa.array([1000, 1000], type=pa.int64()),
+            "owner_name": pa.array(["alice", "alice"]),
+            "nfs_mode_bits": pa.array([0o666, 0o644], type=pa.int64()),
+            "element_type": pa.array(["FILE", "FILE"]),
+            "name": pa.array(["open.txt", "closed.txt"]),
+            "parent_path": pa.array(["/kmacs/vast-catalog/a", "/kmacs/vast-catalog/b"]),
+        })
+        acc.ingest_batch(batch)
+        self.assertEqual(acc.file_count, 2)
+        self.assertEqual(acc.owner_counts["alice"], 2)
+        self.assertEqual(acc.exposed_count, 1)
+        self.assertEqual(len(acc.exposed_samples), 1)
+
+    def test_cold_files_accumulator_batch(self):
+        old_ms = int((datetime.now() - timedelta(days=400)).timestamp() * 1000)
+        recent_ms = int((datetime.now() - timedelta(days=10)).timestamp() * 1000)
+        cutoff_ms = int((datetime.now().timestamp() - (365 * 86400)) * 1000)
+        acc = tool.ColdFilesAccumulator()
+        batch = pa.record_batch({
+            "size": pa.array([200, 300, 100], type=pa.int64()),
+            "mtime": pa.array([old_ms, recent_ms, recent_ms], type=pa.int64()),
+            "extension": pa.array(["txt", "log", "dat"]),
+            "name": pa.array(["cold.bin", "scrap.log", "active.dat"]),
+            "element_type": pa.array(["FILE", "FILE", "FILE"]),
+        })
+        acc.ingest_batch(batch, cutoff_ms)
+        self.assertEqual(acc.total_files, 3)
+        self.assertEqual(acc.cold_count, 1)
+        self.assertEqual(acc.scrap_count, 1)
+        self.assertEqual(acc.waste_count, 2)
+
+
+class TestShowCapacityMocked(unittest.TestCase):
+    @patch.object(tool, "iterate_catalog_batches")
+    def test_capacity_report_renders(self, mock_iter):
+        batch = pa.record_batch({
+            "size": pa.array([5000, 2_000_000], type=pa.int64()),
+            "used": pa.array([4096, 1_000_000], type=pa.int64()),
+            "element_type": pa.array(["FILE", "FILE"]),
+        })
+        mock_iter.return_value = iter([batch])
         ctx = tool.ToolContext(
             config={}, config_path="/tmp/cfg", catalog_prefix="/kmacs/vast-catalog",
             mount_path="/mnt/test", bucket_name="b", vms_address="vms", vms_user="admin",
@@ -179,6 +225,7 @@ class TestShowCapacityMocked(unittest.TestCase):
             rc = tool.run_show_capacity(ctx)
         self.assertEqual(rc, 0)
         self.assertIn("CAPACITY PROFILE", buf.getvalue())
+        self.assertIn("2", buf.getvalue())  # two files profiled
 
 
 class TestS3TagMutationMocked(unittest.TestCase):
@@ -199,6 +246,41 @@ class TestS3TagMutationMocked(unittest.TestCase):
         self.assertEqual(rc, 0)
         client.put_object_tagging.assert_called_once()
         self.assertIn("owner=team", buf.getvalue())
+
+
+class TestTranslatePathEngine(unittest.TestCase):
+    MOUNT = "/mnt/kmacs-root/vast-catalog"
+    PREFIX = "/kmacs/vast-catalog"
+    BUCKET = "kmacs-vast-catalog-test-bucket"
+
+    def test_posix_to_catalog(self):
+        posix = f"{self.MOUNT}/workspace_1/image.JPEG"
+        coords = tool.translate_path_coordinates(posix, self.MOUNT, self.PREFIX, self.BUCKET)
+        self.assertEqual(coords.catalog_path, f"{self.PREFIX}/workspace_1/image.JPEG")
+
+    def test_catalog_to_posix(self):
+        logical = f"{self.PREFIX}/workspace_1/image.JPEG"
+        coords = tool.translate_path_coordinates(logical, self.MOUNT, self.PREFIX, self.BUCKET)
+        self.assertEqual(coords.nfs_path, f"{self.MOUNT}/workspace_1/image.JPEG")
+
+
+class TestDRREngine(unittest.TestCase):
+    def test_compute_drr_metrics_exact(self):
+        drr, savings = tool.compute_drr_metrics(400, 100)
+        self.assertEqual(drr, "4.00:1")
+        self.assertEqual(savings, "75.00%")
+
+
+class TestNewArgparseModes(unittest.TestCase):
+    def test_translate_path_mode(self):
+        parser = tool.build_parser()
+        args = parser.parse_args(["--translate-path", "/mnt/kmacs-root/vast-catalog/foo.txt"])
+        self.assertEqual(args.translate_path, "/mnt/kmacs-root/vast-catalog/foo.txt")
+
+    def test_show_data_reduction_mode(self):
+        parser = tool.build_parser()
+        args = parser.parse_args(["--show-data-reduction", "/kmacs/vast-catalog/workspace_1"])
+        self.assertEqual(args.show_data_reduction, "/kmacs/vast-catalog/workspace_1")
 
 
 if __name__ == "__main__":

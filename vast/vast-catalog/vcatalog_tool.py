@@ -5,7 +5,7 @@
 #              and S3 tag mutation tool consolidating 12 legacy scripts.
 #
 # Author: KMac kmac@vastdata.com
-# Version: 1.1.0
+# Version: 1.2.1
 ################################################################################
 
 from __future__ import annotations
@@ -25,16 +25,19 @@ import tempfile
 import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from multiprocessing.pool import ThreadPool
 from typing import Any
 
 import boto3
+import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.compute as pc
 import urllib3
 import vastdb
-from ibis import _
+from ibis import _ as ibis_col
 
 urllib3.disable_warnings()
 
@@ -182,14 +185,226 @@ def connect_catalog(ctx: ToolContext):
     )
 
 
-def fetch_catalog_df(ctx: ToolContext, columns: list[str], predicate=None) -> pd.DataFrame:
-    """Run a catalog select and return a pandas DataFrame."""
+def iterate_catalog_batches(
+    ctx: ToolContext, columns: list[str], predicate=None,
+):
+    """Stream catalog rows as PyArrow RecordBatches without loading the full table.
+
+    Args:
+        ctx: Resolved tool context.
+        columns: Minimal column projection for the target aggregation.
+        predicate: Optional ibis filter; defaults to catalog_prefix pushdown.
+
+    Yields:
+        pyarrow.RecordBatch chunks from the catalog reader.
+    """
     if predicate is None:
-        predicate = _.parent_path.startswith(ctx.catalog_prefix)
+        predicate = ibis_col.parent_path.startswith(ctx.catalog_prefix)
     session = connect_catalog(ctx)
     with session.transaction() as tx:
-        table = tx.catalog().select(columns=columns, predicate=predicate).read_all()
-    return table.to_pandas()
+        reader = tx.catalog().select(columns=columns, predicate=predicate)
+        if hasattr(reader, "read_next_batch"):
+            while True:
+                batch = reader.read_next_batch()
+                if batch is None or batch.num_rows == 0:
+                    break
+                yield batch
+        else:
+            for batch in reader:
+                if batch.num_rows > 0:
+                    yield batch
+
+
+def fetch_catalog_df(ctx: ToolContext, columns: list[str], predicate=None) -> pd.DataFrame:
+    """Accumulate catalog batches into a DataFrame (small result sets only)."""
+    chunks: list[pa.RecordBatch] = []
+    for batch in iterate_catalog_batches(ctx, columns, predicate):
+        chunks.append(batch)
+    if not chunks:
+        return pd.DataFrame(columns=columns)
+    return pa.Table.from_batches(chunks).to_pandas()
+
+
+_BRACKET_NAMES = list(SIZE_BRACKETS.keys())
+_BRACKET_EDGES = np.array([4096, 65536, 1048576], dtype=np.int64)
+
+
+def _mtime_to_epoch_ms(mtimes: np.ndarray) -> np.ndarray:
+    """Normalize catalog mtime values to epoch milliseconds."""
+    if mtimes.size == 0:
+        return mtimes
+    if mtimes.max() > 1e15:
+        return mtimes // 1_000_000
+    return mtimes
+
+
+@dataclass
+class CapacityAccumulator:
+    """Streaming aggregates for --show-capacity."""
+
+    total_logical: int = 0
+    total_physical: int = 0
+    file_count: int = 0
+    bracket_counts: dict[str, int] = field(default_factory=lambda: {k: 0 for k in SIZE_BRACKETS})
+    bracket_logical: dict[str, int] = field(default_factory=lambda: {k: 0 for k in SIZE_BRACKETS})
+    bracket_physical: dict[str, int] = field(default_factory=lambda: {k: 0 for k in SIZE_BRACKETS})
+
+    def ingest_batch(self, batch: pa.RecordBatch) -> None:
+        """Fold one RecordBatch into running capacity totals."""
+        tbl = pa.Table.from_batches([batch])
+        files = tbl.filter(pc.equal(tbl["element_type"], pa.scalar("FILE")))
+        if files.num_rows == 0:
+            return
+        sizes = files["size"].to_numpy(zero_copy_only=False).astype(np.int64)
+        used = files["used"].to_numpy(zero_copy_only=False).astype(np.int64)
+        self.file_count += files.num_rows
+        self.total_logical += int(sizes.sum())
+        self.total_physical += int(used.sum())
+        bracket_idx = np.digitize(sizes, _BRACKET_EDGES)
+        for i, name in enumerate(_BRACKET_NAMES):
+            mask = bracket_idx == i
+            if not mask.any():
+                continue
+            self.bracket_counts[name] += int(mask.sum())
+            self.bracket_logical[name] += int(sizes[mask].sum())
+            self.bracket_physical[name] += int(used[mask].sum())
+
+
+@dataclass
+class ColdFilesAccumulator:
+    """Streaming aggregates for --show-cold-files."""
+
+    total_files: int = 0
+    total_footprint: int = 0
+    cold_count: int = 0
+    cold_size: int = 0
+    scrap_count: int = 0
+    scrap_size: int = 0
+    waste_count: int = 0
+    waste_size: int = 0
+
+    def ingest_batch(self, batch: pa.RecordBatch, cutoff_ms: int) -> None:
+        """Fold one RecordBatch into cold/scrap/waste metrics."""
+        tbl = pa.Table.from_batches([batch])
+        files = tbl.filter(pc.equal(tbl["element_type"], pa.scalar("FILE")))
+        if files.num_rows == 0:
+            return
+
+        sizes = files["size"].to_numpy(zero_copy_only=False).astype(np.int64)
+        mtimes = _mtime_to_epoch_ms(
+            files["mtime"].to_numpy(zero_copy_only=False).astype(np.int64),
+        )
+        names = files["name"].to_pylist()
+        extensions = files["extension"].to_pylist()
+
+        waste_exts = {e.lstrip(".") for e in WASTE_EXTENSIONS}
+        cold_mask = mtimes < cutoff_ms
+        scrap_mask = np.array([
+            (ext in waste_exts if ext is not None else False)
+            or any(name.endswith(suffix) for suffix in WASTE_EXTENSIONS)
+            for ext, name in zip(extensions, names, strict=True)
+        ], dtype=bool)
+
+        self.total_files += len(sizes)
+        self.total_footprint += int(sizes.sum())
+        self.cold_count += int(cold_mask.sum())
+        self.cold_size += int(sizes[cold_mask].sum()) if cold_mask.any() else 0
+        self.scrap_count += int(scrap_mask.sum())
+        self.scrap_size += int(sizes[scrap_mask].sum()) if scrap_mask.any() else 0
+        waste_mask = cold_mask | scrap_mask
+        self.waste_count += int(waste_mask.sum())
+        self.waste_size += int(sizes[waste_mask].sum()) if waste_mask.any() else 0
+
+
+@dataclass
+class SecurityOwnerAccumulator:
+    """Streaming aggregates for --analysis-by-owner."""
+
+    owner_counts: dict[str, int] = field(default_factory=dict)
+    owner_bytes: dict[str, int] = field(default_factory=dict)
+    exposed_count: int = 0
+    exposed_samples: list[dict[str, str]] = field(default_factory=list)
+    file_count: int = 0
+
+    def ingest_batch(self, batch: pa.RecordBatch, uid_filter: int | None = None) -> None:
+        """Fold one RecordBatch into owner and permission metrics."""
+        tbl = pa.Table.from_batches([batch])
+        files = tbl.filter(pc.equal(tbl["element_type"], pa.scalar("FILE")))
+        if files.num_rows == 0:
+            return
+
+        if uid_filter is not None:
+            files = files.filter(pc.equal(files["uid"], pa.scalar(uid_filter, type=pa.int64())))
+            if files.num_rows == 0:
+                return
+
+        sizes = files["size"].to_numpy(zero_copy_only=False).astype(np.int64)
+        owners = files["owner_name"].to_pylist()
+        mode_bits = files["nfs_mode_bits"].to_numpy(zero_copy_only=False)
+        names = files["name"].to_pylist()
+        paths = files["parent_path"].to_pylist()
+
+        self.file_count += files.num_rows
+        for owner, size_val in zip(owners, sizes, strict=True):
+            owner_key = owner if owner is not None else "unknown"
+            self.owner_counts[owner_key] = self.owner_counts.get(owner_key, 0) + 1
+            self.owner_bytes[owner_key] = self.owner_bytes.get(owner_key, 0) + int(size_val)
+
+        perm_bits = np.nan_to_num(mode_bits, nan=0).astype(np.int64) & 0o777
+        world_writable = (perm_bits & 0o002) > 0
+        self.exposed_count += int(world_writable.sum())
+        for idx in np.flatnonzero(world_writable):
+            if len(self.exposed_samples) >= 5:
+                continue
+            self.exposed_samples.append({
+                "perm_octal": format(int(perm_bits[idx]), "o").zfill(3),
+                "name": names[idx],
+                "parent_path": paths[idx],
+            })
+
+
+def stream_security_profile(ctx: ToolContext, uid: int | None) -> SecurityOwnerAccumulator:
+    """Scan catalog in batches for owner consumption and permission risks."""
+    acc = SecurityOwnerAccumulator()
+    columns = ["size", "uid", "owner_name", "nfs_mode_bits", "element_type", "name", "parent_path"]
+    predicate = ibis_col.parent_path.startswith(ctx.catalog_prefix)
+    batch_num = 0
+    for batch in iterate_catalog_batches(ctx, columns, predicate=predicate):
+        acc.ingest_batch(batch, uid_filter=uid)
+        batch_num += 1
+        if batch_num % 50 == 0:
+            logger.info("Security scan progress: %s batches, %s files scanned",
+                        batch_num, f"{acc.file_count:,}")
+    return acc
+
+
+def stream_capacity_profile(ctx: ToolContext) -> CapacityAccumulator:
+    """Scan catalog in batches using minimal column projection."""
+    acc = CapacityAccumulator()
+    columns = ["size", "used", "element_type"]
+    batch_num = 0
+    for batch in iterate_catalog_batches(ctx, columns):
+        acc.ingest_batch(batch)
+        batch_num += 1
+        if batch_num % 50 == 0:
+            logger.info("Capacity scan progress: %s batches, %s files profiled",
+                        batch_num, f"{acc.file_count:,}")
+    return acc
+
+
+def stream_cold_files_profile(ctx: ToolContext, num_days: int) -> ColdFilesAccumulator:
+    """Scan catalog in batches for cold-data and scrap metrics."""
+    cutoff_ms = int((datetime.now().timestamp() - (num_days * 86400)) * 1000)
+    acc = ColdFilesAccumulator()
+    columns = ["size", "mtime", "extension", "name", "element_type"]
+    batch_num = 0
+    for batch in iterate_catalog_batches(ctx, columns):
+        acc.ingest_batch(batch, cutoff_ms)
+        batch_num += 1
+        if batch_num % 50 == 0:
+            logger.info("Cold-file scan progress: %s batches, %s files scanned",
+                        batch_num, f"{acc.total_files:,}")
+    return acc
 
 
 def nfs_path_to_s3_key(abs_path: str, mount_path: str) -> str:
@@ -344,7 +559,7 @@ def run_show_data_reduction(ctx: ToolContext, input_path: str) -> int:
     df = fetch_catalog_df(
         ctx,
         ["name", "parent_path", "size", "used", "element_type"],
-        predicate=_.parent_path.startswith(catalog_target),
+        predicate=ibis_col.parent_path.startswith(catalog_target),
     )
     df_files = df[df["element_type"] == "FILE"]
     total_logical = int(df_files["size"].sum())
@@ -382,39 +597,27 @@ def _report_header(title: str) -> None:
 
 def run_show_capacity(ctx: ToolContext) -> int:
     """Capacity profiler with 4-tier size histogram."""
-    logger.info("Scanning block allocation matrix under %s", ctx.catalog_prefix)
-    df = fetch_catalog_df(
-        ctx, ["name", "parent_path", "size", "used", "extension", "element_type"],
-    )
-    df_files = df[df["element_type"] == "FILE"].copy()
-    if df_files.empty:
+    logger.info("Streaming block allocation scan under %s (batch mode)", ctx.catalog_prefix)
+    acc = stream_capacity_profile(ctx)
+    if acc.file_count == 0:
         logger.warning("No files found for capacity profiling.")
         return 0
 
-    total_logical = df_files["size"].sum()
-    total_physical = df_files["used"].sum()
-    space_delta = total_logical - total_physical
-
-    df_files["size_bracket"] = df_files["size"].apply(categorize_size)
-    histogram = (
-        df_files.groupby("size_bracket")
-        .agg(file_count=("name", "count"), logical_bytes=("size", "sum"), physical_bytes=("used", "sum"))
-        .reset_index()
-    )
-    histogram["sort_key"] = histogram["size_bracket"].map(SIZE_BRACKETS)
-    histogram = histogram.sort_values("sort_key")
+    space_delta = acc.total_logical - acc.total_physical
 
     _report_header("CAPACITY PROFILE & DATA STRUCTURE")
     print(f"\n  {'Catalog prefix':<22} {CYAN}{ctx.catalog_prefix}{RESET}")
-    print(f"  {'Global logical size':<22} {format_bytes(total_logical)}")
-    print(f"  {'Global physical used':<22} {format_bytes(total_physical)}")
+    print(f"  {'Global logical size':<22} {format_bytes(acc.total_logical)}")
+    print(f"  {'Global physical used':<22} {format_bytes(acc.total_physical)}")
     print(f"  {'Net block delta':<22} {BOLD_YELLOW}{format_bytes(space_delta)}{RESET}")
     print(f"\n  {BOLD_WHITE}4-Tier Size Histogram{RESET}\n")
-    for _, row in histogram.iterrows():
-        print(f"  {row['size_bracket']}")
-        print(f"    Files     : {row['file_count']:,}")
-        print(f"    Logical   : {format_bytes(row['logical_bytes'])}"
-              f"  |  Physical : {format_bytes(row['physical_bytes'])}")
+    for bracket in sorted(SIZE_BRACKETS, key=SIZE_BRACKETS.get):
+        count = acc.bracket_counts[bracket]
+        logical = acc.bracket_logical[bracket]
+        physical = acc.bracket_physical[bracket]
+        print(f"  {bracket}")
+        print(f"    Files     : {count:,}")
+        print(f"    Logical   : {format_bytes(logical)}  |  Physical : {format_bytes(physical)}")
         print(f"  {'─' * 60}")
     print(f"\n{_hr()}\n")
     return 0
@@ -426,44 +629,26 @@ def run_show_capacity(ctx: ToolContext) -> int:
 
 def run_show_cold_files(ctx: ToolContext, num_days: int) -> int:
     """Cold data and waste efficiency analysis."""
-    logger.info("Querying catalog for cold-file analysis (%s-day threshold)", num_days)
-    df = fetch_catalog_df(
-        ctx, ["name", "parent_path", "size", "mtime", "extension", "element_type"],
-    )
-    df_files = df[df["element_type"] == "FILE"].copy()
-    if df_files.empty:
+    logger.info("Streaming cold-file analysis (%s-day threshold, batch mode)", num_days)
+    acc = stream_cold_files_profile(ctx, num_days)
+    if acc.total_files == 0:
         logger.warning("No files found under %s", ctx.catalog_prefix)
         return 0
 
-    df_files["mtime_dt"] = pd.to_datetime(df_files["mtime"], unit="ms", errors="coerce")
-    df_files["age_days"] = (pd.Timestamp.now() - df_files["mtime_dt"]).dt.days
-
-    cold_mask = df_files["age_days"] > num_days
-    scrap_mask = (
-        df_files["extension"].isin([e.lstrip(".") for e in WASTE_EXTENSIONS])
-        | df_files["name"].str.endswith(WASTE_EXTENSIONS, na=False)
-    )
-    df_cold = df_files[cold_mask]
-    df_scraps = df_files[scrap_mask]
-
-    total_files = len(df_files)
-    total_footprint = df_files["size"].sum()
-    df_waste = df_files[cold_mask | scrap_mask]
-    waste_size = df_waste["size"].sum()
-    clean_size = total_footprint - waste_size
-    efficiency = (clean_size / total_footprint * 100) if total_footprint else 100.0
+    clean_size = acc.total_footprint - acc.waste_size
+    efficiency = (clean_size / acc.total_footprint * 100) if acc.total_footprint else 100.0
 
     _report_header("DATA RETENTION & EFFICIENCY ANALYSIS")
     print(f"\n  {'Catalog prefix':<22} {CYAN}{ctx.catalog_prefix}{RESET}")
     print(f"  {'Cold threshold':<22} {num_days} days")
-    print(f"  {'Total files':<22} {total_files:,}")
-    print(f"  {'Total footprint':<22} {format_bytes(total_footprint)}")
+    print(f"  {'Total files':<22} {acc.total_files:,}")
+    print(f"  {'Total footprint':<22} {format_bytes(acc.total_footprint)}")
     print(f"\n  {BOLD_WHITE}Rule 1 — Cold data (>{num_days} days unmodified){RESET}")
-    print(f"    Count : {len(df_cold):,}   Volume : {format_bytes(df_cold['size'].sum())}")
+    print(f"    Count : {acc.cold_count:,}   Volume : {format_bytes(acc.cold_size)}")
     print(f"\n  {BOLD_WHITE}Rule 2 — Orphaned scraps (.tmp, .bak, .log){RESET}")
-    print(f"    Count : {len(df_scraps):,}   Volume : {format_bytes(df_scraps['size'].sum())}")
+    print(f"    Count : {acc.scrap_count:,}   Volume : {format_bytes(acc.scrap_size)}")
     print(f"\n  {BOLD_WHITE}Summary{RESET}")
-    print(f"    Waste candidates : {len(df_waste):,} files / {format_bytes(waste_size)}")
+    print(f"    Waste candidates : {acc.waste_count:,} files / {format_bytes(acc.waste_size)}")
     print(f"    Optimal footprint: {format_bytes(clean_size)}")
     print(f"    Efficiency ratio : {BOLD_GREEN}{efficiency:.2f}%{RESET}")
     print(f"\n{_hr()}\n")
@@ -476,43 +661,30 @@ def run_show_cold_files(ctx: ToolContext, num_days: int) -> int:
 
 def run_analysis_by_owner(ctx: ToolContext, uid: int | None) -> int:
     """POSIX owner consumption and world-writable exposure report."""
-    logger.info("Running security audit under %s", ctx.catalog_prefix)
-    df = fetch_catalog_df(
-        ctx,
-        ["name", "parent_path", "size", "uid", "owner_name", "nfs_mode_bits", "element_type"],
-    )
-    df_files = df[df["element_type"] == "FILE"].copy()
-    if uid is not None:
-        df_files = df_files[df_files["uid"] == uid]
-    if df_files.empty:
+    logger.info("Streaming security audit under %s (batch mode)", ctx.catalog_prefix)
+    acc = stream_security_profile(ctx, uid)
+    if acc.file_count == 0:
         logger.warning("No files matched owner filter.")
         return 0
 
-    df_files["perm_bits"] = df_files["nfs_mode_bits"].fillna(0).astype(int) & 0o777
-    df_files["perm_octal"] = df_files["perm_bits"].apply(lambda x: format(x, "o").zfill(3))
-    df_exposed = df_files[(df_files["perm_bits"] & 0o002) > 0]
-
-    owner_summary = (
-        df_files.groupby("owner_name")
-        .agg(file_count=("name", "count"), total_bytes=("size", "sum"))
-        .reset_index()
-        .sort_values("total_bytes", ascending=False)
+    owner_rows = sorted(
+        acc.owner_bytes.items(), key=lambda item: item[1], reverse=True,
     )
 
     _report_header("SECURITY & PERMISSIONS BY OWNER")
     if uid is not None:
         print(f"\n  {DIM}Filtered to UID {uid}{RESET}")
     print(f"\n  {BOLD_WHITE}Storage by POSIX owner{RESET}\n")
-    for _, row in owner_summary.iterrows():
-        print(f"  {row['owner_name']:<16}  {row['file_count']:>8,} files"
-              f"  {format_bytes(row['total_bytes']):>12}")
+    for owner_name, total_bytes in owner_rows:
+        print(f"  {owner_name:<16}  {acc.owner_counts[owner_name]:>8,} files"
+              f"  {format_bytes(total_bytes):>12}")
     print(f"\n  {BOLD_WHITE}World-writable exposures (o+w){RESET}")
-    print(f"  High-risk files : {BOLD_RED}{len(df_exposed):,}{RESET}")
-    if not df_exposed.empty:
-        print(f"\n  {DIM}Top 5 exposures:{RESET}\n")
-        for _, row in df_exposed.head(5).iterrows():
-            short = clean_catalog_path(row["parent_path"], ctx.catalog_prefix)
-            print(f"  [{row['perm_octal']}] {row['name']:<30}  {short}")
+    print(f"  High-risk files : {BOLD_RED}{acc.exposed_count:,}{RESET}")
+    if acc.exposed_samples:
+        print(f"\n  {DIM}Sample exposures (up to 5):{RESET}\n")
+        for sample in acc.exposed_samples:
+            short = clean_catalog_path(sample["parent_path"], ctx.catalog_prefix)
+            print(f"  [{sample['perm_octal']}] {sample['name']:<30}  {short}")
     else:
         print(f"  {GREEN}No world-writable files detected.{RESET}")
     print(f"\n{_hr()}\n")
@@ -595,45 +767,45 @@ def run_update_quotas(ctx: ToolContext, brief: bool, vms_password: str | None) -
 
 def run_search(ctx: ToolContext, args: argparse.Namespace) -> int:
     """Multi-dimensional catalog metadata search."""
-    predicate = _.parent_path.startswith(ctx.catalog_prefix)
+    predicate = ibis_col.parent_path.startswith(ctx.catalog_prefix)
     if args.name:
-        predicate = predicate & _.name.contains(args.name)
+        predicate = predicate & ibis_col.name.contains(args.name)
     if args.ext:
-        predicate = predicate & (_.extension == args.ext.lstrip("."))
+        predicate = predicate & (ibis_col.extension == args.ext.lstrip("."))
     if args.type:
-        predicate = predicate & (_.element_type == args.type.upper())
+        predicate = predicate & (ibis_col.element_type == args.type.upper())
     if args.user:
-        predicate = predicate & (_.owner_name == args.user)
+        predicate = predicate & (ibis_col.owner_name == args.user)
     if args.group:
-        predicate = predicate & (_.group_name == args.group)
+        predicate = predicate & (ibis_col.group_name == args.group)
     if args.uid is not None:
-        predicate = predicate & (_.uid == args.uid)
+        predicate = predicate & (ibis_col.uid == args.uid)
     if args.gid is not None:
-        predicate = predicate & (_.gid == args.gid)
+        predicate = predicate & (ibis_col.gid == args.gid)
     if args.mode:
         dec_mode = int(args.mode, 8) if args.mode.startswith("0") or len(args.mode) == 3 else int(args.mode)
-        predicate = predicate & (_.nfs_mode_bits == dec_mode)
+        predicate = predicate & (ibis_col.nfs_mode_bits == dec_mode)
     if args.min_size:
-        predicate = predicate & (_.size >= parse_human_size(args.min_size))
+        predicate = predicate & (ibis_col.size >= parse_human_size(args.min_size))
     if args.min_physical:
-        predicate = predicate & (_.used >= parse_human_size(args.min_physical))
+        predicate = predicate & (ibis_col.used >= parse_human_size(args.min_physical))
     if args.sparse:
-        predicate = predicate & (_.size > _.used)
+        predicate = predicate & (ibis_col.size > ibis_col.used)
     now_ns = int(datetime.now().timestamp() * 1e9)
     if args.mmin:
-        predicate = predicate & (_.mtime >= (now_ns - int(args.mmin) * 60 * 1e9))
+        predicate = predicate & (ibis_col.mtime >= (now_ns - int(args.mmin) * 60 * 1e9))
     if args.amin:
-        predicate = predicate & (_.atime >= (now_ns - int(args.amin) * 60 * 1e9))
+        predicate = predicate & (ibis_col.atime >= (now_ns - int(args.amin) * 60 * 1e9))
     if args.cmin:
-        predicate = predicate & (_.ctime >= (now_ns - int(args.cmin) * 60 * 1e9))
+        predicate = predicate & (ibis_col.ctime >= (now_ns - int(args.cmin) * 60 * 1e9))
     if args.crmin:
-        predicate = predicate & (_.crtime >= (now_ns - int(args.crmin) * 60 * 1e9))
+        predicate = predicate & (ibis_col.crtime >= (now_ns - int(args.crmin) * 60 * 1e9))
     if args.depth is not None:
-        predicate = predicate & (_.path_depth == args.depth)
+        predicate = predicate & (ibis_col.path_depth == args.depth)
     if args.links is not None:
-        predicate = predicate & (_.num_links == args.links)
+        predicate = predicate & (ibis_col.num_links == args.links)
     if args.inode is not None:
-        predicate = predicate & (_.file_id == args.inode)
+        predicate = predicate & (ibis_col.file_id == args.inode)
 
     projection = [
         "name", "parent_path", "size", "used", "extension", "element_type",
@@ -665,7 +837,7 @@ def run_search(ctx: ToolContext, args: argparse.Namespace) -> int:
     else:
         print(f"\n  {'TYPE':<6} {'OWNER':<10} {'GROUP':<10} {'NAME':<32} {'LOGICAL':<10} {'PHYSICAL'}")
         print(f"  {'─' * 88}")
-        for _, row in df_display.iterrows():
+        for row_idx, row in df_display.iterrows():
             name = row["name"] if len(row["name"]) <= 32 else row["name"][:29] + "..."
             print(
                 f"  {row['element_type']:<6} {str(row['owner_name']):<10} {str(row['group_name']):<10}"
@@ -692,7 +864,7 @@ def _download_stream(url: str, target_path: str) -> None:
 
 def _seed_dummy_waste(target_dir: str, intensity_pct: int = 8) -> int:
     subdirs = []
-    for root, dirs, _ in os.walk(target_dir):
+    for root, dirs, walk_files in os.walk(target_dir):
         subdirs.extend(os.path.join(root, d) for d in dirs)
     if not subdirs:
         return 0

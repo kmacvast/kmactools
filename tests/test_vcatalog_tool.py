@@ -228,6 +228,31 @@ class TestIterateCatalogBatches(unittest.TestCase):
         batches = list(tool.iterate_catalog_batches(ctx, ["size"]))
         self.assertEqual(len(batches), 1)
         self.assertEqual(batches[0].num_rows, 1)
+        reader.close.assert_called_once()
+
+    @patch.object(tool, "connect_catalog")
+    def test_early_consumer_break_closes_reader(self, mock_connect):
+        batches = [
+            pa.record_batch({"size": pa.array([idx], type=pa.int64())})
+            for idx in range(5)
+        ]
+        reader = MagicMock()
+        reader.read_next_batch.side_effect = batches + [StopIteration()]
+
+        mock_tx = MagicMock()
+        mock_tx.catalog.return_value.select.return_value = reader
+        mock_session = MagicMock()
+        mock_session.transaction.return_value.__enter__.return_value = mock_tx
+        mock_connect.return_value = mock_session
+
+        ctx = tool.ToolContext(
+            config={}, config_path="/tmp/cfg", catalog_prefix="/kmacs/vast-catalog",
+            mount_path="/mnt/test", bucket_name="b", vms_address="vms", vms_user="admin",
+        )
+        gen = tool.iterate_catalog_batches(ctx, ["size"])
+        next(gen)
+        gen.close()
+        reader.close.assert_called_once()
 
 
 class TestSearchSchemaMapping(unittest.TestCase):
@@ -245,12 +270,14 @@ class TestSearchSchemaMapping(unittest.TestCase):
         self.assertNotIn("file_id", src)
         stream_src = inspect.getsource(tool.stream_search_dataframe)
         self.assertIn("stream_search_dataframe", src)
-        self.assertIn("iterate_catalog_batches", stream_src)
+        self.assertIn("session.transaction()", stream_src)
+        self.assertIn("GeneratorExit", stream_src)
+        self.assertIn("_close_catalog_reader", stream_src)
 
 
 class TestStreamSearch(unittest.TestCase):
-    @patch.object(tool, "iterate_catalog_batches")
-    def test_sparse_search_stops_at_limit(self, mock_iter):
+    @patch.object(tool, "connect_catalog")
+    def test_sparse_search_stops_at_limit(self, mock_connect):
         batches = [
             pa.record_batch({
                 "name": pa.array([f"f{idx}" for idx in range(10)]),
@@ -265,7 +292,14 @@ class TestStreamSearch(unittest.TestCase):
             })
             for _ in range(20)
         ]
-        mock_iter.return_value = iter(batches)
+        reader = MagicMock()
+        reader.read_next_batch.side_effect = batches + [StopIteration()]
+
+        mock_tx = MagicMock()
+        mock_tx.catalog.return_value.select.return_value = reader
+        mock_session = MagicMock()
+        mock_session.transaction.return_value.__enter__.return_value = mock_tx
+        mock_connect.return_value = mock_session
 
         ctx = tool.ToolContext(
             config={}, config_path="/tmp/cfg", catalog_prefix="/kmacs/vast-catalog",
@@ -278,7 +312,8 @@ class TestStreamSearch(unittest.TestCase):
         df, early_exit = tool.stream_search_dataframe(ctx, projection, None, args)
         self.assertTrue(early_exit)
         self.assertEqual(len(df), 5)
-        self.assertEqual(mock_iter.call_count, 1)
+        self.assertGreaterEqual(reader.close.call_count, 1)
+        mock_connect.assert_called_once()
 
 
 class TestParallelCatalogAggregate(unittest.TestCase):

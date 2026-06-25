@@ -5,7 +5,7 @@
 #              and S3 tag mutation tool consolidating 12 legacy scripts.
 #
 # Author: KMac kmac@vastdata.com
-# Version: 1.3.5
+# Version: 1.3.6
 ################################################################################
 
 from __future__ import annotations
@@ -233,6 +233,15 @@ def connect_catalog(ctx: ToolContext):
     )
 
 
+def _close_catalog_reader(reader: Any) -> None:
+    """Close a PyArrow RecordBatchReader without raising on cleanup errors."""
+    if hasattr(reader, "close"):
+        try:
+            reader.close()
+        except Exception:
+            pass
+
+
 def iterate_catalog_batches(
     ctx: ToolContext, columns: list[str], predicate=None,
 ):
@@ -252,19 +261,32 @@ def iterate_catalog_batches(
     try:
         with session.transaction() as tx:
             reader = tx.catalog().select(columns=columns, predicate=predicate)
-            if hasattr(reader, "read_next_batch"):
-                while True:
-                    try:
-                        batch = reader.read_next_batch()
-                    except StopIteration:
-                        break
-                    if batch is None or batch.num_rows == 0:
-                        break
-                    yield batch
-            else:
-                for batch in reader:
-                    if batch.num_rows > 0:
-                        yield batch
+            try:
+                if hasattr(reader, "read_next_batch"):
+                    while True:
+                        try:
+                            batch = reader.read_next_batch()
+                        except StopIteration:
+                            break
+                        if batch is None or batch.num_rows == 0:
+                            break
+                        try:
+                            yield batch
+                        except GeneratorExit:
+                            break
+                else:
+                    for batch in reader:
+                        if batch.num_rows > 0:
+                            try:
+                                yield batch
+                            except GeneratorExit:
+                                break
+            except GeneratorExit:
+                pass
+            finally:
+                _close_catalog_reader(reader)
+    except GeneratorExit:
+        pass
     except Exception as exc:
         logger.error("Error streaming catalog batches: %s", exc)
         raise
@@ -1358,24 +1380,64 @@ def stream_search_dataframe(
     match_count = 0
     early_exit = False
 
-    for batch in iterate_catalog_batches(ctx, projection, predicate):
-        chunk = _apply_client_search_filters(batch.to_pandas(), args)
-        if chunk.empty:
-            continue
+    session = connect_catalog(ctx)
+    with session.transaction() as tx:
+        reader = tx.catalog().select(columns=projection, predicate=predicate)
+        try:
+            if hasattr(reader, "read_next_batch"):
+                while True:
+                    try:
+                        batch = reader.read_next_batch()
+                    except StopIteration:
+                        break
+                    if batch is None or batch.num_rows == 0:
+                        break
 
-        if early_exit_enabled:
-            remaining = limit - match_count
-            if len(chunk) >= remaining:
-                collected.append(chunk.head(remaining))
-                match_count = limit
-                early_exit = True
-                break
-            collected.append(chunk)
-            match_count += len(chunk)
-            continue
+                    chunk = _apply_client_search_filters(batch.to_pandas(), args)
+                    if chunk.empty:
+                        continue
 
-        collected.append(chunk)
-        match_count += len(chunk)
+                    if early_exit_enabled:
+                        remaining = limit - match_count
+                        if len(chunk) >= remaining:
+                            collected.append(chunk.head(remaining))
+                            match_count = limit
+                            early_exit = True
+                            _close_catalog_reader(reader)
+                            break
+                        collected.append(chunk)
+                        match_count += len(chunk)
+                        continue
+
+                    collected.append(chunk)
+                    match_count += len(chunk)
+            else:
+                for batch in reader:
+                    if batch is None or batch.num_rows == 0:
+                        continue
+
+                    chunk = _apply_client_search_filters(batch.to_pandas(), args)
+                    if chunk.empty:
+                        continue
+
+                    if early_exit_enabled:
+                        remaining = limit - match_count
+                        if len(chunk) >= remaining:
+                            collected.append(chunk.head(remaining))
+                            match_count = limit
+                            early_exit = True
+                            _close_catalog_reader(reader)
+                            break
+                        collected.append(chunk)
+                        match_count += len(chunk)
+                        continue
+
+                    collected.append(chunk)
+                    match_count += len(chunk)
+        except GeneratorExit:
+            pass
+        finally:
+            _close_catalog_reader(reader)
 
     if not collected:
         return pd.DataFrame(columns=projection), early_exit
@@ -1811,7 +1873,7 @@ def print_about() -> None:
     """Print customer-facing VAST platform guide tied to each CLI option."""
     width = MATRIX_WIDTH
     print(_matrix_hr())
-    print(f" {BOLD_GREEN}VAST DATA PLATFORM GUIDE — VCATALOG_TOOL REFERENCE (v1.3.5){RESET}")
+    print(f" {BOLD_GREEN}VAST DATA PLATFORM GUIDE — VCATALOG_TOOL REFERENCE (v1.3.6){RESET}")
     print(_matrix_hr())
 
     print(

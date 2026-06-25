@@ -1103,24 +1103,6 @@ def print_path_translation_matrix(coords: PathCoordinates) -> None:
     print(_matrix_hr())
 
 
-def print_drr_profiler_report(
-    target_path: str, file_count: int, total_logical: int, total_physical: int,
-) -> None:
-    """Render the directory data reduction profiler summary."""
-    drr, savings = compute_drr_metrics(total_logical, total_physical)
-    print(_matrix_hr())
-    print("                 VAST CATALOG: DIRECTORY DATA REDUCTION PROFILER")
-    print(_matrix_hr())
-    print(f" Target Target Path    : {target_path}")
-    print(f" Total Files Profiled  : {file_count:,}")
-    print(f" Logical Dataset Mass  : {format_bytes(total_logical)}")
-    print(f" Physical Block Space  : {format_bytes(total_physical)}")
-    print(" " + "-" * 86)
-    print(f" VAST Global Similarity Data Reduction Ratio : {drr}")
-    print(f" Net Storage Space Saved Overhead            : {savings}")
-    print(_matrix_hr())
-
-
 def run_translate_path(ctx: ToolContext, input_path: str) -> int:
     """Translate a path across NFS, catalog, and S3 protocol views."""
     try:
@@ -1132,33 +1114,6 @@ def run_translate_path(ctx: ToolContext, input_path: str) -> int:
         return 1
     print()
     print_path_translation_matrix(coords)
-    print()
-    return 0
-
-
-def run_show_data_reduction(ctx: ToolContext, input_path: str) -> int:
-    """Profile logical vs physical consumption for a catalog subtree."""
-    try:
-        catalog_target = normalize_to_catalog_path(
-            input_path, ctx.mount_path, ctx.catalog_prefix,
-        )
-    except ValueError as exc:
-        print(f"\n{BOLD_RED}Error:{RESET} {exc}\n")
-        return 1
-
-    logger.info("Profiling data reduction under %s", catalog_target)
-    df = fetch_catalog_df(
-        ctx,
-        ["name", "parent_path", "size", "used", "element_type"],
-        predicate=ibis_col.parent_path.startswith(catalog_target),
-    )
-    df_files = df[df["element_type"] == "FILE"]
-    total_logical = int(df_files["size"].sum())
-    total_physical = int(df_files["used"].sum())
-    file_count = len(df_files)
-
-    print()
-    print_drr_profiler_report(catalog_target, file_count, total_logical, total_physical)
     print()
     return 0
 
@@ -1956,14 +1911,6 @@ def print_about() -> None:
                 "--show-cold-files --num-days 90",
             ),
             _format_detailed_option(
-                "--show-data-reduction PATH",
-                "Quick logical-vs-physical DRR snapshot for one directory.",
-                "Reads catalog size/used totals under a subtree to show effective reduction on\n"
-                "that dataset. Useful when explaining to application owners how much flash their\n"
-                "project actually consumes versus what their apps report.",
-                "./vcatalog_tool.py --show-data-reduction /kmacs/vast-catalog/workspace_1",
-            ),
-            _format_detailed_option(
                 "--show-data-reduction-rates",
                 "Deep-dive the three Global Data Reduction pillars for a directory.",
                 "Queries VMS GET /api/capacity/ for logical → unique → usable tiers, then breaks\n"
@@ -2171,7 +2118,6 @@ def build_parser() -> argparse.ArgumentParser:
             "  %(prog)s --seed-bulk --copies 3\n"
             "  %(prog)s --show-schema\n"
             "  %(prog)s --translate-path /mnt/kmacs-root/vast-catalog/workspace_1/file.JPEG\n"
-            "  %(prog)s --show-data-reduction /kmacs/vast-catalog/workspace_1\n"
             "  %(prog)s --show-data-reduction-rates --directory /kmacs/vast-catalog/workspace_1\n"
             "  %(prog)s --add-s3-tag 'owner=team' --s3-target /mnt/.../file.tmp\n"
             "\nRun with --about for a VAST platform education guide.\n"
@@ -2204,10 +2150,6 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--copy-infinitely", action="store_true", help="Infinite dictionary-driven copy loop")
     mode.add_argument("--show-schema", action="store_true", help="Print catalog arrow_schema columns")
     mode.add_argument("--translate-path", type=str, metavar="PATH", help="Cross-protocol path translation")
-    mode.add_argument(
-        "--show-data-reduction", type=str, metavar="PATH",
-        help="Directory DRR profiler for a catalog or mount path",
-    )
     mode.add_argument(
         "--show-data-reduction-rates", action="store_true",
         help="Multi-pillar dedup/similarity/compression savings dashboard",
@@ -2291,8 +2233,6 @@ def main(argv: list[str] | None = None) -> int:
         return run_show_schema(ctx)
     if args.translate_path:
         return run_translate_path(ctx, args.translate_path)
-    if args.show_data_reduction:
-        return run_show_data_reduction(ctx, args.show_data_reduction)
     if args.show_data_reduction_rates:
         return run_show_data_reduction_rates(ctx, args.directories, args.vms_password)
 

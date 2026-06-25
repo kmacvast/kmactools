@@ -545,11 +545,6 @@ class TestNewArgparseModes(unittest.TestCase):
         args = parser.parse_args(["--translate-path", "/mnt/kmacs-root/vast-catalog/foo.txt"])
         self.assertEqual(args.translate_path, "/mnt/kmacs-root/vast-catalog/foo.txt")
 
-    def test_show_data_reduction_mode(self):
-        parser = tool.build_parser()
-        args = parser.parse_args(["--show-data-reduction", "/kmacs/vast-catalog/workspace_1"])
-        self.assertEqual(args.show_data_reduction, "/kmacs/vast-catalog/workspace_1")
-
     def test_show_data_reduction_rates_mode(self):
         parser = tool.build_parser()
         args = parser.parse_args([

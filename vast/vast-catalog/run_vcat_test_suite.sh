@@ -83,42 +83,36 @@ print_test_header "6" "POSIX Identity Capacity Allocation & World-Writable Risk 
 eval $CMD
 print_test_footer
 
-# --- TEST 7: Single Directory Data Reduction Ratio ---
-CMD="${TOOL_EXEC} --show-data-reduction /kmacs/vast-catalog/workspace_1"
-print_test_header "7" "Subtree DRR Profile Snapshot (Catalog Size vs Used Bytes)" "$CMD"
-eval $CMD
-print_test_footer
-
-# --- TEST 8: VMS REST API Three-Pillar Reduction Dashboard ---
+# --- TEST 7: VMS REST API Three-Pillar Reduction Dashboard ---
 CMD="${TOOL_EXEC} --show-data-reduction-rates --directory /kmacs/vast-catalog/workspace_1"
-print_test_header "8" "VMS API Core Probe: Unique vs Usable Tiers (Dedup, Similarity, Compression)" "$CMD"
+print_test_header "7" "VMS API Core Probe: Unique vs Usable Tiers (Dedup, Similarity, Compression)" "$CMD"
 eval $CMD
 print_test_footer
 
-# --- TEST 9: Cross-Protocol Path Translation ---
+# --- TEST 8: Cross-Protocol Path Translation ---
 CMD="${TOOL_EXEC} --translate-path ${SAMPLE_FILE}"
-print_test_header "9" "Cross-Protocol Coordinate Mapper (NFS Mount -> Catalog Prefix -> S3 Key)" "$CMD"
+print_test_header "8" "Cross-Protocol Coordinate Mapper (NFS Mount -> Catalog Prefix -> S3 Key)" "$CMD"
 eval $CMD
 print_test_footer
 
-# --- TEST 10: Multi-Protocol S3 Object Tag Mutation Lifecycle ---
+# --- TEST 9: Multi-Protocol S3 Object Tag Mutation Lifecycle ---
 CMD="${TOOL_EXEC} --add-s3-tag 'project=alpha_demo' --s3-target ${SAMPLE_FILE} && ${TOOL_EXEC} --modify-s3-tag 'project=beta_demo' --s3-target ${SAMPLE_FILE} && ${TOOL_EXEC} --delete-s3-tag 'project' --s3-target ${SAMPLE_FILE}"
-print_test_header "10" "S3 Protocol API Mutation Lifecycle (Put, Modify, Delete Object Tagging)" "$CMD"
+print_test_header "9" "S3 Protocol API Mutation Lifecycle (Put, Modify, Delete Object Tagging)" "$CMD"
 eval $CMD
 print_test_footer
 
-# --- TEST 11: Search Core - Early-Exit Client-Side Sparse Query ---
+# --- TEST 10: Search Core - Early-Exit Client-Side Sparse Query ---
 CMD="${TOOL_EXEC} --search --sparse --limit 5"
-print_test_header "11" "Search Engine: Early-Exit Streamed Client Filter (Logical > Physical)" "$CMD"
+print_test_header "10" "Search Engine: Early-Exit Streamed Client Filter (Logical > Physical)" "$CMD"
 eval $CMD
 print_test_footer
 
-# --- TEST 12: Search Core - Chrono Time-Aging Constraints ---
+# --- TEST 11: Search Core - Chrono Time-Aging Constraints ---
 CMD="${TOOL_EXEC} --search --ext locked --mmin 1440 --user vastdata --type file --limit 5"
-print_test_header "12" "Search Engine: Multi-Dimensional Server-Side Pushdown Combination Query" "$CMD"
+print_test_header "11" "Search Engine: Multi-Dimensional Server-Side Pushdown Combination Query" "$CMD"
 eval $CMD
 print_test_footer
 
 echo -e "${GREEN}========================================================================================${RESET}"
-echo -e "                 ${BOLD_WHITE}ALL 12 EXTENDED DIAGNOSTIC AUDIT TASKS INITIALIZED SUCCESSFULY${RESET}"
+echo -e "                 ${BOLD_WHITE}ALL 11 EXTENDED DIAGNOSTIC AUDIT TASKS INITIALIZED SUCCESSFULY${RESET}"
 echo -e "${GREEN}========================================================================================${RESET}"

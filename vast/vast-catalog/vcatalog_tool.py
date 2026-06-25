@@ -5,7 +5,7 @@
 #              and S3 tag mutation tool consolidating 12 legacy scripts.
 #
 # Author: KMac kmac@vastdata.com
-# Version: 1.3.4
+# Version: 1.3.5
 ################################################################################
 
 from __future__ import annotations
@@ -40,15 +40,23 @@ import urllib3
 import vastdb
 from ibis import _ as ibis_col
 
-_KMACTOOLS_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-if _KMACTOOLS_ROOT not in sys.path:
-    sys.path.insert(0, _KMACTOOLS_ROOT)
-from vast.common.utils import load_vast_config
-
 urllib3.disable_warnings()
 
 # --- Defaults ---
 DEFAULT_CONFIG_PATH = os.path.expanduser("~/.vast-catalog-config.json")
+CATALOG_CONFIG_KEYS = (
+    "vast_endpoint",
+    "access_key",
+    "secret_key",
+    "vms_address",
+    "vms_user",
+    "vms_password",
+    "vms_token",
+    "tenant",
+    "mount_path",
+    "bucket_name",
+    "catalog_prefix",
+)
 STREAM_WORKERS = min(32, max(4, (os.cpu_count() or 4) * 2))
 DEFAULT_CATALOG_PREFIX = "/kmacs/vast-catalog"
 DEFAULT_MOUNT_PATH = "/mnt/kmacs-root/vast-catalog"
@@ -122,26 +130,53 @@ class ToolContext:
 
 def load_config(config_path: str) -> dict:
     """Load JSON config; exit on missing or corrupt file."""
-    if not os.path.exists(config_path):
-        print(f"\n{BOLD_RED}Configuration Error{RESET}: Missing {config_path}\n")
+    full_path = os.path.expanduser(config_path)
+    if not os.path.exists(full_path):
+        print(f"\n{BOLD_RED}Configuration Error{RESET}: Missing {full_path}\n")
         sys.exit(1)
-    with open(config_path, "r", encoding="utf-8") as fh:
+    with open(full_path, "r", encoding="utf-8") as fh:
         try:
-            return json.load(fh)
+            raw = json.load(fh)
         except json.JSONDecodeError:
-            print(f"\n{BOLD_RED}Configuration Error{RESET}: Invalid JSON in {config_path}\n")
+            print(f"\n{BOLD_RED}Configuration Error{RESET}: Invalid JSON in {full_path}\n")
             sys.exit(1)
+    return normalize_catalog_config(raw)
+
+
+def normalize_catalog_config(raw: dict[str, Any]) -> dict[str, Any]:
+    """Normalize ~/.vast-catalog-config.json into canonical tool keys.
+
+    Accepts legacy alias keys (vms, user, password, token) and normalizes tenant
+    for Global Admin auth when blank or 'default'.
+
+    Args:
+        raw: Parsed JSON object from the catalog config file.
+
+    Returns:
+        Normalized configuration dictionary used by all tool modes.
+    """
+    cfg = dict(raw)
+    raw_tenant = str(cfg.get("tenant") or "").strip()
+    cfg["tenant"] = raw_tenant if raw_tenant and raw_tenant.lower() != "default" else None
+    cfg["vms_address"] = cfg.get("vms_address") or cfg.get("vms") or DEFAULT_VMS_ADDRESS
+    cfg["vms_user"] = cfg.get("vms_user") or cfg.get("user") or DEFAULT_VMS_USER
+    cfg["vms_password"] = cfg.get("vms_password") or cfg.get("password")
+    cfg["vms_token"] = cfg.get("vms_token") or cfg.get("token")
+    cfg.setdefault("mount_path", DEFAULT_MOUNT_PATH)
+    cfg.setdefault("bucket_name", DEFAULT_BUCKET)
+    cfg.setdefault("catalog_prefix", DEFAULT_CATALOG_PREFIX)
+    return cfg
 
 
 def build_context(args: argparse.Namespace) -> ToolContext:
-    """Merge CLI overrides with config file values."""
+    """Merge CLI overrides with ~/.vast-catalog-config.json values."""
     config_path = args.config or DEFAULT_CONFIG_PATH
     config = load_config(config_path)
     mount = args.mount_path or config.get("mount_path") or DEFAULT_MOUNT_PATH
     return ToolContext(
         config=config,
-        config_path=config_path,
-        catalog_prefix=args.catalog_prefix or DEFAULT_CATALOG_PREFIX,
+        config_path=os.path.expanduser(config_path),
+        catalog_prefix=args.catalog_prefix or config.get("catalog_prefix") or DEFAULT_CATALOG_PREFIX,
         mount_path=mount.rstrip("/"),
         bucket_name=config.get("bucket_name") or DEFAULT_BUCKET,
         vms_address=config.get("vms_address") or DEFAULT_VMS_ADDRESS,
@@ -687,10 +722,10 @@ def compute_drr_metrics(total_logical: int, total_physical: int) -> tuple[str, s
 def resolve_vms_credentials(
     ctx: ToolContext, vms_password: str | None = None,
 ) -> dict[str, Any]:
-    """Resolve VMS REST credentials; prefer ~/.vastconf over catalog config.
+    """Resolve VMS REST credentials from ~/.vast-catalog-config.json only.
 
     Args:
-        ctx: Resolved tool context.
+        ctx: Resolved tool context (config already normalized).
         vms_password: Optional CLI/env override for the VMS password.
 
     Returns:
@@ -699,38 +734,22 @@ def resolve_vms_credentials(
     Raises:
         ValueError: When neither token nor password is available.
     """
-    vastconf: dict[str, Any] = {}
-    try:
-        vastconf = load_vast_config("~/.vastconf")
-    except FileNotFoundError:
-        pass
-
     cfg = ctx.config
-    if vastconf:
-        address = vastconf.get("vms") or vastconf.get("vms_address") or cfg.get("vms_address") or ctx.vms_address
-        user = vastconf.get("user") or vastconf.get("vms_user") or cfg.get("vms_user") or ctx.vms_user
-        token = vastconf.get("token")
-        password = vastconf.get("password") or cfg.get("vms_password")
-        tenant = vastconf.get("tenant")
-    else:
-        address = cfg.get("vms_address") or ctx.vms_address
-        user = cfg.get("vms_user") or ctx.vms_user
-        token = cfg.get("token")
-        password = cfg.get("vms_password")
-        tenant = cfg.get("tenant")
+    address = cfg.get("vms_address") or ctx.vms_address
+    user = cfg.get("vms_user") or ctx.vms_user
+    token = cfg.get("vms_token")
+    password = cfg.get("vms_password")
+    tenant = cfg.get("tenant")
 
     password = vms_password or os.environ.get("VMS_PASSWORD") or password
     if not password and not token:
         import getpass
         password = getpass.getpass("VMS password: ")
 
-    if not tenant or str(tenant).lower() == "default":
-        tenant = None
-
     if not token and not password:
         raise ValueError(
-            "VMS credentials missing: configure token or user/password in "
-            "~/.vastconf or pass --vms-password"
+            "VMS credentials missing in "
+            f"{ctx.config_path}: set vms_token or vms_password (or pass --vms-password)"
         )
 
     return {
@@ -743,7 +762,7 @@ def resolve_vms_credentials(
 
 
 def get_vastpy_client(ctx: ToolContext, vms_password: str | None = None) -> Any:
-    """Build an authenticated vastpy client from ~/.vastconf or catalog config."""
+    """Build an authenticated vastpy client from ~/.vast-catalog-config.json."""
     from vastpy import VASTClient
 
     creds = resolve_vms_credentials(ctx, vms_password)
@@ -1267,11 +1286,16 @@ def run_analysis_by_owner(ctx: ToolContext, uid: int | None) -> int:
 # Mode: --update-quotas
 # ---------------------------------------------------------------------------
 
-def _vastpy_cli(ctx: ToolContext, *cli_args: str, env: dict | None = None) -> subprocess.CompletedProcess:
-    """Run vastpy-cli with VMS credentials from environment/config."""
+def _vastpy_cli(
+    ctx: ToolContext, *cli_args: str, env: dict | None = None, vms_password: str | None = None,
+) -> subprocess.CompletedProcess:
+    """Run vastpy-cli with VMS credentials from ~/.vast-catalog-config.json."""
+    creds = resolve_vms_credentials(ctx, vms_password)
     run_env = os.environ.copy()
-    run_env["VMS_ADDRESS"] = ctx.vms_address
-    run_env["VMS_USER"] = ctx.vms_user
+    run_env["VMS_ADDRESS"] = creds["address"]
+    run_env["VMS_USER"] = creds["user"]
+    if creds.get("password"):
+        run_env["VMS_PASSWORD"] = creds["password"]
     if env:
         run_env.update(env)
     return subprocess.run(["vastpy-cli", *cli_args], capture_output=True, text=True, env=run_env, check=False)
@@ -1279,15 +1303,17 @@ def _vastpy_cli(ctx: ToolContext, *cli_args: str, env: dict | None = None) -> su
 
 def run_update_quotas(ctx: ToolContext, brief: bool, vms_password: str | None) -> int:
     """Register workspace quotas and print allocation matrix."""
-    password = vms_password or os.environ.get("VMS_PASSWORD") or ctx.config.get("vms_password")
-    if not password:
-        import getpass
-        password = getpass.getpass("VMS password: ")
-    env = {"VMS_PASSWORD": password}
+    try:
+        resolve_vms_credentials(ctx, vms_password)
+    except ValueError as exc:
+        print(f"\n{BOLD_RED}Error:{RESET} {exc}\n")
+        return 1
 
     if not brief:
         _report_header("QUOTA REGISTRATION — STEP 1: CURRENT STATUS")
-        proc = _vastpy_cli(ctx, "get", "quotas", "fields=path,used_capacity_tb,used_inodes", env=env)
+        proc = _vastpy_cli(
+            ctx, "get", "quotas", "fields=path,used_capacity_tb,used_inodes", vms_password=vms_password,
+        )
         for line in proc.stdout.splitlines():
             if "used_inodes" in line or "kmacs" in line:
                 print(f"  {line}")
@@ -1299,7 +1325,9 @@ def run_update_quotas(ctx: ToolContext, brief: bool, vms_password: str | None) -
         (f"{ctx.catalog_prefix}/linux-2.6.11", "idx_linux"),
         (f"{ctx.catalog_prefix}/workspace_1", "idx_ws1"),
     ]:
-        _vastpy_cli(ctx, "post", "quotas", f"path={path}", f"name={name}", env=env)
+        _vastpy_cli(
+            ctx, "post", "quotas", f"path={path}", f"name={name}", vms_password=vms_password,
+        )
 
     if os.path.isdir(ctx.mount_path):
         for entry in sorted(os.listdir(ctx.mount_path)):
@@ -1308,7 +1336,8 @@ def run_update_quotas(ctx: ToolContext, brief: bool, vms_password: str | None) -
                 if not brief:
                     print(f"  Registering {entry} → {vast_path}")
                 _vastpy_cli(
-                    ctx, "post", "quotas", f"path={vast_path}", f"name=idx_{entry}", env=env,
+                    ctx, "post", "quotas", f"path={vast_path}", f"name=idx_{entry}",
+                    vms_password=vms_password,
                 )
     elif not brief:
         logger.warning("Mount path not accessible: %s", ctx.mount_path)
@@ -1318,7 +1347,9 @@ def run_update_quotas(ctx: ToolContext, brief: bool, vms_password: str | None) -
     time.sleep(3)
 
     _report_header("QUOTA ALLOCATION MATRIX")
-    proc = _vastpy_cli(ctx, "get", "quotas", "fields=path,used_capacity_tb,used_inodes", env=env)
+    proc = _vastpy_cli(
+        ctx, "get", "quotas", "fields=path,used_capacity_tb,used_inodes", vms_password=vms_password,
+    )
     rows = [ln for ln in proc.stdout.splitlines() if "kmacs" in ln]
     rows.sort(key=lambda ln: ln.split("|")[-1] if "|" in ln else ln)
     print(f"\n  {'used_inodes':<14} {'used_capacity_tb':<18} path")
@@ -1825,7 +1856,7 @@ def print_about() -> None:
     """Print customer-facing VAST platform guide tied to each CLI option."""
     width = MATRIX_WIDTH
     print(_matrix_hr())
-    print(f" {BOLD_GREEN}VAST DATA PLATFORM GUIDE — VCATALOG_TOOL REFERENCE (v1.3.4){RESET}")
+    print(f" {BOLD_GREEN}VAST DATA PLATFORM GUIDE — VCATALOG_TOOL REFERENCE (v1.3.5){RESET}")
     print(_matrix_hr())
 
     print(
@@ -1890,9 +1921,12 @@ def print_about() -> None:
             ),
             _format_detailed_option(
                 "--config PATH",
-                "Point to lab credentials for VASTDB and VMS access.",
-                f"Default: {DEFAULT_CONFIG_PATH}. Requires VASTDB endpoint keys for catalog\n"
-                "modes and VMS address/token for quota and capacity REST calls.",
+                "Single source of truth for VASTDB and VMS credentials.",
+                f"Default: {DEFAULT_CONFIG_PATH}. All modes read this file only — no ~/.vastconf.\n"
+                "Required keys: vast_endpoint, access_key, secret_key (VASTDB catalog queries);\n"
+                "vms_address, vms_user, and vms_password or vms_token (VMS REST / vastpy-cli);\n"
+                "optional tenant, mount_path, bucket_name, catalog_prefix. Legacy aliases vms,\n"
+                "user, password, and token are accepted.",
                 "./vcatalog_tool.py --config ~/.vast-catalog-config.json --show-schema",
             ),
         ]),

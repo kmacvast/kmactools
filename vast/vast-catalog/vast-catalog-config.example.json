@@ -1,0 +1,13 @@
+{
+  "vast_endpoint": "https://vast-vms-hostname",
+  "access_key": "YOUR_VASTDB_ACCESS_KEY",
+  "secret_key": "YOUR_VASTDB_SECRET_KEY",
+  "vms_address": "vast-vms-hostname",
+  "vms_user": "admin",
+  "vms_password": "YOUR_VMS_PASSWORD",
+  "vms_token": null,
+  "tenant": null,
+  "mount_path": "/mnt/kmacs-root/vast-catalog",
+  "bucket_name": "kmacs-vast-catalog-test-bucket",
+  "catalog_prefix": "/kmacs/vast-catalog"
+}

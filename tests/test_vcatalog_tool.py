@@ -392,36 +392,75 @@ class TestTranslatePathEngine(unittest.TestCase):
 
 
 class TestVmsCredentials(unittest.TestCase):
-    @patch.object(tool, "load_vast_config")
-    def test_resolve_vms_credentials_prefers_vastconf(self, mock_load):
-        mock_load.return_value = {
+    def test_normalize_catalog_config_aliases_and_tenant(self):
+        cfg = tool.normalize_catalog_config({
             "vms": "vms.lab.example",
             "user": "admin",
-            "password": "from-vastconf",
+            "password": "secret",
+            "token": "tok-123",
             "tenant": "default",
-        }
-        ctx = tool.ToolContext(
-            config={"vms_address": "wrong.host", "vms_user": "wrong", "token": "stale"},
-            config_path="/tmp/cfg", catalog_prefix="/kmacs/vast-catalog",
-            mount_path="/mnt/test", bucket_name="b", vms_address="wrong.host", vms_user="wrong",
-        )
-        creds = tool.resolve_vms_credentials(ctx)
-        self.assertEqual(creds["address"], "vms.lab.example")
-        self.assertEqual(creds["user"], "admin")
-        self.assertEqual(creds["password"], "from-vastconf")
-        self.assertIsNone(creds["token"])
-        self.assertIsNone(creds["tenant"])
+        })
+        self.assertEqual(cfg["vms_address"], "vms.lab.example")
+        self.assertEqual(cfg["vms_user"], "admin")
+        self.assertEqual(cfg["vms_password"], "secret")
+        self.assertEqual(cfg["vms_token"], "tok-123")
+        self.assertIsNone(cfg["tenant"])
 
-    @patch.object(tool, "load_vast_config", side_effect=FileNotFoundError("missing"))
-    def test_resolve_vms_credentials_falls_back_to_catalog(self, mock_load):
+    @patch.dict(os.environ, {}, clear=True)
+    def test_resolve_vms_credentials_from_catalog_config(self):
         ctx = tool.ToolContext(
-            config={"vms_address": "vms.catalog", "vms_user": "admin", "vms_password": "secret"},
-            config_path="/tmp/cfg", catalog_prefix="/kmacs/vast-catalog",
-            mount_path="/mnt/test", bucket_name="b", vms_address="vms.catalog", vms_user="admin",
+            config=tool.normalize_catalog_config({
+                "vms_address": "vms.catalog",
+                "vms_user": "admin",
+                "vms_password": "from-config",
+            }),
+            config_path="/home/vastdata/.vast-catalog-config.json",
+            catalog_prefix="/kmacs/vast-catalog",
+            mount_path="/mnt/test",
+            bucket_name="b",
+            vms_address="vms.catalog",
+            vms_user="admin",
         )
         creds = tool.resolve_vms_credentials(ctx)
         self.assertEqual(creds["address"], "vms.catalog")
-        self.assertEqual(creds["password"], "secret")
+        self.assertEqual(creds["password"], "from-config")
+
+    @patch.dict(os.environ, {"VMS_PASSWORD": "from-env"}, clear=False)
+    def test_resolve_vms_credentials_prefers_cli_password(self):
+        ctx = tool.ToolContext(
+            config=tool.normalize_catalog_config({
+                "vms_address": "vms.catalog",
+                "vms_user": "admin",
+                "vms_password": "from-config",
+            }),
+            config_path="/home/vastdata/.vast-catalog-config.json",
+            catalog_prefix="/kmacs/vast-catalog",
+            mount_path="/mnt/test",
+            bucket_name="b",
+            vms_address="vms.catalog",
+            vms_user="admin",
+        )
+        creds = tool.resolve_vms_credentials(ctx, vms_password="cli-secret")
+        self.assertEqual(creds["password"], "cli-secret")
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_resolve_vms_credentials_token_skips_password(self):
+        ctx = tool.ToolContext(
+            config=tool.normalize_catalog_config({
+                "vms_address": "vms.catalog",
+                "vms_user": "admin",
+                "vms_token": "tok-abc",
+            }),
+            config_path="/home/vastdata/.vast-catalog-config.json",
+            catalog_prefix="/kmacs/vast-catalog",
+            mount_path="/mnt/test",
+            bucket_name="b",
+            vms_address="vms.catalog",
+            vms_user="admin",
+        )
+        creds = tool.resolve_vms_credentials(ctx)
+        self.assertEqual(creds["token"], "tok-abc")
+        self.assertIsNone(creds["password"])
 
 
 class TestDRREngine(unittest.TestCase):

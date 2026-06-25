@@ -5,7 +5,7 @@
 #              and S3 tag mutation tool consolidating 12 legacy scripts.
 #
 # Author: KMac kmac@vastdata.com
-# Version: 1.3.6
+# Version: 1.3.7
 ################################################################################
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ import threading
 import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from multiprocessing.pool import ThreadPool
@@ -242,6 +243,15 @@ def _close_catalog_reader(reader: Any) -> None:
             pass
 
 
+@contextmanager
+def _catalog_transaction(ctx: ToolContext):
+    """Open a VASTDB transaction; suppress benign MissingTransaction on early stream exit."""
+    session = connect_catalog(ctx)
+    with suppress(vastdb.errors.MissingTransaction):
+        with session.transaction() as tx:
+            yield tx
+
+
 def iterate_catalog_batches(
     ctx: ToolContext, columns: list[str], predicate=None,
 ):
@@ -257,9 +267,8 @@ def iterate_catalog_batches(
     """
     if predicate is None:
         predicate = ibis_col.parent_path.startswith(ctx.catalog_prefix)
-    session = connect_catalog(ctx)
     try:
-        with session.transaction() as tx:
+        with _catalog_transaction(ctx) as tx:
             reader = tx.catalog().select(columns=columns, predicate=predicate)
             try:
                 if hasattr(reader, "read_next_batch"):
@@ -1380,8 +1389,7 @@ def stream_search_dataframe(
     match_count = 0
     early_exit = False
 
-    session = connect_catalog(ctx)
-    with session.transaction() as tx:
+    with _catalog_transaction(ctx) as tx:
         reader = tx.catalog().select(columns=projection, predicate=predicate)
         try:
             if hasattr(reader, "read_next_batch"):
@@ -1500,7 +1508,8 @@ def run_search(ctx: ToolContext, args: argparse.Namespace) -> int:
                 "Streaming search with client-side filters (batch mode, limit=%s)",
                 args.limit,
             )
-            df, early_exit = stream_search_dataframe(ctx, projection, predicate, args)
+            with suppress(vastdb.errors.MissingTransaction):
+                df, early_exit = stream_search_dataframe(ctx, projection, predicate, args)
         else:
             session = connect_catalog(ctx)
             with session.transaction() as tx:
@@ -1873,7 +1882,7 @@ def print_about() -> None:
     """Print customer-facing VAST platform guide tied to each CLI option."""
     width = MATRIX_WIDTH
     print(_matrix_hr())
-    print(f" {BOLD_GREEN}VAST DATA PLATFORM GUIDE — VCATALOG_TOOL REFERENCE (v1.3.6){RESET}")
+    print(f" {BOLD_GREEN}VAST DATA PLATFORM GUIDE — VCATALOG_TOOL REFERENCE (v1.3.7){RESET}")
     print(_matrix_hr())
 
     print(

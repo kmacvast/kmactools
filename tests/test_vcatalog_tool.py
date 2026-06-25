@@ -270,9 +270,10 @@ class TestSearchSchemaMapping(unittest.TestCase):
         self.assertNotIn("file_id", src)
         stream_src = inspect.getsource(tool.stream_search_dataframe)
         self.assertIn("stream_search_dataframe", src)
-        self.assertIn("session.transaction()", stream_src)
+        self.assertIn("_catalog_transaction", stream_src)
         self.assertIn("GeneratorExit", stream_src)
         self.assertIn("_close_catalog_reader", stream_src)
+        self.assertIn("MissingTransaction", inspect.getsource(tool.run_search))
 
 
 class TestStreamSearch(unittest.TestCase):
@@ -314,6 +315,42 @@ class TestStreamSearch(unittest.TestCase):
         self.assertEqual(len(df), 5)
         self.assertGreaterEqual(reader.close.call_count, 1)
         mock_connect.assert_called_once()
+
+    @patch.object(tool, "connect_catalog")
+    def test_sparse_search_swallows_missing_transaction(self, mock_connect):
+        batch = pa.record_batch({
+            "name": pa.array(["sparse-file"]),
+            "parent_path": pa.array(["/kmacs/vast-catalog/a"]),
+            "size": pa.array([5000], type=pa.int64()),
+            "used": pa.array([4096], type=pa.int64()),
+            "extension": pa.array(["txt"]),
+            "element_type": pa.array(["FILE"]),
+            "owner_name": pa.array(["alice"]),
+            "group_owner_name": pa.array(["staff"]),
+            "mtime": pa.array([datetime.now()]),
+        })
+        reader = MagicMock()
+        reader.read_next_batch.side_effect = [batch, StopIteration()]
+
+        mock_tx = MagicMock()
+        mock_tx.catalog.return_value.select.return_value = reader
+        mock_session = MagicMock()
+        tx_ctx = mock_session.transaction.return_value
+        tx_ctx.__enter__.return_value = mock_tx
+        tx_ctx.__exit__.side_effect = tool.vastdb.errors.MissingTransaction("ignored cleanup")
+        mock_connect.return_value = mock_session
+
+        ctx = tool.ToolContext(
+            config={}, config_path="/tmp/cfg", catalog_prefix="/kmacs/vast-catalog",
+            mount_path="/mnt/test", bucket_name="b", vms_address="vms", vms_user="admin",
+        )
+        args = argparse.Namespace(sparse=True, limit=1)
+        projection = ["name", "parent_path", "size", "used", "extension", "element_type",
+                      "owner_name", "group_owner_name", "mtime"]
+
+        df, early_exit = tool.stream_search_dataframe(ctx, projection, None, args)
+        self.assertTrue(early_exit)
+        self.assertEqual(len(df), 1)
 
 
 class TestParallelCatalogAggregate(unittest.TestCase):

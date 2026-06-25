@@ -20,12 +20,35 @@ BOLD_YELLOW="\033[1;33m"
 BOLD_CYAN="\033[1;36m"
 
 TOOL_EXEC="./vcatalog_tool.py"
-SAMPLE_FILE="/mnt/kmacs-root/vast-catalog/workspace_1/corporate_email/brawner-s/_sent_mail/25.locked"
+MOUNT_ROOT="/mnt/kmacs-root/vast-catalog"
+SAMPLE_FILE=""
 
 if [ ! -x "$TOOL_EXEC" ]; then
     echo -e "[ERROR] $TOOL_EXEC is missing or not marked executable."
     exit 1
 fi
+
+resolve_sample_file() {
+    local preferred=(
+        "${MOUNT_ROOT}/workspace_1/corporate_email/brawner-s/_sent_mail/25.locked"
+        "${MOUNT_ROOT}/workspace_1/linux-2.6.11/COPYING"
+        "${MOUNT_ROOT}/linux-2.6.11/COPYING"
+    )
+    local candidate
+    for candidate in "${preferred[@]}"; do
+        if [ -f "$candidate" ]; then
+            SAMPLE_FILE="$candidate"
+            return 0
+        fi
+    done
+    if [ -d "$MOUNT_ROOT" ]; then
+        SAMPLE_FILE=$(find "$MOUNT_ROOT" -type f -size +0 2>/dev/null | head -n 1)
+        if [ -n "$SAMPLE_FILE" ] && [ -f "$SAMPLE_FILE" ]; then
+            return 0
+        fi
+    fi
+    return 1
+}
 
 print_test_header() {
     local test_num=$1
@@ -46,6 +69,12 @@ clear
 echo -e "${GREEN}========================================================================================${RESET}"
 echo -e "                 ${BOLD_WHITE}VAST CATALOG UNIFIED ENGINE EXTENDED DIAGNOSTIC AUDIT HARNESS${RESET}"
 echo -e "${GREEN}========================================================================================${RESET}\n"
+
+if resolve_sample_file; then
+    echo -e "${CYAN}Resolved sample file:${RESET} ${SAMPLE_FILE}\n"
+else
+    echo -e "${YELLOW}[WARN] No readable file under ${MOUNT_ROOT}; Tests 8 and 9 will be skipped.${RESET}\n"
+fi
 
 # --- TEST 1: Python Regression Code Test Suite ---
 CMD="python3 -m unittest test_vcatalog_tool.py"
@@ -90,16 +119,28 @@ eval $CMD
 print_test_footer
 
 # --- TEST 8: Cross-Protocol Path Translation ---
-CMD="${TOOL_EXEC} --translate-path ${SAMPLE_FILE}"
-print_test_header "8" "Cross-Protocol Coordinate Mapper (NFS Mount -> Catalog Prefix -> S3 Key)" "$CMD"
-eval $CMD
-print_test_footer
+if [ -n "$SAMPLE_FILE" ]; then
+    CMD="${TOOL_EXEC} --translate-path ${SAMPLE_FILE}"
+    print_test_header "8" "Cross-Protocol Coordinate Mapper (NFS Mount -> Catalog Prefix -> S3 Key)" "$CMD"
+    eval $CMD
+    print_test_footer
+else
+    print_test_header "8" "Cross-Protocol Coordinate Mapper (SKIPPED — no sample file)" "N/A"
+    echo -e "  ${YELLOW}Skipped: mount path unavailable or empty.${RESET}"
+    print_test_footer
+fi
 
 # --- TEST 9: Multi-Protocol S3 Object Tag Mutation Lifecycle ---
-CMD="${TOOL_EXEC} --add-s3-tag 'project=alpha_demo' --s3-target ${SAMPLE_FILE} && ${TOOL_EXEC} --modify-s3-tag 'project=beta_demo' --s3-target ${SAMPLE_FILE} && ${TOOL_EXEC} --delete-s3-tag 'project' --s3-target ${SAMPLE_FILE}"
-print_test_header "9" "S3 Protocol API Mutation Lifecycle (Put, Modify, Delete Object Tagging)" "$CMD"
-eval $CMD
-print_test_footer
+if [ -n "$SAMPLE_FILE" ]; then
+    CMD="${TOOL_EXEC} --add-s3-tag 'project=alpha_demo' --s3-target ${SAMPLE_FILE} && ${TOOL_EXEC} --modify-s3-tag 'project=beta_demo' --s3-target ${SAMPLE_FILE} && ${TOOL_EXEC} --delete-s3-tag 'project' --s3-target ${SAMPLE_FILE}"
+    print_test_header "9" "S3 Protocol API Mutation Lifecycle (Put, Modify, Delete Object Tagging)" "$CMD"
+    eval $CMD
+    print_test_footer
+else
+    print_test_header "9" "S3 Protocol API Mutation Lifecycle (SKIPPED — no sample file)" "N/A"
+    echo -e "  ${YELLOW}Skipped: resolve_sample_file found no active file under ${MOUNT_ROOT}.${RESET}"
+    print_test_footer
+fi
 
 # --- TEST 10: Search Core - Early-Exit Client-Side Sparse Query ---
 CMD="${TOOL_EXEC} --search --sparse --limit 5"

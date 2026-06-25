@@ -237,6 +237,43 @@ class TestSearchSchemaMapping(unittest.TestCase):
         self.assertNotIn('"group_name"', src)
         self.assertIn("timedelta(minutes=int(args.mmin))", src)
         self.assertNotIn("now_ns", src)
+        self.assertIn('df["size"] > df["used"]', src)
+        self.assertNotIn("ibis_col.size > ibis_col.used", src)
+        self.assertIn('ibis_col.phandle["handle_id"]', src)
+        self.assertNotIn("file_id", src)
+
+
+class TestParallelCatalogAggregate(unittest.TestCase):
+    @patch.object(tool, "iterate_catalog_batches")
+    def test_parallel_capacity_merge(self, mock_iter):
+        batch_a = pa.record_batch({
+            "size": pa.array([5000], type=pa.int64()),
+            "used": pa.array([4096], type=pa.int64()),
+            "element_type": pa.array(["FILE"]),
+        })
+        batch_b = pa.record_batch({
+            "size": pa.array([2000], type=pa.int64()),
+            "used": pa.array([1024], type=pa.int64()),
+            "element_type": pa.array(["FILE"]),
+        })
+        mock_iter.return_value = iter([batch_a, batch_b])
+        ctx = tool.ToolContext(
+            config={}, config_path="/tmp/cfg", catalog_prefix="/kmacs/vast-catalog",
+            mount_path="/mnt/test", bucket_name="b", vms_address="vms", vms_user="admin",
+        )
+        acc = tool.CapacityAccumulator()
+        result = tool._parallel_catalog_aggregate(
+            ctx,
+            ["size", "used", "element_type"],
+            acc,
+            tool.CapacityAccumulator.fold_batch,
+            tool.CapacityAccumulator.merge_fold,
+            workers=2,
+        )
+        self.assertIs(result, acc)
+        self.assertEqual(acc.file_count, 2)
+        self.assertEqual(acc.total_logical, 7000)
+        self.assertEqual(acc.total_physical, 5120)
 
 
 class TestUpdateQuotasBrief(unittest.TestCase):

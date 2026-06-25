@@ -5,7 +5,7 @@
 #              and S3 tag mutation tool consolidating 12 legacy scripts.
 #
 # Author: KMac kmac@vastdata.com
-# Version: 1.2.2
+# Version: 1.2.3
 ################################################################################
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -43,6 +44,7 @@ urllib3.disable_warnings()
 
 # --- Defaults ---
 DEFAULT_CONFIG_PATH = os.path.expanduser("~/.vast-catalog-config.json")
+STREAM_WORKERS = min(32, max(4, (os.cpu_count() or 4) * 2))
 DEFAULT_CATALOG_PREFIX = "/kmacs/vast-catalog"
 DEFAULT_MOUNT_PATH = "/mnt/kmacs-root/vast-catalog"
 DEFAULT_BUCKET = "kmacs-vast-catalog-test-bucket"
@@ -232,6 +234,54 @@ def fetch_catalog_df(ctx: ToolContext, columns: list[str], predicate=None) -> pd
     return pa.Table.from_batches(chunks).to_pandas()
 
 
+def _parallel_catalog_aggregate(
+    ctx: ToolContext,
+    columns: list[str],
+    accumulator: Any,
+    fold_fn: Any,
+    merge_fn: Any,
+    predicate=None,
+    progress_fn: Any | None = None,
+    workers: int | None = None,
+) -> Any:
+    """Stream catalog batches on the main thread; fold chunks in a worker pool.
+
+    Args:
+        ctx: Resolved tool context.
+        columns: Column projection for the scan.
+        accumulator: Mutable accumulator instance updated by merge_fn.
+        fold_fn: Callable(batch) -> partial metrics dict (runs in worker threads).
+        merge_fn: Callable(accumulator, fold_result, lock) thread-safe merge.
+        predicate: Optional ibis filter.
+        progress_fn: Optional callback(batch_num, accumulator) every 50 batches.
+        workers: Thread pool size; defaults to STREAM_WORKERS.
+
+    Returns:
+        The merged accumulator after all batches are processed.
+    """
+    pool_size = workers or STREAM_WORKERS
+    lock = threading.Lock()
+    batch_num = 0
+    inflight: list[Any] = []
+    max_inflight = pool_size * 2
+
+    with ThreadPoolExecutor(max_workers=pool_size) as executor:
+        for batch in iterate_catalog_batches(ctx, columns, predicate):
+            batch_num += 1
+            inflight.append(executor.submit(fold_fn, batch))
+            if len(inflight) >= max_inflight:
+                for future in as_completed(inflight[:pool_size]):
+                    merge_fn(accumulator, future.result(), lock)
+                inflight = inflight[pool_size:]
+            if progress_fn and batch_num % 50 == 0:
+                progress_fn(batch_num, accumulator)
+
+        for future in as_completed(inflight):
+            merge_fn(accumulator, future.result(), lock)
+
+    return accumulator
+
+
 _BRACKET_NAMES = list(SIZE_BRACKETS.keys())
 _BRACKET_EDGES = np.array([4096, 65536, 1048576], dtype=np.int64)
 
@@ -256,25 +306,58 @@ class CapacityAccumulator:
     bracket_logical: dict[str, int] = field(default_factory=lambda: {k: 0 for k in SIZE_BRACKETS})
     bracket_physical: dict[str, int] = field(default_factory=lambda: {k: 0 for k in SIZE_BRACKETS})
 
-    def ingest_batch(self, batch: pa.RecordBatch) -> None:
-        """Fold one RecordBatch into running capacity totals."""
+    @staticmethod
+    def fold_batch(batch: pa.RecordBatch) -> dict[str, Any] | None:
+        """Compute capacity metrics for one batch (safe to run in worker threads)."""
         tbl = pa.Table.from_batches([batch])
         files = tbl.filter(pc.equal(tbl["element_type"], pa.scalar("FILE")))
         if files.num_rows == 0:
-            return
+            return None
         sizes = files["size"].to_numpy(zero_copy_only=False).astype(np.int64)
         used = files["used"].to_numpy(zero_copy_only=False).astype(np.int64)
-        self.file_count += files.num_rows
-        self.total_logical += int(sizes.sum())
-        self.total_physical += int(used.sum())
+        bracket_counts = {name: 0 for name in _BRACKET_NAMES}
+        bracket_logical = {name: 0 for name in _BRACKET_NAMES}
+        bracket_physical = {name: 0 for name in _BRACKET_NAMES}
         bracket_idx = np.digitize(sizes, _BRACKET_EDGES)
-        for i, name in enumerate(_BRACKET_NAMES):
-            mask = bracket_idx == i
+        for idx, name in enumerate(_BRACKET_NAMES):
+            mask = bracket_idx == idx
             if not mask.any():
                 continue
-            self.bracket_counts[name] += int(mask.sum())
-            self.bracket_logical[name] += int(sizes[mask].sum())
-            self.bracket_physical[name] += int(used[mask].sum())
+            bracket_counts[name] = int(mask.sum())
+            bracket_logical[name] = int(sizes[mask].sum())
+            bracket_physical[name] = int(used[mask].sum())
+        return {
+            "file_count": files.num_rows,
+            "total_logical": int(sizes.sum()),
+            "total_physical": int(used.sum()),
+            "bracket_counts": bracket_counts,
+            "bracket_logical": bracket_logical,
+            "bracket_physical": bracket_physical,
+        }
+
+    def merge_fold(self, fold: dict[str, Any] | None, lock: threading.Lock | None = None) -> None:
+        """Apply folded batch metrics into running totals."""
+        if fold is None:
+            return
+
+        def _apply() -> None:
+            self.file_count += fold["file_count"]
+            self.total_logical += fold["total_logical"]
+            self.total_physical += fold["total_physical"]
+            for name in _BRACKET_NAMES:
+                self.bracket_counts[name] += fold["bracket_counts"][name]
+                self.bracket_logical[name] += fold["bracket_logical"][name]
+                self.bracket_physical[name] += fold["bracket_physical"][name]
+
+        if lock is None:
+            _apply()
+        else:
+            with lock:
+                _apply()
+
+    def ingest_batch(self, batch: pa.RecordBatch) -> None:
+        """Fold one RecordBatch into running capacity totals."""
+        self.merge_fold(self.fold_batch(batch))
 
 
 @dataclass
@@ -290,12 +373,13 @@ class ColdFilesAccumulator:
     waste_count: int = 0
     waste_size: int = 0
 
-    def ingest_batch(self, batch: pa.RecordBatch, cutoff_ms: int) -> None:
-        """Fold one RecordBatch into cold/scrap/waste metrics."""
+    @staticmethod
+    def fold_batch(batch: pa.RecordBatch, cutoff_ms: int) -> dict[str, int] | None:
+        """Compute cold/scrap/waste metrics for one batch."""
         tbl = pa.Table.from_batches([batch])
         files = tbl.filter(pc.equal(tbl["element_type"], pa.scalar("FILE")))
         if files.num_rows == 0:
-            return
+            return None
 
         sizes = files["size"].to_numpy(zero_copy_only=False).astype(np.int64)
         mtimes = _mtime_to_epoch_ms(
@@ -304,23 +388,50 @@ class ColdFilesAccumulator:
         names = files["name"].to_pylist()
         extensions = files["extension"].to_pylist()
 
-        waste_exts = {e.lstrip(".") for e in WASTE_EXTENSIONS}
+        waste_exts = {ext.lstrip(".") for ext in WASTE_EXTENSIONS}
         cold_mask = mtimes < cutoff_ms
         scrap_mask = np.array([
             (ext in waste_exts if ext is not None else False)
             or any(name.endswith(suffix) for suffix in WASTE_EXTENSIONS)
             for ext, name in zip(extensions, names, strict=True)
         ], dtype=bool)
-
-        self.total_files += len(sizes)
-        self.total_footprint += int(sizes.sum())
-        self.cold_count += int(cold_mask.sum())
-        self.cold_size += int(sizes[cold_mask].sum()) if cold_mask.any() else 0
-        self.scrap_count += int(scrap_mask.sum())
-        self.scrap_size += int(sizes[scrap_mask].sum()) if scrap_mask.any() else 0
         waste_mask = cold_mask | scrap_mask
-        self.waste_count += int(waste_mask.sum())
-        self.waste_size += int(sizes[waste_mask].sum()) if waste_mask.any() else 0
+
+        return {
+            "total_files": len(sizes),
+            "total_footprint": int(sizes.sum()),
+            "cold_count": int(cold_mask.sum()),
+            "cold_size": int(sizes[cold_mask].sum()) if cold_mask.any() else 0,
+            "scrap_count": int(scrap_mask.sum()),
+            "scrap_size": int(sizes[scrap_mask].sum()) if scrap_mask.any() else 0,
+            "waste_count": int(waste_mask.sum()),
+            "waste_size": int(sizes[waste_mask].sum()) if waste_mask.any() else 0,
+        }
+
+    def merge_fold(self, fold: dict[str, int] | None, lock: threading.Lock | None = None) -> None:
+        """Apply folded cold-file metrics into running totals."""
+        if fold is None:
+            return
+
+        def _apply() -> None:
+            self.total_files += fold["total_files"]
+            self.total_footprint += fold["total_footprint"]
+            self.cold_count += fold["cold_count"]
+            self.cold_size += fold["cold_size"]
+            self.scrap_count += fold["scrap_count"]
+            self.scrap_size += fold["scrap_size"]
+            self.waste_count += fold["waste_count"]
+            self.waste_size += fold["waste_size"]
+
+        if lock is None:
+            _apply()
+        else:
+            with lock:
+                _apply()
+
+    def ingest_batch(self, batch: pa.RecordBatch, cutoff_ms: int) -> None:
+        """Fold one RecordBatch into cold/scrap/waste metrics."""
+        self.merge_fold(self.fold_batch(batch, cutoff_ms))
 
 
 @dataclass
@@ -333,17 +444,18 @@ class SecurityOwnerAccumulator:
     exposed_samples: list[dict[str, str]] = field(default_factory=list)
     file_count: int = 0
 
-    def ingest_batch(self, batch: pa.RecordBatch, uid_filter: int | None = None) -> None:
-        """Fold one RecordBatch into owner and permission metrics."""
+    @staticmethod
+    def fold_batch(batch: pa.RecordBatch, uid_filter: int | None = None) -> dict[str, Any] | None:
+        """Compute owner and permission metrics for one batch."""
         tbl = pa.Table.from_batches([batch])
         files = tbl.filter(pc.equal(tbl["element_type"], pa.scalar("FILE")))
         if files.num_rows == 0:
-            return
+            return None
 
         if uid_filter is not None:
             files = files.filter(pc.equal(files["uid"], pa.scalar(uid_filter, type=pa.int64())))
             if files.num_rows == 0:
-                return
+                return None
 
         sizes = files["size"].to_numpy(zero_copy_only=False).astype(np.int64)
         owners = files["owner_name"].to_pylist()
@@ -351,67 +463,116 @@ class SecurityOwnerAccumulator:
         names = files["name"].to_pylist()
         paths = files["parent_path"].to_pylist()
 
-        self.file_count += files.num_rows
+        owner_counts: dict[str, int] = {}
+        owner_bytes: dict[str, int] = {}
         for owner, size_val in zip(owners, sizes, strict=True):
             owner_key = owner if owner is not None else "unknown"
-            self.owner_counts[owner_key] = self.owner_counts.get(owner_key, 0) + 1
-            self.owner_bytes[owner_key] = self.owner_bytes.get(owner_key, 0) + int(size_val)
+            owner_counts[owner_key] = owner_counts.get(owner_key, 0) + 1
+            owner_bytes[owner_key] = owner_bytes.get(owner_key, 0) + int(size_val)
 
         perm_bits = np.nan_to_num(mode_bits, nan=0).astype(np.int64) & 0o777
         world_writable = (perm_bits & 0o002) > 0
-        self.exposed_count += int(world_writable.sum())
+        exposed_samples: list[dict[str, str]] = []
         for idx in np.flatnonzero(world_writable):
-            if len(self.exposed_samples) >= 5:
-                continue
-            self.exposed_samples.append({
+            exposed_samples.append({
                 "perm_octal": format(int(perm_bits[idx]), "o").zfill(3),
                 "name": names[idx],
                 "parent_path": paths[idx],
             })
 
+        return {
+            "file_count": files.num_rows,
+            "owner_counts": owner_counts,
+            "owner_bytes": owner_bytes,
+            "exposed_count": int(world_writable.sum()),
+            "exposed_samples": exposed_samples,
+        }
+
+    def merge_fold(self, fold: dict[str, Any] | None, lock: threading.Lock | None = None) -> None:
+        """Apply folded security metrics into running totals."""
+        if fold is None:
+            return
+
+        def _apply() -> None:
+            self.file_count += fold["file_count"]
+            for owner, count in fold["owner_counts"].items():
+                self.owner_counts[owner] = self.owner_counts.get(owner, 0) + count
+            for owner, byte_total in fold["owner_bytes"].items():
+                self.owner_bytes[owner] = self.owner_bytes.get(owner, 0) + byte_total
+            self.exposed_count += fold["exposed_count"]
+            for sample in fold["exposed_samples"]:
+                if len(self.exposed_samples) >= 5:
+                    break
+                self.exposed_samples.append(sample)
+
+        if lock is None:
+            _apply()
+        else:
+            with lock:
+                _apply()
+
+    def ingest_batch(self, batch: pa.RecordBatch, uid_filter: int | None = None) -> None:
+        """Fold one RecordBatch into owner and permission metrics."""
+        self.merge_fold(self.fold_batch(batch, uid_filter))
+
 
 def stream_security_profile(ctx: ToolContext, uid: int | None) -> SecurityOwnerAccumulator:
-    """Scan catalog in batches for owner consumption and permission risks."""
+    """Scan catalog in parallel batches for owner consumption and permission risks."""
     acc = SecurityOwnerAccumulator()
     columns = ["size", "uid", "owner_name", "nfs_mode_bits", "element_type", "name", "parent_path"]
     predicate = ibis_col.parent_path.startswith(ctx.catalog_prefix)
-    batch_num = 0
-    for batch in iterate_catalog_batches(ctx, columns, predicate=predicate):
-        acc.ingest_batch(batch, uid_filter=uid)
-        batch_num += 1
-        if batch_num % 50 == 0:
-            logger.info("Security scan progress: %s batches, %s files scanned",
-                        batch_num, f"{acc.file_count:,}")
-    return acc
+
+    def fold_batch(batch: pa.RecordBatch) -> dict[str, Any] | None:
+        return SecurityOwnerAccumulator.fold_batch(batch, uid_filter=uid)
+
+    def progress(batch_num: int, accumulator: SecurityOwnerAccumulator) -> None:
+        logger.info(
+            "Security scan progress: %s batches, %s files scanned (workers=%s)",
+            batch_num, f"{accumulator.file_count:,}", STREAM_WORKERS,
+        )
+
+    return _parallel_catalog_aggregate(
+        ctx, columns, acc, fold_batch, SecurityOwnerAccumulator.merge_fold,
+        predicate=predicate, progress_fn=progress,
+    )
 
 
 def stream_capacity_profile(ctx: ToolContext) -> CapacityAccumulator:
-    """Scan catalog in batches using minimal column projection."""
+    """Scan catalog in parallel batches using minimal column projection."""
     acc = CapacityAccumulator()
     columns = ["size", "used", "element_type"]
-    batch_num = 0
-    for batch in iterate_catalog_batches(ctx, columns):
-        acc.ingest_batch(batch)
-        batch_num += 1
-        if batch_num % 50 == 0:
-            logger.info("Capacity scan progress: %s batches, %s files profiled",
-                        batch_num, f"{acc.file_count:,}")
-    return acc
+
+    def progress(batch_num: int, accumulator: CapacityAccumulator) -> None:
+        logger.info(
+            "Capacity scan progress: %s batches, %s files profiled (workers=%s)",
+            batch_num, f"{accumulator.file_count:,}", STREAM_WORKERS,
+        )
+
+    return _parallel_catalog_aggregate(
+        ctx, columns, acc, CapacityAccumulator.fold_batch, CapacityAccumulator.merge_fold,
+        progress_fn=progress,
+    )
 
 
 def stream_cold_files_profile(ctx: ToolContext, num_days: int) -> ColdFilesAccumulator:
-    """Scan catalog in batches for cold-data and scrap metrics."""
+    """Scan catalog in parallel batches for cold-data and scrap metrics."""
     cutoff_ms = int((datetime.now().timestamp() - (num_days * 86400)) * 1000)
     acc = ColdFilesAccumulator()
     columns = ["size", "mtime", "extension", "name", "element_type"]
-    batch_num = 0
-    for batch in iterate_catalog_batches(ctx, columns):
-        acc.ingest_batch(batch, cutoff_ms)
-        batch_num += 1
-        if batch_num % 50 == 0:
-            logger.info("Cold-file scan progress: %s batches, %s files scanned",
-                        batch_num, f"{acc.total_files:,}")
-    return acc
+
+    def fold_batch(batch: pa.RecordBatch) -> dict[str, int] | None:
+        return ColdFilesAccumulator.fold_batch(batch, cutoff_ms)
+
+    def progress(batch_num: int, accumulator: ColdFilesAccumulator) -> None:
+        logger.info(
+            "Cold-file scan progress: %s batches, %s files scanned (workers=%s)",
+            batch_num, f"{accumulator.total_files:,}", STREAM_WORKERS,
+        )
+
+    return _parallel_catalog_aggregate(
+        ctx, columns, acc, fold_batch, ColdFilesAccumulator.merge_fold,
+        progress_fn=progress,
+    )
 
 
 def nfs_path_to_s3_key(abs_path: str, mount_path: str) -> str:
@@ -604,7 +765,7 @@ def _report_header(title: str) -> None:
 
 def run_show_capacity(ctx: ToolContext) -> int:
     """Capacity profiler with 4-tier size histogram."""
-    logger.info("Streaming block allocation scan under %s (batch mode)", ctx.catalog_prefix)
+    logger.info("Streaming block allocation scan under %s (parallel batch mode)", ctx.catalog_prefix)
     acc = stream_capacity_profile(ctx)
     if acc.file_count == 0:
         logger.warning("No files found for capacity profiling.")
@@ -774,6 +935,7 @@ def run_update_quotas(ctx: ToolContext, brief: bool, vms_password: str | None) -
 
 def run_search(ctx: ToolContext, args: argparse.Namespace) -> int:
     """Multi-dimensional catalog metadata search."""
+    filter_sparse_client = args.sparse
     predicate = ibis_col.parent_path.startswith(ctx.catalog_prefix)
     if args.name:
         predicate = predicate & ibis_col.name.contains(args.name)
@@ -796,8 +958,6 @@ def run_search(ctx: ToolContext, args: argparse.Namespace) -> int:
         predicate = predicate & (ibis_col.size >= parse_human_size(args.min_size))
     if args.min_physical:
         predicate = predicate & (ibis_col.used >= parse_human_size(args.min_physical))
-    if args.sparse:
-        predicate = predicate & (ibis_col.size > ibis_col.used)
     if args.mmin:
         lookback_target = datetime.now() - timedelta(minutes=int(args.mmin))
         predicate = predicate & (ibis_col.mtime >= lookback_target)
@@ -815,7 +975,7 @@ def run_search(ctx: ToolContext, args: argparse.Namespace) -> int:
     if args.links is not None:
         predicate = predicate & (ibis_col.nlinks == args.links)
     if args.inode is not None:
-        predicate = predicate & (ibis_col.file_id == args.inode)
+        predicate = predicate & (ibis_col.phandle["handle_id"] == args.inode)
 
     projection = [
         "name", "parent_path", "size", "used", "extension", "element_type",
@@ -834,6 +994,8 @@ def run_search(ctx: ToolContext, args: argparse.Namespace) -> int:
         return 1
 
     df = table.to_pandas()
+    if filter_sparse_client:
+        df = df[df["size"] > df["used"]]
     elapsed = time.perf_counter() - start
     limit = args.limit
     df_display = df if limit <= 0 else df.head(limit)

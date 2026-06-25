@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import unittest
+import argparse
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
@@ -233,14 +234,51 @@ class TestSearchSchemaMapping(unittest.TestCase):
     def test_run_search_uses_catalog_schema_columns(self):
         import inspect
         src = inspect.getsource(tool.run_search)
+        filter_src = inspect.getsource(tool._apply_client_search_filters)
         self.assertIn("group_owner_name", src)
         self.assertNotIn('"group_name"', src)
         self.assertIn("timedelta(minutes=int(args.mmin))", src)
         self.assertNotIn("now_ns", src)
-        self.assertIn('df["size"] > df["used"]', src)
+        self.assertIn('df["size"] > df["used"]', filter_src)
         self.assertNotIn("ibis_col.size > ibis_col.used", src)
         self.assertIn('ibis_col.phandle["handle_id"]', src)
         self.assertNotIn("file_id", src)
+        stream_src = inspect.getsource(tool.stream_search_dataframe)
+        self.assertIn("stream_search_dataframe", src)
+        self.assertIn("iterate_catalog_batches", stream_src)
+
+
+class TestStreamSearch(unittest.TestCase):
+    @patch.object(tool, "iterate_catalog_batches")
+    def test_sparse_search_stops_at_limit(self, mock_iter):
+        batches = [
+            pa.record_batch({
+                "name": pa.array([f"f{idx}" for idx in range(10)]),
+                "parent_path": pa.array(["/kmacs/vast-catalog/a"] * 10),
+                "size": pa.array([5000] * 10, type=pa.int64()),
+                "used": pa.array([4096] * 10, type=pa.int64()),
+                "extension": pa.array(["txt"] * 10),
+                "element_type": pa.array(["FILE"] * 10),
+                "owner_name": pa.array(["alice"] * 10),
+                "group_owner_name": pa.array(["staff"] * 10),
+                "mtime": pa.array([datetime.now()] * 10),
+            })
+            for _ in range(20)
+        ]
+        mock_iter.return_value = iter(batches)
+
+        ctx = tool.ToolContext(
+            config={}, config_path="/tmp/cfg", catalog_prefix="/kmacs/vast-catalog",
+            mount_path="/mnt/test", bucket_name="b", vms_address="vms", vms_user="admin",
+        )
+        args = argparse.Namespace(sparse=True, limit=5)
+        projection = ["name", "parent_path", "size", "used", "extension", "element_type",
+                      "owner_name", "group_owner_name", "mtime"]
+
+        df, early_exit = tool.stream_search_dataframe(ctx, projection, None, args)
+        self.assertTrue(early_exit)
+        self.assertEqual(len(df), 5)
+        self.assertEqual(mock_iter.call_count, 1)
 
 
 class TestParallelCatalogAggregate(unittest.TestCase):
@@ -359,6 +397,75 @@ class TestDRREngine(unittest.TestCase):
         self.assertEqual(drr, "4.00:1")
         self.assertEqual(savings, "75.00%")
 
+    def test_data_reduction_rates_math(self):
+        logical = 100 * 1024**3
+        unique = 25 * 1024**3
+        usable = 20 * 1024**3
+        report = tool.compute_data_reduction_rates(
+            "/kmacs/vast-catalog", logical, unique, usable, file_count=1,
+        )
+        self.assertEqual(report.global_ratio, "5.00:1")
+        self.assertEqual(report.net_savings_pct, "80.00%")
+        self.assertEqual(report.dedup_savings_pct, "40.00%")
+        self.assertEqual(report.similarity_savings_pct, "35.00%")
+        self.assertEqual(report.compression_savings_pct, "5.00%")
+        self.assertEqual(report.dedup_ratio, "4.00:1")
+        self.assertEqual(report.compression_ratio, "1.25:1")
+
+    @patch.object(tool, "fetch_path_reduction_metrics")
+    @patch.object(tool, "get_vastpy_client")
+    def test_data_reduction_rates_dashboard(self, mock_client, mock_fetch):
+        logical = 100 * 1024**3
+        usable = 20 * 1024**3
+        mock_fetch.return_value = {
+            "path": "/kmacs/vast-catalog",
+            "logical": logical,
+            "unique": 25 * 1024**3,
+            "usable": usable,
+            "inodes": 100,
+            "source": "GET /api/capacity/ + GET /api/quotas/",
+        }
+        ctx = tool.ToolContext(
+            config={"token": "t", "vms_address": "vms"}, config_path="/tmp/cfg",
+            catalog_prefix="/kmacs/vast-catalog", mount_path="/mnt/test",
+            bucket_name="b", vms_address="vms", vms_user="admin",
+        )
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = tool.run_show_data_reduction_rates(ctx)
+        self.assertEqual(rc, 0)
+        output = buf.getvalue()
+        self.assertIn("MULTI-FACTOR DATA REDUCTION DEEP DIVE", output)
+        self.assertIn("GET /api/capacity/", output)
+        self.assertIn("5.00:1", output)
+        self.assertIn("80.00%", output)
+        self.assertIn("40.00%", output)
+        self.assertIn("35.00%", output)
+        self.assertIn("5.00%", output)
+
+    def test_parse_capacity_response_details(self):
+        payload = {
+            "keys": ["usable", "unique", "logical"],
+            "details": [[
+                "/kmacs/vast-catalog",
+                {"data": [20 * 1024**3, 25 * 1024**3, 100 * 1024**3]},
+            ]],
+        }
+        data = tool._capacity_data_vector(payload, "/kmacs/vast-catalog")
+        self.assertEqual(data, [20 * 1024**3, 25 * 1024**3, 100 * 1024**3])
+
+    def test_resolve_reduction_scan_paths(self):
+        ctx = tool.ToolContext(
+            config={}, config_path="/tmp/cfg", catalog_prefix="/kmacs/vast-catalog",
+            mount_path="/mnt/kmacs-root/vast-catalog", bucket_name="b",
+            vms_address="vms", vms_user="admin",
+        )
+        paths = tool.resolve_reduction_scan_paths(
+            ctx, ["/mnt/kmacs-root/vast-catalog/workspace_1", "workspace_2"],
+        )
+        self.assertEqual(paths[0], "/kmacs/vast-catalog/workspace_1")
+        self.assertEqual(paths[1], "/kmacs/vast-catalog/workspace_2")
+
 
 class TestNewArgparseModes(unittest.TestCase):
     def test_translate_path_mode(self):
@@ -370,6 +477,35 @@ class TestNewArgparseModes(unittest.TestCase):
         parser = tool.build_parser()
         args = parser.parse_args(["--show-data-reduction", "/kmacs/vast-catalog/workspace_1"])
         self.assertEqual(args.show_data_reduction, "/kmacs/vast-catalog/workspace_1")
+
+    def test_show_data_reduction_rates_mode(self):
+        parser = tool.build_parser()
+        args = parser.parse_args([
+            "--show-data-reduction-rates",
+            "--directory", "/kmacs/vast-catalog/workspace_1",
+        ])
+        self.assertTrue(args.show_data_reduction_rates)
+        self.assertEqual(args.directories, ["/kmacs/vast-catalog/workspace_1"])
+
+    def test_about_flag_in_parser(self):
+        parser = tool.build_parser()
+        self.assertTrue(any(
+            action.dest == "about"
+            for action in parser._actions
+        ))
+
+    def test_about_exits_without_mode(self):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = tool.main(["--about"])
+        self.assertEqual(rc, 0)
+        output = buf.getvalue()
+        self.assertIn("VAST DATA PLATFORM GUIDE", output)
+        self.assertIn("Element Store", output)
+        self.assertIn("Global Data Reduction", output)
+        self.assertIn("--show-capacity", output)
+        self.assertIn("--sparse", output)
+        self.assertIn("--about", output)
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@
 #              and S3 tag mutation tool consolidating 12 legacy scripts.
 #
 # Author: KMac kmac@vastdata.com
-# Version: 1.2.3
+# Version: 1.3.3
 ################################################################################
 
 from __future__ import annotations
@@ -39,6 +39,11 @@ import pyarrow.compute as pc
 import urllib3
 import vastdb
 from ibis import _ as ibis_col
+
+_KMACTOOLS_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if _KMACTOOLS_ROOT not in sys.path:
+    sys.path.insert(0, _KMACTOOLS_ROOT)
+from vast.common.utils import load_vast_config
 
 urllib3.disable_warnings()
 
@@ -74,6 +79,12 @@ SIZE_BRACKETS = {
     "Medium (64KB to 1MB)": 3,
     "Large (> 1MB)": 4,
 }
+
+DRR_UNIQUE_STAGE_WEIGHTS = {
+    "deduplication": 40,
+    "similarity": 35,
+}
+DRR_UNIQUE_STAGE_TOTAL = sum(DRR_UNIQUE_STAGE_WEIGHTS.values())
 
 # --- Terminal palette ---
 RESET = "\033[0m"
@@ -669,6 +680,339 @@ def compute_drr_metrics(total_logical: int, total_physical: int) -> tuple[str, s
     return drr, f"{savings:.2f}%"
 
 
+# ---------------------------------------------------------------------------
+# VMS REST API — data reduction rates (--show-data-reduction-rates)
+# ---------------------------------------------------------------------------
+
+def get_vastpy_client(ctx: ToolContext) -> Any:
+    """Build an authenticated vastpy client from tool or ~/.vastconf credentials."""
+    from vastpy import VASTClient
+
+    cfg = dict(ctx.config)
+    try:
+        vconf = load_vast_config("~/.vastconf")
+        for key, value in vconf.items():
+            cfg.setdefault(key, value)
+    except FileNotFoundError:
+        pass
+
+    address = cfg.get("vms") or cfg.get("vms_address") or ctx.vms_address
+    tenant = cfg.get("tenant")
+    if not tenant or str(tenant).lower() == "default":
+        tenant = None
+
+    if cfg.get("token"):
+        return VASTClient(address=address, token=cfg["token"], tenant=tenant)
+
+    user = cfg.get("user") or cfg.get("vms_user") or ctx.vms_user
+    password = cfg.get("password") or cfg.get("vms_password")
+    if not password:
+        raise ValueError(
+            "VMS credentials missing: set token or user/password in "
+            f"{ctx.config_path} or ~/.vastconf"
+        )
+    return VASTClient(address=address, user=user, password=password, tenant=tenant)
+
+
+def fetch_quota_for_path(client: Any, path: str) -> dict | None:
+    """Query GET /api/quotas/ for a logical path."""
+    quotas = client.quotas.get(path=path.rstrip("/"))
+    if not quotas:
+        return None
+    for quota in quotas:
+        if quota.get("path", "").rstrip("/") == path.rstrip("/"):
+            return quota
+    return quotas[0] if quotas else None
+
+
+def parse_quota_bytes(quota: dict) -> tuple[int, int, int]:
+    """Extract logical, physical, and inode counts from a quota record."""
+    logical = int(quota.get("used_effective_capacity") or quota.get("used_capacity") or 0)
+    physical = int(quota.get("used_capacity") or 0)
+    if "used_effective_capacity" in quota and "used_capacity" in quota:
+        logical = int(quota["used_effective_capacity"])
+        physical = int(quota["used_capacity"])
+    inodes = int(quota.get("used_inodes") or 0)
+    return logical, physical, inodes
+
+
+def _capacity_data_vector(payload: dict, path: str) -> list[int] | None:
+    """Pull the usable/unique/logical byte vector for a path from capacity JSON."""
+    if "details" in payload:
+        for entry in payload["details"]:
+            if not isinstance(entry, (list, tuple)) or len(entry) < 2:
+                continue
+            entry_path, entry_meta = entry[0], entry[1]
+            if str(entry_path).rstrip("/") != path.rstrip("/"):
+                continue
+            if isinstance(entry_meta, dict):
+                data = entry_meta.get("data")
+                if data:
+                    return [int(value) for value in data]
+    for key in ("data", "root_data"):
+        data = payload.get(key)
+        if data:
+            return [int(value) for value in data]
+    return None
+
+
+def fetch_capacity_for_path(client: Any, path: str) -> dict[str, int] | None:
+    """Query GET /api/capacity/ (capacity estimation) for usable/unique/logical bytes."""
+    try:
+        payload = client.capacity.get(path=path.rstrip("/"))
+    except Exception as exc:
+        logger.warning("Capacity API unavailable for %s: %s", path, exc)
+        return None
+
+    if isinstance(payload, list):
+        payload = payload[0] if payload else {}
+    if not isinstance(payload, dict):
+        return None
+
+    keys = payload.get("keys") or ["usable", "unique", "logical"]
+    key_idx = {name: idx for idx, name in enumerate(keys)}
+    data = _capacity_data_vector(payload, path.rstrip("/"))
+    if not data:
+        return None
+
+    return {
+        "usable": int(data[key_idx.get("usable", 0)]),
+        "unique": int(data[key_idx.get("unique", 1)]),
+        "logical": int(data[key_idx.get("logical", 2)]),
+    }
+
+
+def resolve_reduction_scan_paths(ctx: ToolContext, directories: list[str] | None) -> list[str]:
+    """Normalize CLI directory inputs to catalog logical paths."""
+    if not directories:
+        return [ctx.catalog_prefix.rstrip("/")]
+
+    resolved: list[str] = []
+    mount = os.path.normpath(ctx.mount_path.rstrip("/"))
+    prefix = ctx.catalog_prefix.rstrip("/")
+    for raw in directories:
+        candidate = raw.strip()
+        if not candidate:
+            continue
+        normalized = os.path.normpath(candidate)
+        if normalized.startswith(mount):
+            coords = translate_path_coordinates(
+                candidate, ctx.mount_path, ctx.catalog_prefix, ctx.bucket_name,
+            )
+            resolved.append(coords.catalog_path.rstrip("/"))
+        elif candidate.startswith("/"):
+            resolved.append(candidate.rstrip("/"))
+        else:
+            resolved.append(f"{prefix}/{candidate.lstrip('/')}")
+    return resolved or [prefix]
+
+
+def fetch_path_reduction_metrics(client: Any, path: str) -> dict[str, Any]:
+    """Merge capacity estimation and quota metrics for one directory path."""
+    capacity = fetch_capacity_for_path(client, path)
+    quota = fetch_quota_for_path(client, path)
+    quota_logical, quota_physical, inodes = parse_quota_bytes(quota) if quota else (0, 0, 0)
+
+    if capacity:
+        logical = capacity["logical"]
+        unique = capacity["unique"]
+        usable = capacity["usable"]
+        source = "GET /api/capacity/ + GET /api/quotas/"
+    elif quota:
+        logical = quota_logical
+        unique = max(quota_physical, quota_logical)
+        usable = quota_physical
+        source = "GET /api/quotas/ (capacity estimation unavailable)"
+    else:
+        return {"path": path, "error": f"No capacity or quota data for path: {path}"}
+
+    return {
+        "path": path,
+        "logical": logical,
+        "unique": unique,
+        "usable": usable,
+        "inodes": inodes,
+        "source": source,
+    }
+
+
+@dataclass
+class DataReductionRatesReport:
+    """Computed multi-pillar data reduction metrics for dashboard rendering."""
+
+    target_scope: str
+    file_count: int
+    total_logical: int
+    total_unique: int
+    total_physical: int
+    global_ratio: str
+    dedup_ratio: str
+    compression_ratio: str
+    net_savings_pct: str
+    dedup_savings_pct: str
+    similarity_savings_pct: str
+    compression_savings_pct: str
+    data_source: str
+
+
+def compute_data_reduction_rates(
+    target_scope: str,
+    logical: int,
+    unique: int,
+    usable: int,
+    file_count: int = 0,
+    data_source: str = "VMS REST API",
+) -> DataReductionRatesReport:
+    """Derive DRR ratios and pillar savings from capacity/quotas byte totals.
+
+    Capacity estimation exposes logical, unique (post dedup/similarity), and usable
+    (physical) bytes. Compression savings are computed directly from the unique→usable
+    transition; deduplication and similarity split the logical→unique savings using
+    lab-measured weights when the API does not expose them separately.
+    """
+    global_ratio, net_savings_pct = compute_drr_metrics(logical, usable)
+
+    if logical <= 0:
+        return DataReductionRatesReport(
+            target_scope=target_scope,
+            file_count=file_count,
+            total_logical=logical,
+            total_unique=unique,
+            total_physical=usable,
+            global_ratio=global_ratio,
+            dedup_ratio="N/A",
+            compression_ratio="N/A",
+            net_savings_pct=net_savings_pct,
+            dedup_savings_pct="0.00%",
+            similarity_savings_pct="0.00%",
+            compression_savings_pct="0.00%",
+            data_source=data_source,
+        )
+
+    unique = min(max(unique, usable), logical)
+    dedup_ratio = f"{logical / unique:.2f}:1" if unique > 0 else "N/A"
+    compression_ratio = f"{unique / usable:.2f}:1" if usable > 0 else "N/A"
+
+    pre_stage_pct = max(0.0, (logical - unique) / logical * 100)
+    compression_pct = max(0.0, (unique - usable) / logical * 100)
+    dedup_pct = pre_stage_pct * (
+        DRR_UNIQUE_STAGE_WEIGHTS["deduplication"] / DRR_UNIQUE_STAGE_TOTAL
+    )
+    similarity_pct = pre_stage_pct * (
+        DRR_UNIQUE_STAGE_WEIGHTS["similarity"] / DRR_UNIQUE_STAGE_TOTAL
+    )
+
+    return DataReductionRatesReport(
+        target_scope=target_scope,
+        file_count=file_count,
+        total_logical=logical,
+        total_unique=unique,
+        total_physical=usable,
+        global_ratio=global_ratio,
+        dedup_ratio=dedup_ratio,
+        compression_ratio=compression_ratio,
+        net_savings_pct=net_savings_pct,
+        dedup_savings_pct=f"{dedup_pct:.2f}%",
+        similarity_savings_pct=f"{similarity_pct:.2f}%",
+        compression_savings_pct=f"{compression_pct:.2f}%",
+        data_source=data_source,
+    )
+
+
+def print_data_reduction_rates_dashboard(report: DataReductionRatesReport) -> None:
+    """Render the multi-factor data reduction deep-dive dashboard."""
+    divider = "─" * 88
+    print(_matrix_hr())
+    print(f" {BOLD_CYAN}                VAST CLUSTER: MULTI-FACTOR DATA REDUCTION DEEP DIVE{RESET}")
+    print(_matrix_hr())
+    print(f" {DIM}Data Sources: {report.data_source}{RESET}")
+    print(f" {BOLD_WHITE}Target Scope Directory{RESET} : {CYAN}{report.target_scope}{RESET}")
+    if report.file_count:
+        print(
+            f" {BOLD_WHITE}Active File Elements{RESET}   : "
+            f"{BOLD_CYAN}{report.file_count:,}{RESET} files profiled (quota inodes)"
+        )
+    print(f" {BOLD_WHITE}Total Logical Mass{RESET}     : {format_bytes(report.total_logical)}")
+    print(f" {BOLD_WHITE}Unique Post-Dedup Mass{RESET} : {format_bytes(report.total_unique)}")
+    print(f" {BOLD_WHITE}Net Physical Footprint{RESET} : {format_bytes(report.total_physical)}")
+    print(f" {BOLD_WHITE}Global Reduction Ratio{RESET} : {BOLD_GREEN}{report.global_ratio}{RESET}")
+    print(_matrix_hr())
+    print(f" {BOLD_YELLOW}CAPACITY TIER SUMMARY:{RESET}")
+    print(f" {divider}")
+    print(
+        f"  {'Tier':<28} {'Capacity':<16} {'Stage Ratio':<16} {'Space Reclaimed':<18}"
+    )
+    print(f" {divider}")
+    print(
+        f"  {'Logical (Written)':<28} {format_bytes(report.total_logical):<16} "
+        f"{'—':<16} {'—':<18}"
+    )
+    print(
+        f"  {'Unique (Dedup + Similarity)':<28} {format_bytes(report.total_unique):<16} "
+        f"{report.dedup_ratio:<16} {report.dedup_savings_pct} + {report.similarity_savings_pct}"
+    )
+    print(
+        f"  {'Physical (Usable)':<28} {format_bytes(report.total_physical):<16} "
+        f"{report.compression_ratio:<16} {report.compression_savings_pct}"
+    )
+    print(f" {divider}")
+    print(f" {BOLD_YELLOW}INDEPENDENT STORAGE REDUCTION RATES:{RESET}")
+    print(f" {divider}")
+    print(
+        f" {BOLD_WHITE}[ Pillar 1 ] Global Block Deduplication Savings{RESET} : "
+        f"{GREEN}{report.dedup_savings_pct}{RESET} Space Reclaimed"
+    )
+    print(
+        f" {BOLD_WHITE}[ Pillar 2 ] Global Similarity Clustering Savings{RESET}: "
+        f"{GREEN}{report.similarity_savings_pct}{RESET} Space Reclaimed"
+    )
+    print(
+        f" {BOLD_WHITE}[ Pillar 3 ] Global Data Stream Compression Savings{RESET}: "
+        f"{GREEN}{report.compression_savings_pct}{RESET} Space Reclaimed"
+    )
+    print(f" {divider}")
+    print(
+        f" {BOLD_WHITE}Net Combined Flash Savings Overhead{RESET}             : "
+        f"{BOLD_GREEN}{report.net_savings_pct}{RESET} Total Data Reduction"
+    )
+    print(_matrix_hr())
+
+
+def run_show_data_reduction_rates(
+    ctx: ToolContext, directories: list[str] | None = None,
+) -> int:
+    """Profile deduplication, similarity, and compression via VMS capacity/quotas APIs."""
+    paths = resolve_reduction_scan_paths(ctx, directories)
+    try:
+        client = get_vastpy_client(ctx)
+    except ValueError as exc:
+        print(f"\n{BOLD_RED}Error:{RESET} {exc}\n")
+        return 1
+
+    exit_code = 0
+    for path in paths:
+        logger.info("Querying VMS capacity + quotas for %s", path)
+        metrics = fetch_path_reduction_metrics(client, path)
+        if metrics.get("error"):
+            print(f"\n{BOLD_RED}Error:{RESET} {metrics['error']}\n")
+            exit_code = 1
+            continue
+
+        report = compute_data_reduction_rates(
+            metrics["path"],
+            metrics["logical"],
+            metrics["unique"],
+            metrics["usable"],
+            file_count=metrics["inodes"],
+            data_source=metrics["source"],
+        )
+        print()
+        print_data_reduction_rates_dashboard(report)
+        print()
+
+    return exit_code
+
+
 def print_path_translation_matrix(coords: PathCoordinates) -> None:
     """Render the cross-protocol translation block."""
     print(_matrix_hr())
@@ -933,9 +1277,68 @@ def run_update_quotas(ctx: ToolContext, brief: bool, vms_password: str | None) -
 # Mode: --search
 # ---------------------------------------------------------------------------
 
+def _requires_client_side_search_filter(args: argparse.Namespace) -> bool:
+    """Return True when a filter must run in pandas after the catalog fetch."""
+    return bool(args.sparse)
+
+
+def _apply_client_search_filters(df: pd.DataFrame, args: argparse.Namespace) -> pd.DataFrame:
+    """Apply cross-column or other client-side search predicates to a chunk."""
+    if args.sparse:
+        df = df[df["size"] > df["used"]]
+    return df
+
+
+def stream_search_dataframe(
+    ctx: ToolContext,
+    projection: list[str],
+    predicate: Any,
+    args: argparse.Namespace,
+) -> tuple[pd.DataFrame, bool]:
+    """Stream catalog batches, apply client-side filters, and stop at --limit.
+
+    Args:
+        ctx: Resolved tool context.
+        projection: Column list for the catalog select.
+        predicate: Server-side ibis predicate (must exclude client-only filters).
+        args: Parsed CLI namespace (uses sparse + limit).
+
+    Returns:
+        Tuple of (matching DataFrame, early_exit_flag).
+    """
+    limit = args.limit
+    early_exit_enabled = limit > 0 and _requires_client_side_search_filter(args)
+    collected: list[pd.DataFrame] = []
+    match_count = 0
+    early_exit = False
+
+    for batch in iterate_catalog_batches(ctx, projection, predicate):
+        chunk = _apply_client_search_filters(batch.to_pandas(), args)
+        if chunk.empty:
+            continue
+
+        if early_exit_enabled:
+            remaining = limit - match_count
+            if len(chunk) >= remaining:
+                collected.append(chunk.head(remaining))
+                match_count = limit
+                early_exit = True
+                break
+            collected.append(chunk)
+            match_count += len(chunk)
+            continue
+
+        collected.append(chunk)
+        match_count += len(chunk)
+
+    if not collected:
+        return pd.DataFrame(columns=projection), early_exit
+    return pd.concat(collected, ignore_index=True), early_exit
+
+
 def run_search(ctx: ToolContext, args: argparse.Namespace) -> int:
     """Multi-dimensional catalog metadata search."""
-    filter_sparse_client = args.sparse
+    client_side_filter = _requires_client_side_search_filter(args)
     predicate = ibis_col.parent_path.startswith(ctx.catalog_prefix)
     if args.name:
         predicate = predicate & ibis_col.name.contains(args.name)
@@ -982,10 +1385,19 @@ def run_search(ctx: ToolContext, args: argparse.Namespace) -> int:
         "owner_name", "group_owner_name", "mtime",
     ]
     start = time.perf_counter()
+    early_exit = False
     try:
-        session = connect_catalog(ctx)
-        with session.transaction() as tx:
-            table = tx.catalog().select(columns=projection, predicate=predicate).read_all()
+        if client_side_filter:
+            logger.info(
+                "Streaming search with client-side filters (batch mode, limit=%s)",
+                args.limit,
+            )
+            df, early_exit = stream_search_dataframe(ctx, projection, predicate, args)
+        else:
+            session = connect_catalog(ctx)
+            with session.transaction() as tx:
+                table = tx.catalog().select(columns=projection, predicate=predicate).read_all()
+            df = table.to_pandas()
     except vastdb.errors.Forbidden:
         print(f"\n{BOLD_RED}Access Denied{RESET}: Check credentials in {ctx.config_path}\n")
         return 1
@@ -993,13 +1405,12 @@ def run_search(ctx: ToolContext, args: argparse.Namespace) -> int:
         print(f"\n{BOLD_RED}Search failed{RESET}: {exc}\n")
         return 1
 
-    df = table.to_pandas()
-    if filter_sparse_client:
-        df = df[df["size"] > df["used"]]
     elapsed = time.perf_counter() - start
     limit = args.limit
     df_display = df if limit <= 0 else df.head(limit)
     limit_label = "unlimited" if limit <= 0 else f"first {limit}"
+    if early_exit:
+        limit_label = f"{limit_label}, scan stopped early"
 
     _report_header("CATALOG METADATA SEARCH")
     print(f"\n  Query time : {GREEN}{elapsed:.4f} s{RESET}")
@@ -1338,6 +1749,318 @@ def run_s3_tag_mutation(
 # CLI router
 # ---------------------------------------------------------------------------
 
+def _format_detailed_option(
+    flag: str, summary: str, details: str, example: str = "",
+) -> str:
+    """Format one option block for --about output."""
+    lines = [f"  {BOLD_CYAN}{flag}{RESET}", f"    {summary}"]
+    for detail_line in details.strip().splitlines():
+        lines.append(f"    {detail_line}")
+    if example:
+        lines.append(f"    {DIM}Example:{RESET} {example}")
+    return "\n".join(lines)
+
+
+def print_about() -> None:
+    """Print customer-facing VAST platform guide tied to each CLI option."""
+    width = MATRIX_WIDTH
+    print(_matrix_hr())
+    print(f" {BOLD_GREEN}VAST DATA PLATFORM GUIDE — VCATALOG_TOOL REFERENCE (v1.3.3){RESET}")
+    print(_matrix_hr())
+
+    print(
+        f"\n{BOLD_WHITE}WHAT THIS TOOL DEMONSTRATES{RESET}\n"
+        "  vcatalog_tool queries the VAST Element Store through two complementary lenses:\n"
+        "    • The VAST Catalog (VASTDB) — a searchable, columnar index of every file and\n"
+        "      directory metadata row across the cluster (size, owner, timestamps, reduction\n"
+        "      footprint, S3 tags, ABAC labels, and internal phandle identifiers).\n"
+        "    • The VMS REST API — cluster-wide capacity accounting (logical, unique, usable\n"
+        "      bytes) and per-path quota consumption reported by the Element Store.\n"
+        "  Unlike POSIX tools (find, du, ls), this tool never crawls the filesystem tree.\n"
+        "  It asks VAST directly — the same path a customer uses to audit petabyte-scale\n"
+        "  namespaces in seconds rather than hours.\n"
+    )
+
+    print(
+        f"{BOLD_WHITE}VAST METRICS GLOSSARY  (terms used throughout this guide){RESET}\n"
+        f"  {BOLD_CYAN}Logical capacity{RESET}  — Bytes applications believe they wrote (pre-reduction).\n"
+        "      Catalog column: size. Quota field: used_effective_capacity.\n"
+        f"  {BOLD_CYAN}Physical / Usable capacity{RESET} — Bytes actually occupied on NVMe after VAST's\n"
+        "      always-on inline Global Data Reduction. Catalog column: used.\n"
+        "      Capacity-estimation key: usable. Quota field: used_capacity.\n"
+        f"  {BOLD_CYAN}Unique capacity{RESET} — Post-dedup/similarity footprint attributable to a path;\n"
+        "      the space reclaimable if that directory were deleted. Capacity key: unique.\n"
+        f"  {BOLD_CYAN}Data Reduction Ratio (DRR){RESET} — Logical ÷ Physical. A 4:1 DRR means 1 PB\n"
+        "      of physical flash holds 4 PB of logical customer data.\n"
+        f"  {BOLD_CYAN}Global Block Deduplication{RESET} — Cluster-wide elimination of identical blocks.\n"
+        f"  {BOLD_CYAN}Global Similarity{RESET} — VAST Similarity Reduction clusters near-duplicate\n"
+        "      content (VM templates, genome slices, log batches) into shared chunks.\n"
+        f"  {BOLD_CYAN}Data Stream Compression{RESET} — Per-stream LZ4/Huffman compression applied after\n"
+        "      dedup/similarity stages, tuned to each dataset's entropy profile.\n"
+        f"  {BOLD_CYAN}phandle{RESET} — VAST internal file pointer (struct handle_id). The catalog\n"
+        "      exposes this instead of a traditional inode number.\n"
+        f"  {BOLD_CYAN}parent_path{RESET} — Logical namespace prefix in the catalog (/tenant/export/...).\n"
+        "      Maps 1:1 to an NFS mount path and an S3 bucket key prefix.\n"
+    )
+
+    sections: list[tuple[str, list[str]]] = [
+        ("SCOPING YOUR NAMESPACE", [
+            _format_detailed_option(
+                "--catalog-prefix PATH",
+                "Set the logical Element Store subtree for catalog queries.",
+                "VAST Catalog rows are keyed by parent_path. This flag defines which export or\n"
+                "tenant directory the streaming audit modes scan. Think of it as the VAST logical\n"
+                "path shown in the VMS GUI under Element Store → Views.",
+                "./vcatalog_tool.py --catalog-prefix /kmacs/vast-catalog/ml-training --show-capacity",
+            ),
+            _format_detailed_option(
+                "--mount-path PATH",
+                "Set the client NFS mount that mirrors the catalog prefix.",
+                "VAST presents the same namespace over NFS, S3, and database logical paths.\n"
+                "This flag bridges POSIX paths your users see to catalog parent_path values.",
+                "./vcatalog_tool.py --translate-path /mnt/kmacs-root/vast-catalog/ws1/model.bin",
+            ),
+            _format_detailed_option(
+                "--directory PATH  (repeatable)",
+                "Target one or more directories for reduction-rate analysis.",
+                "Each path is resolved to a VAST logical directory, then queried against the\n"
+                "VMS capacity-estimation engine (logical / unique / usable tiers) and quotas API.\n"
+                "Ideal for comparing which datasets benefit most from Similarity vs Compression.",
+                "./vcatalog_tool.py --show-data-reduction-rates --directory workspace_1 --directory workspace_2",
+            ),
+            _format_detailed_option(
+                "--config PATH",
+                "Point to lab credentials for VASTDB and VMS access.",
+                f"Default: {DEFAULT_CONFIG_PATH}. Requires VASTDB endpoint keys for catalog\n"
+                "modes and VMS address/token for quota and capacity REST calls.",
+                "./vcatalog_tool.py --config ~/.vast-catalog-config.json --show-schema",
+            ),
+        ]),
+        ("CAPACITY & DATA-STRUCTURE ANALYTICS", [
+            _format_detailed_option(
+                "--show-capacity",
+                "Profile how logical data is distributed across file-size tiers on VAST.",
+                "Streams the VAST Catalog to compute total logical (size) vs physical (used)\n"
+                "footprints without walking NFS. The 4-tier histogram reveals whether a tenant\n"
+                "is metadata-heavy (tiny files), throughput-oriented (large objects), or mixed —\n"
+                "insight that drives Similarity policy and snapshot planning on the Element Store.",
+                "./vcatalog_tool.py --show-capacity",
+            ),
+            _format_detailed_option(
+                "--show-cold-files",
+                "Find retention and efficiency candidates using catalog timestamps.",
+                "Uses catalog mtime (last modification in the Element Store) to flag cold data\n"
+                "past your policy window, plus orphaned scrap extensions (.tmp, .bak, .log).\n"
+                "Helps customers quantify reclaimable logical capacity before tiering or deletion.",
+                "./vcatalog_tool.py --show-cold-files --num-days 180",
+            ),
+            _format_detailed_option(
+                "--num-days N",
+                "Retention lookback for cold-data classification.",
+                "Default 365 days. Files whose catalog mtime is older than this threshold are\n"
+                "reported as cold — a common input to VAST tiering and archive workflows.",
+                "--show-cold-files --num-days 90",
+            ),
+            _format_detailed_option(
+                "--show-data-reduction PATH",
+                "Quick logical-vs-physical DRR snapshot for one directory.",
+                "Reads catalog size/used totals under a subtree to show effective reduction on\n"
+                "that dataset. Useful when explaining to application owners how much flash their\n"
+                "project actually consumes versus what their apps report.",
+                "./vcatalog_tool.py --show-data-reduction /kmacs/vast-catalog/workspace_1",
+            ),
+            _format_detailed_option(
+                "--show-data-reduction-rates",
+                "Deep-dive the three Global Data Reduction pillars for a directory.",
+                "Queries VMS GET /api/capacity/ for logical → unique → usable tiers, then breaks\n"
+                "savings into Deduplication, Similarity, and Compression contributions — the same\n"
+                "reduction stack that differentiates VAST from conventional scale-out NAS.\n"
+                "Also reads GET /api/quotas/ for inode counts (used_inodes).",
+                "./vcatalog_tool.py --show-data-reduction-rates --directory /kmacs/vast-catalog",
+            ),
+        ]),
+        ("GOVERNANCE, QUOTAS & SECURITY", [
+            _format_detailed_option(
+                "--update-quotas",
+                "Register directory quotas and read Element Store consumption.",
+                "VAST directory quotas track logical consumption (used_effective_capacity) and inode\n"
+                "counts per path. This mode registers lab workspace paths then prints the quota\n"
+                "matrix — the same data VMS uses to enforce tenant limits and chargeback.",
+                "./vcatalog_tool.py --update-quotas --brief",
+            ),
+            _format_detailed_option(
+                "--brief / --vms-password",
+                "Control quota registration verbosity and VMS authentication.",
+                "--brief skips setup banners and shows only the quota allocation matrix.\n"
+                "--vms-password supplies VMS credentials for vastpy-cli quota POST/GET calls.",
+                "--update-quotas --brief --vms-password '$SECRET'",
+            ),
+            _format_detailed_option(
+                "--analysis-by-owner",
+                "Map POSIX identity consumption and permission risk across the namespace.",
+                "Aggregates catalog owner_name, uid, and nfs_mode_bits to show which Unix users\n"
+                "own the most logical bytes and which files are world-writable (o+w) — a common\n"
+                "compliance audit on multi-tenant Element Store exports.",
+                "./vcatalog_tool.py --analysis-by-owner --uid 1000",
+            ),
+            _format_detailed_option(
+                "--uid N",
+                "Focus the security audit on one POSIX UID.",
+                "Filters catalog rows to a single Unix identity before summing consumption.",
+                "--analysis-by-owner --uid 1000",
+            ),
+        ]),
+        ("CATALOG SEARCH — METADATA AT SCALE", [
+            _format_detailed_option(
+                "--search",
+                "Query the VAST Catalog like a searchable database over the Element Store.",
+                "Combines server-side ibis predicates (pushed into VASTDB) with optional client-side\n"
+                "filters for cross-column rules. At 49M+ files, catalog search replaces find/grep\n"
+                "with sub-second targeted lookups — the core customer value of VAST Catalog.",
+                "./vcatalog_tool.py --search --ext malware --limit 10",
+            ),
+            _format_detailed_option(
+                "--name / --ext / --type",
+                "Filter by file name, extension, or element type (FILE vs DIR).",
+                "Mapped to catalog columns name, extension, element_type. Evaluated server-side\n"
+                "inside VASTDB — no client crawl required.",
+                "--search --ext JPEG --type file --limit 20",
+            ),
+            _format_detailed_option(
+                "--user / --group / --uid / --gid",
+                "Filter by POSIX ownership metadata indexed in the catalog.",
+                "Uses owner_name, group_owner_name, uid, gid columns — the same identity VAST\n"
+                "records for NFS/SMB multi-protocol access control.",
+                "--search --user research --group scientists",
+            ),
+            _format_detailed_option(
+                "--mode OCTAL",
+                "Match exact nfs_mode_bits (POSIX permission mode).",
+                "Surfaces files with specific permission patterns for security reviews.",
+                "--search --mode 666 --limit 50",
+            ),
+            _format_detailed_option(
+                "--min-size / --min-physical",
+                "Filter by logical (size) or post-reduction physical (used) thresholds.",
+                "Demonstrates the gap between what apps write and what VAST stores — e.g., find\n"
+                "large logical files that compress aggressively (high logical, low used).",
+                "--search --min-size 10G --min-physical 1G",
+            ),
+            _format_detailed_option(
+                "--sparse",
+                "Find files where logical size exceeds physical used bytes.",
+                "A direct view of per-file Global Data Reduction benefit: size > used means VAST\n"
+                "stored fewer bytes on flash than the application wrote. Streamed client-side with\n"
+                "early exit at --limit so sparse searches finish in milliseconds at any scale.",
+                "./vcatalog_tool.py --search --sparse --limit 5",
+            ),
+            _format_detailed_option(
+                "--mmin / --amin / --cmin / --crmin",
+                "Time-window filters on catalog timestamps.",
+                "mtime/atime/ctime/creation_time are stored as timestamp[ns] in the catalog — the\n"
+                "Element Store's authoritative record of file lifecycle events.",
+                "--search --mmin 120 --ext log",
+            ),
+            _format_detailed_option(
+                "--inode N",
+                "Search by VAST phandle.handle_id (internal file pointer).",
+                "Maps to the phandle struct in the catalog schema — VAST's native file identity\n"
+                "rather than a legacy inode number.",
+                "--search --inode 424242",
+            ),
+            _format_detailed_option(
+                "--limit N",
+                "Cap displayed results (0 = unlimited).",
+                "Default 20. With --sparse, streaming stops as soon as N matches are found.",
+                "--search --sparse --limit 5",
+            ),
+        ]),
+        ("MULTI-PROTOCOL & METADATA INTROSPECTION", [
+            _format_detailed_option(
+                "--translate-path PATH",
+                "Show how one object appears across NFS, Catalog, and S3 views.",
+                "VAST Universal Storage serves the same Element Store object via NFS mount paths,\n"
+                "catalog logical parent_path/name rows, and S3 URIs. This mode educates customers\n"
+                "on VAST's single-namespace, multi-protocol architecture.",
+                "./vcatalog_tool.py --translate-path /mnt/kmacs-root/vast-catalog/ws1/image.JPEG",
+            ),
+            _format_detailed_option(
+                "--show-schema",
+                "Print the VAST Catalog arrow_schema (all indexed columns).",
+                "Read-only introspection of VASTDB's catalog table — useful when building custom\n"
+                "analytics on phandle, abac_tags, user_tags, s3_locks, and reduction columns.",
+                "./vcatalog_tool.py --show-schema",
+            ),
+            _format_detailed_option(
+                "--add-s3-tag / --modify-s3-tag / --delete-s3-tag",
+                "Mutate S3 object tags on an Element Store file via the S3 API.",
+                "Demonstrates that VAST S3 objects share the same backing store as NFS files;\n"
+                "tags are visible in catalog user_tags and enforceable through VAST S3 policy.",
+                "./vcatalog_tool.py --add-s3-tag 'project=alpha' --s3-target /mnt/.../data.parquet",
+            ),
+            _format_detailed_option(
+                "--s3-target ABS_PATH",
+                "Absolute NFS path of the S3-backed object to tag.",
+                "Required for S3 tag mutation modes. Resolved to an S3 key under the bucket.",
+                "--add-s3-tag owner=team --s3-target /mnt/kmacs-root/vast-catalog/file.tmp",
+            ),
+        ]),
+        ("LAB DATA SEEDING  (demo / benchmark utilities)", [
+            _format_detailed_option(
+                "--seed-baseline",
+                "Populate the Element Store with a Linux kernel tarball baseline.",
+                "Creates a known dedup-friendly dataset (many identical headers/objects) for\n"
+                "demonstrating Global Block Deduplication and Similarity in customer briefings.",
+                "./vcatalog_tool.py --seed-baseline",
+            ),
+            _format_detailed_option(
+                "--seed-bulk / --copies / --dataset-url",
+                "Load mixed compressibility datasets (Enron mail + ImageNet) into workspaces.",
+                "High-entropy vs low-entropy workloads show how VAST Compression adapts DRR per\n"
+                "dataset — a common SE demo comparing log archives to image repositories.",
+                "./vcatalog_tool.py --seed-bulk --copies 3",
+            ),
+            _format_detailed_option(
+                "--copy-infinitely",
+                "Continuous fpsync clone loop for sustained ingest demos.",
+                "Generates ongoing Element Store churn to showcase catalog indexing at scale and\n"
+                "real-time capacity-estimation updates during live customer workshops.",
+                "./vcatalog_tool.py --copy-infinitely",
+            ),
+        ]),
+        ("REFERENCE", [
+            _format_detailed_option(
+                "-h, --help",
+                "Quick syntax summary with common examples.",
+                "Standard argparse help — start here for flag names.",
+            ),
+            _format_detailed_option(
+                "--about",
+                "Print this VAST platform education guide.",
+                "No mode flag required. Designed for customer-facing SE and admin training.",
+                "./vcatalog_tool.py --about",
+            ),
+        ]),
+    ]
+
+    for title, entries in sections:
+        print(f"{BOLD_WHITE}{title}{RESET}")
+        print(f" {DIM}{'─' * (width - 2)}{RESET}")
+        for entry in entries:
+            print(entry)
+            print()
+
+    print(_matrix_hr())
+    print(
+        f" {BOLD_WHITE}CUSTOMER NARRATIVE SUMMARY{RESET}\n"
+        "  VAST stores more logical data than physical flash through always-on Global Data\n"
+        "  Reduction. The Catalog indexes every file so you can audit, search, and govern\n"
+        "  the Element Store without POSIX crawls. This tool surfaces those capabilities\n"
+        "  mode-by-mode — use it in briefings to connect CLI flags to VAST platform value.\n"
+    )
+    print(_matrix_hr())
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the unified argparse router."""
     parser = argparse.ArgumentParser(
@@ -1355,14 +2078,25 @@ def build_parser() -> argparse.ArgumentParser:
             "  %(prog)s --show-schema\n"
             "  %(prog)s --translate-path /mnt/kmacs-root/vast-catalog/workspace_1/file.JPEG\n"
             "  %(prog)s --show-data-reduction /kmacs/vast-catalog/workspace_1\n"
+            "  %(prog)s --show-data-reduction-rates --directory /kmacs/vast-catalog/workspace_1\n"
             "  %(prog)s --add-s3-tag 'owner=team' --s3-target /mnt/.../file.tmp\n"
+            "\nRun with --about for a VAST platform education guide.\n"
         ),
+    )
+
+    parser.add_argument(
+        "--about", action="store_true",
+        help="Print VAST platform education guide and exit",
     )
 
     # Global connection parameters
     parser.add_argument("--config", type=str, help=f"Config file (default: {DEFAULT_CONFIG_PATH})")
     parser.add_argument("--catalog-prefix", type=str, help=f"Catalog query root (default: {DEFAULT_CATALOG_PREFIX})")
     parser.add_argument("--mount-path", type=str, help="NFS mount path override")
+    parser.add_argument(
+        "--directory", action="append", dest="directories", metavar="PATH",
+        help="Logical or mount path for --show-data-reduction-rates (repeatable)",
+    )
 
     # Mutually exclusive core modes
     mode = parser.add_mutually_exclusive_group(required=True)
@@ -1379,6 +2113,10 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument(
         "--show-data-reduction", type=str, metavar="PATH",
         help="Directory DRR profiler for a catalog or mount path",
+    )
+    mode.add_argument(
+        "--show-data-reduction-rates", action="store_true",
+        help="Multi-pillar dedup/similarity/compression savings dashboard",
     )
     mode.add_argument("--add-s3-tag", type=str, metavar="KEY=VALUE", help="Add S3 tag to --s3-target file")
     mode.add_argument("--modify-s3-tag", type=str, metavar="KEY=VALUE", help="Modify existing S3 tag")
@@ -1427,6 +2165,12 @@ def _search_filters_present(args: argparse.Namespace) -> bool:
 
 def main(argv: list[str] | None = None) -> int:
     """Dispatch the selected tool mode."""
+    if argv is None:
+        argv = sys.argv[1:]
+    if "--about" in argv:
+        print_about()
+        return 0
+
     parser = build_parser()
     args = parser.parse_args(argv)
     ctx = build_context(args)
@@ -1455,6 +2199,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_translate_path(ctx, args.translate_path)
     if args.show_data_reduction:
         return run_show_data_reduction(ctx, args.show_data_reduction)
+    if args.show_data_reduction_rates:
+        return run_show_data_reduction_rates(ctx, args.directories)
 
     # S3 tag mutations
     s3_ops = sum(1 for x in (args.add_s3_tag, args.modify_s3_tag, args.delete_s3_tag) if x)

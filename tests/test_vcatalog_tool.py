@@ -207,6 +207,58 @@ class TestStreamingAccumulators(unittest.TestCase):
         self.assertEqual(acc.waste_count, 2)
 
 
+class TestIterateCatalogBatches(unittest.TestCase):
+    @patch.object(tool, "connect_catalog")
+    def test_stop_iteration_end_of_stream(self, mock_connect):
+        batch = pa.record_batch({"size": pa.array([1], type=pa.int64())})
+        reader = MagicMock()
+        reader.read_next_batch.side_effect = [batch, StopIteration()]
+
+        mock_tx = MagicMock()
+        mock_tx.catalog.return_value.select.return_value = reader
+        mock_session = MagicMock()
+        mock_session.transaction.return_value.__enter__.return_value = mock_tx
+        mock_connect.return_value = mock_session
+
+        ctx = tool.ToolContext(
+            config={}, config_path="/tmp/cfg", catalog_prefix="/kmacs/vast-catalog",
+            mount_path="/mnt/test", bucket_name="b", vms_address="vms", vms_user="admin",
+        )
+        batches = list(tool.iterate_catalog_batches(ctx, ["size"]))
+        self.assertEqual(len(batches), 1)
+        self.assertEqual(batches[0].num_rows, 1)
+
+
+class TestSearchSchemaMapping(unittest.TestCase):
+    def test_run_search_uses_catalog_schema_columns(self):
+        import inspect
+        src = inspect.getsource(tool.run_search)
+        self.assertIn("group_owner_name", src)
+        self.assertNotIn('"group_name"', src)
+        self.assertIn("timedelta(minutes=int(args.mmin))", src)
+        self.assertNotIn("now_ns", src)
+
+
+class TestUpdateQuotasBrief(unittest.TestCase):
+    @patch.object(tool, "_vastpy_cli")
+    @patch.object(tool, "time")
+    def test_brief_mode_skips_registration_steps(self, mock_time, mock_cli):
+        mock_cli.return_value = MagicMock(stdout="used_inodes|0.1|/kmacs/vast-catalog/ws1\n")
+        ctx = tool.ToolContext(
+            config={}, config_path="/tmp/cfg", catalog_prefix="/kmacs/vast-catalog",
+            mount_path="/mnt/test", bucket_name="b", vms_address="vms", vms_user="admin",
+        )
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = tool.run_update_quotas(ctx, brief=True, vms_password="secret")
+        self.assertEqual(rc, 0)
+        get_calls = [c for c in mock_cli.call_args_list if len(c.args) >= 2 and c.args[1] == "get"]
+        post_calls = [c for c in mock_cli.call_args_list if len(c.args) >= 2 and c.args[1] == "post"]
+        self.assertEqual(len(get_calls), 1)
+        self.assertGreater(len(post_calls), 0)
+        self.assertIn("QUOTA ALLOCATION MATRIX", buf.getvalue())
+
+
 class TestShowCapacityMocked(unittest.TestCase):
     @patch.object(tool, "iterate_catalog_batches")
     def test_capacity_report_renders(self, mock_iter):

@@ -5,7 +5,7 @@
 #              and S3 tag mutation tool consolidating 12 legacy scripts.
 #
 # Author: KMac kmac@vastdata.com
-# Version: 1.2.1
+# Version: 1.2.2
 ################################################################################
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from multiprocessing.pool import ThreadPool
 from typing import Any
 
@@ -201,18 +201,25 @@ def iterate_catalog_batches(
     if predicate is None:
         predicate = ibis_col.parent_path.startswith(ctx.catalog_prefix)
     session = connect_catalog(ctx)
-    with session.transaction() as tx:
-        reader = tx.catalog().select(columns=columns, predicate=predicate)
-        if hasattr(reader, "read_next_batch"):
-            while True:
-                batch = reader.read_next_batch()
-                if batch is None or batch.num_rows == 0:
-                    break
-                yield batch
-        else:
-            for batch in reader:
-                if batch.num_rows > 0:
+    try:
+        with session.transaction() as tx:
+            reader = tx.catalog().select(columns=columns, predicate=predicate)
+            if hasattr(reader, "read_next_batch"):
+                while True:
+                    try:
+                        batch = reader.read_next_batch()
+                    except StopIteration:
+                        break
+                    if batch is None or batch.num_rows == 0:
+                        break
                     yield batch
+            else:
+                for batch in reader:
+                    if batch.num_rows > 0:
+                        yield batch
+    except Exception as exc:
+        logger.error("Error streaming catalog batches: %s", exc)
+        raise
 
 
 def fetch_catalog_df(ctx: ToolContext, columns: list[str], predicate=None) -> pd.DataFrame:
@@ -777,7 +784,7 @@ def run_search(ctx: ToolContext, args: argparse.Namespace) -> int:
     if args.user:
         predicate = predicate & (ibis_col.owner_name == args.user)
     if args.group:
-        predicate = predicate & (ibis_col.group_name == args.group)
+        predicate = predicate & (ibis_col.group_owner_name == args.group)
     if args.uid is not None:
         predicate = predicate & (ibis_col.uid == args.uid)
     if args.gid is not None:
@@ -791,25 +798,28 @@ def run_search(ctx: ToolContext, args: argparse.Namespace) -> int:
         predicate = predicate & (ibis_col.used >= parse_human_size(args.min_physical))
     if args.sparse:
         predicate = predicate & (ibis_col.size > ibis_col.used)
-    now_ns = int(datetime.now().timestamp() * 1e9)
     if args.mmin:
-        predicate = predicate & (ibis_col.mtime >= (now_ns - int(args.mmin) * 60 * 1e9))
+        lookback_target = datetime.now() - timedelta(minutes=int(args.mmin))
+        predicate = predicate & (ibis_col.mtime >= lookback_target)
     if args.amin:
-        predicate = predicate & (ibis_col.atime >= (now_ns - int(args.amin) * 60 * 1e9))
+        lookback_target = datetime.now() - timedelta(minutes=int(args.amin))
+        predicate = predicate & (ibis_col.atime >= lookback_target)
     if args.cmin:
-        predicate = predicate & (ibis_col.ctime >= (now_ns - int(args.cmin) * 60 * 1e9))
+        lookback_target = datetime.now() - timedelta(minutes=int(args.cmin))
+        predicate = predicate & (ibis_col.ctime >= lookback_target)
     if args.crmin:
-        predicate = predicate & (ibis_col.crtime >= (now_ns - int(args.crmin) * 60 * 1e9))
+        lookback_target = datetime.now() - timedelta(minutes=int(args.crmin))
+        predicate = predicate & (ibis_col.creation_time >= lookback_target)
     if args.depth is not None:
         predicate = predicate & (ibis_col.path_depth == args.depth)
     if args.links is not None:
-        predicate = predicate & (ibis_col.num_links == args.links)
+        predicate = predicate & (ibis_col.nlinks == args.links)
     if args.inode is not None:
         predicate = predicate & (ibis_col.file_id == args.inode)
 
     projection = [
         "name", "parent_path", "size", "used", "extension", "element_type",
-        "owner_name", "group_name", "mtime", "path_depth", "num_links", "file_id",
+        "owner_name", "group_owner_name", "mtime",
     ]
     start = time.perf_counter()
     try:
@@ -840,7 +850,7 @@ def run_search(ctx: ToolContext, args: argparse.Namespace) -> int:
         for row_idx, row in df_display.iterrows():
             name = row["name"] if len(row["name"]) <= 32 else row["name"][:29] + "..."
             print(
-                f"  {row['element_type']:<6} {str(row['owner_name']):<10} {str(row['group_name']):<10}"
+                f"  {row['element_type']:<6} {str(row['owner_name']):<10} {str(row['group_owner_name']):<10}"
                 f" {name:<32} {format_bytes(row['size']):<10} {format_bytes(row['used'])}"
             )
     print(f"\n{_hr()}\n")

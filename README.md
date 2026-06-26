@@ -13,7 +13,7 @@ An optimized workspace for VAST Data Solutions Engineering: storage-fabric profi
 | Pillar | Path | Focus |
 | :--- | :--- | :--- |
 | **Storage fabric engineering** | [`vast/`](vast/) | Element Store catalog queries, capacity/DRR analysis, VMS auth, NFS monitoring, and audit tooling |
-| **Communication intelligence** | [`alibigen/`](alibigen/) | Slack/Gmail message harvesting, thread heuristics, and work-journal candidate generation |
+| **Communication intelligence** | [`timefinder/`](timefinder/) | Slack/Gmail message harvesting, thread heuristics, work-journal candidates, and Google Calendar sync |
 | **Infrastructure diagnostics** | [`scripts/`](scripts/) | macOS scopes, virtualization debuggers, media transcription, and lab harness scripts |
 
 Each module ships with its own README where operational detail matters. The root document stays intentionally high-level.
@@ -28,9 +28,9 @@ The primary engineering surface. Sub-modules cover authentication (`auth/`), sha
 
 **Flagship entry point:** [`vast/vast-catalog/vcatalog_tool.py`](vast/vast-catalog/vcatalog_tool.py) — parallel streaming catalog analytics, early-exit search, VMS-backed DRR dashboards, and multi-protocol path/S3 operations. See [`vast/vast-catalog/README.md`](vast/vast-catalog/README.md) and [`vast/vast-catalog/USAGE.md`](vast/vast-catalog/USAGE.md).
 
-### `alibigen/` — Communication Intelligence & Harvesting
+### `timefinder/` — Communication Intelligence & Harvesting
 
-A local, rule-based pipeline that extracts Slack and Gmail activity, clusters conversations, scores work-journal candidates, and produces reviewable calendar artifacts—without LLM inference or cloud-side processing of message content.
+A local, rule-based pipeline that extracts Slack and Gmail activity, clusters conversations, scores work-journal candidates, supports interactive ICS review, and syncs approved entries to Google Calendar—without LLM inference during candidate scoring.
 
 ### `scripts/` — Infrastructure Diagnostics & Workspace Automation
 

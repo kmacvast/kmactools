@@ -1,14 +1,12 @@
-"""Tests for get_alibigen_messages.py and message source helpers."""
+"""Tests for message_gather.py and message source helpers."""
 from __future__ import annotations
 
 import json
 from unittest.mock import MagicMock, patch
 
-import pytest
-
-from alibigen import get_alibigen_messages
-from alibigen import gmail_messages as gmail
-from alibigen import slack_messages as slack
+from timefinder import gmail_messages as gmail
+from timefinder import message_gather
+from timefinder import slack_messages as slack
 
 
 def _mock_response(payload: dict) -> MagicMock:
@@ -21,34 +19,36 @@ def _mock_response(payload: dict) -> MagicMock:
 
 
 def test_resolve_sources_defaults_to_both():
-    args = get_alibigen_messages.parse_args([])
-    assert get_alibigen_messages.resolve_sources(args) == {"slack", "gmail"}
+    args = message_gather.parse_gather_args([])
+    assert message_gather.resolve_sources(args) == {"slack", "gmail"}
 
 
 def test_resolve_sources_slack_only():
-    args = get_alibigen_messages.parse_args(["--slack"])
-    assert get_alibigen_messages.resolve_sources(args) == {"slack"}
+    args = message_gather.parse_gather_args(["--slack"])
+    assert message_gather.resolve_sources(args) == {"slack"}
 
 
 def test_resolve_sources_gmail_only():
-    args = get_alibigen_messages.parse_args(["--gmail"])
-    assert get_alibigen_messages.resolve_sources(args) == {"gmail"}
+    args = message_gather.parse_gather_args(["--gmail"])
+    assert message_gather.resolve_sources(args) == {"gmail"}
 
 
-def test_main_runs_both_sources_by_default():
-    with patch.object(get_alibigen_messages, "run_slack_backup", return_value=["/tmp/slack.json"]) as slack_mock, patch.object(
-        get_alibigen_messages, "run_gmail_backup", return_value=["/tmp/gmail.json"]
+def test_run_gather_messages_runs_both_sources_by_default():
+    args = message_gather.parse_gather_args([])
+    with patch.object(message_gather, "run_slack_backup", return_value=["/tmp/slack.json"]) as slack_mock, patch.object(
+        message_gather, "run_gmail_backup", return_value=["/tmp/gmail.json"]
     ) as gmail_mock:
-        assert get_alibigen_messages.main(["--slack-config", "/dev/null", "--gmail-config", "/dev/null"]) == 0
+        assert message_gather.run_gather_messages(args) == 0
     slack_mock.assert_called_once()
     gmail_mock.assert_called_once()
 
 
-def test_main_slack_only():
-    with patch.object(get_alibigen_messages, "run_slack_backup", return_value=["/tmp/slack.json"]) as slack_mock, patch.object(
-        get_alibigen_messages, "run_gmail_backup", return_value=[]
+def test_run_gather_messages_slack_only():
+    args = message_gather.parse_gather_args(["--slack"])
+    with patch.object(message_gather, "run_slack_backup", return_value=["/tmp/slack.json"]) as slack_mock, patch.object(
+        message_gather, "run_gmail_backup", return_value=[]
     ) as gmail_mock:
-        assert get_alibigen_messages.main(["--slack"]) == 0
+        assert message_gather.run_gather_messages(args) == 0
     slack_mock.assert_called_once()
     gmail_mock.assert_not_called()
 

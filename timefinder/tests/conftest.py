@@ -1,4 +1,4 @@
-"""Shared pytest helpers for alibigen tests."""
+"""Shared pytest helpers for TimeFinder tests."""
 from __future__ import annotations
 
 import json
@@ -6,10 +6,10 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-ALIBIGEN_ROOT = Path(__file__).resolve().parents[1]
+TIMEFINDER_ROOT = Path(__file__).resolve().parents[1]
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
-sys.path.insert(0, str(ALIBIGEN_ROOT.parent))
+sys.path.insert(0, str(TIMEFINDER_ROOT.parent))
 
 
 def ts_at(year: int, month: int, day: int, hour: int = 10, minute: int = 0, second: int = 0) -> str:

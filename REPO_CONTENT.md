@@ -10,7 +10,7 @@ This document complements the executive [README.md](README.md). Use it when you 
 
 ```text
 kmactools/
-├── alibigen/          Communication intelligence & message harvesting
+├── timefinder/        Communication intelligence & message harvesting
 ├── scripts/           Infrastructure diagnostics & lab automation
 ├── tests/             Root regression / mock verification suite
 ├── vast/              VAST Data Platform SE engineering toolkit
@@ -21,25 +21,28 @@ kmactools/
 
 ---
 
-## 1. `alibigen/` — Communication Intelligence & Harvesting Framework
+## 1. `timefinder/` — Communication Intelligence & Harvesting Framework
 
 **What it is:** A diagnostic message extraction and activity processing suite for building evidence-backed work journals from local Slack and Gmail backups.
 
-**What it does:** Authenticates with Google API and Slack workspace endpoints (via CLI tokens), executes high-volume text harvesting into `~/.alibigen_cache/`, resolves channel/DM mappings, clusters conversation threads, and applies weighted heuristics to surface calendar-worthy work blocks—all locally, without LLM inference.
+**What it does:** Authenticates with Slack workspace endpoints (via CLI tokens) and Google Calendar (OAuth2), executes high-volume text harvesting into `~/.timefinder_cache/`, resolves channel/DM mappings, clusters conversation threads, applies weighted heuristics to surface calendar-worthy work blocks, supports interactive ICS review, and syncs approved entries to Google Calendar—all locally for scoring, without LLM inference.
 
 | Item | Role |
 | :--- | :--- |
-| `init_alibigen_channels.py` | Bootstrap hardcoded channel list → Slack IDs |
-| `resolve_alibigen_channels.py` | Interactive resolver for channels, DMs, group DMs |
-| `get_alibigen_messages.py` | Gather Slack and/or Gmail messages to local cache |
-| `get_alibigen_candidates.py` | Score and emit reviewable calendar candidate files |
+| `timefinder.py` | Unified CLI for all TimeFinder capabilities |
+| `channels_init.py` | Bootstrap hardcoded channel list → Slack IDs |
+| `channels_resolve.py` | Interactive resolver for channels, DMs, group DMs |
+| `message_gather.py` | Gather Slack and/or Gmail messages to local cache |
+| `candidates.py` | Score and emit reviewable calendar candidate files |
+| `ics_review.py` | Interactive ICS review wizard |
+| `google_calendar.py` | Google OAuth and Calendar sync |
 | `slack_messages.py` | Slack API / backup helpers |
-| `gmail_messages.py` | Gmail API helpers |
-| `threadharvest.py` | Thread extraction utilities |
+| `gmail_messages.py` | Gmail IMAP helpers |
+| `thread_harvest.py` | Full channel + thread JSON harvest |
 | `HEURISTICS.md` | Scoring, clustering, dedup, and noise-filter documentation |
 | `SETUP_macOS.md` | First-time macOS + Slack CLI setup |
 | `README.md` | Module workflow, config, and usage |
-| `tests/` | AlibiGen unit tests |
+| `tests/` | TimeFinder unit tests |
 
 **Platform note:** macOS-focused setup; see `SETUP_macOS.md`.
 
@@ -197,7 +200,7 @@ cd vast/vast-catalog && ./run_vcat_test_suite.sh
 | Get a VMS API token | `vast/auth/vast_get_token.py` |
 | Monitor live NFS ops on cluster | `vast/vast-nfstop/vast-nfstop.py` |
 | Report directory logical vs physical usage | `vast/vast-du/vast-du.py` |
-| Harvest Slack/Gmail for work journal | `alibigen/get_alibigen_messages.py` · [alibigen/README.md](alibigen/README.md) |
+| Harvest Slack/Gmail for work journal | `timefinder/timefinder.py --gather-candidate-entries` · [timefinder/README.md](timefinder/README.md) |
 | Run all mock regressions | `python3 -m unittest discover -s tests` |
 
 ---
@@ -210,6 +213,6 @@ cd vast/vast-catalog && ./run_vcat_test_suite.sh
 | VAST module overview | [vast/README.md](vast/README.md) |
 | Catalog architecture | [vast/vast-catalog/README.md](vast/vast-catalog/README.md) |
 | Catalog CLI manual | [vast/vast-catalog/USAGE.md](vast/vast-catalog/USAGE.md) |
-| AlibiGen workflow | [alibigen/README.md](alibigen/README.md) |
+| TimeFinder workflow | [timefinder/README.md](timefinder/README.md) |
 | VAST-DU metrics | [vast/vast-du/README.md](vast/vast-du/README.md) |
 | NFS monitor | [vast/vast-nfstop/README.md](vast/vast-nfstop/README.md) |

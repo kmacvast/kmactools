@@ -1,17 +1,4 @@
-#!/usr/bin/env python3
-"""Gather Slack and Gmail messages for AlibiGen.
-
-Usage:
-  ./get_alibigen_messages.py
-  ./get_alibigen_messages.py --slack
-  ./get_alibigen_messages.py --gmail
-  ./get_alibigen_messages.py --lookback-days 7 --verbose
-
-By default fetches both Slack and Gmail. Use --slack or --gmail to limit sources.
-
-Slack config: ~/.alibigen_cache/slack_channels.json
-Gmail config: ~/.alibigen_cache/gmail_config.json
-"""
+"""Gather Slack and Gmail messages for TimeFinder."""
 from __future__ import annotations
 
 import argparse
@@ -19,22 +6,19 @@ import logging
 import sys
 from pathlib import Path
 
-if __package__ is None:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from timefinder.gmail_messages import DEFAULT_CONFIG_PATH as GMAIL_CONFIG_PATH
+from timefinder.gmail_messages import DEFAULT_OUTPUT_DIR
+from timefinder.gmail_messages import run_gmail_backup
+from timefinder.slack_messages import DEFAULT_CONFIG_PATH as SLACK_CONFIG_PATH
+from timefinder.slack_messages import DEFAULT_USER_MAP_PATH
+from timefinder.slack_messages import run_slack_backup
 
-from alibigen.gmail_messages import DEFAULT_CONFIG_PATH as GMAIL_CONFIG_PATH
-from alibigen.gmail_messages import DEFAULT_OUTPUT_DIR
-from alibigen.gmail_messages import run_gmail_backup
-from alibigen.slack_messages import DEFAULT_CONFIG_PATH as SLACK_CONFIG_PATH
-from alibigen.slack_messages import DEFAULT_USER_MAP_PATH
-from alibigen.slack_messages import run_slack_backup
-
-LOG_FILE = "/tmp/get_alibigen_messages.log"
+LOG_FILE = "/tmp/timefinder_messages.log"
 
 
-def parse_args(argv=None):
-    """Parse command-line arguments."""
-    parser = argparse.ArgumentParser(description="Gather Slack and Gmail messages for AlibiGen.")
+def parse_gather_args(argv=None):
+    """Parse command-line arguments for message gathering."""
+    parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--slack", action="store_true", help="Gather Slack messages only.")
     parser.add_argument("--gmail", action="store_true", help="Gather Gmail messages only.")
     parser.add_argument("--lookback-days", type=int, default=7)
@@ -74,13 +58,12 @@ def resolve_sources(args) -> set[str]:
     return {"slack", "gmail"}
 
 
-def main(argv=None) -> int:
+def run_gather_messages(args) -> int:
     """Gather Slack and/or Gmail messages."""
-    args = parse_args(argv)
     configure_logging(args.verbose)
     sources = resolve_sources(args)
 
-    logging.info("Starting AlibiGen message gather: %s", ", ".join(sorted(sources)))
+    logging.info("Starting TimeFinder message gather: %s", ", ".join(sorted(sources)))
     print(f"Gathering messages from: {', '.join(sorted(sources))}")
 
     created_files = []
@@ -125,7 +108,3 @@ def main(argv=None) -> int:
     if errors and not created_files:
         return 1
     return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

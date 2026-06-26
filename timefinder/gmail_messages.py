@@ -1,4 +1,4 @@
-"""Gmail message fetch helpers for AlibiGen."""
+"""Gmail message fetch helpers for TimeFinder."""
 from __future__ import annotations
 
 import email
@@ -11,8 +11,8 @@ from datetime import datetime, timedelta
 from email.header import decode_header
 from email.utils import parsedate_to_datetime
 
-DEFAULT_CONFIG_PATH = os.path.expanduser("~/.alibigen_cache/gmail_config.json")
-DEFAULT_OUTPUT_DIR = os.path.expanduser("~/.alibigen_cache")
+DEFAULT_CONFIG_PATH = os.path.expanduser("~/.timefinder_cache/gmail_config.json")
+DEFAULT_OUTPUT_DIR = os.path.expanduser("~/.timefinder_cache")
 
 
 def decode_mime_header(value: str | None) -> str:

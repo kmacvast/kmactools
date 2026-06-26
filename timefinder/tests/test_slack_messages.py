@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock
 
-from alibigen import slack_messages as slack
+from timefinder import slack_messages as slack
 
 
 def _mock_response(payload: dict) -> MagicMock:

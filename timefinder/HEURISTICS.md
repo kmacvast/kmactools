@@ -1,6 +1,6 @@
-# AlibiGen Candidate Selection Heuristics
+# TimeFinder Candidate Selection Heuristics
 
-This document describes the deterministic pipeline inside `get_alibigen_candidates.py`. The script converts local Slack backup JSON into proposed work-journal calendar entries using **rules only** — no LLMs, no network calls, no external APIs.
+This document describes the deterministic pipeline inside `candidates.py`. TimeFinder converts local Slack backup JSON into proposed work-journal calendar entries using **rules only** — no LLMs, no network calls, no external APIs during scoring.
 
 For setup and day-to-day usage, see [README.md](README.md).
 
@@ -8,9 +8,9 @@ For setup and day-to-day usage, see [README.md](README.md).
 
 ## Overview
 
-`get_alibigen_candidates.py` is a **100% local, privacy-first, rule-based engine**. It:
+The candidate engine is a **100% local, privacy-first, rule-based engine**. It:
 
-1. Reads Slack message backups from `~/.alibigen_cache/slack_*.json`
+1. Reads Slack message backups from `~/.timefinder_cache/slack_*.json`
 2. Normalizes and deduplicates messages within the `--lookback-days` window
 3. Groups messages into conversation clusters
 4. Scores each cluster for work meaningfulness
@@ -19,6 +19,12 @@ For setup and day-to-day usage, see [README.md](README.md).
 7. Writes review files (`calendar_candidates.json`, `.md`, `.ics`)
 
 Every run with the same input files and `--date` produces identical output.
+
+Invoke via:
+
+```bash
+./timefinder/timefinder.py --generate-candidates [options]
+```
 
 ### End-to-end pipeline
 
@@ -199,7 +205,7 @@ When merged:
 
 Candidates are processed in descending confidence order so stronger entries absorb weaker ones.
 
-> **Known limitation:** merged time spans are **not** re-capped at `--max-duration`. A merged entry can exceed 120 minutes; trim manually after import if needed.
+> **Known limitation:** merged time spans are **not** re-capped at `--max-duration`. A merged entry can exceed 120 minutes; trim manually after sync if needed.
 
 ---
 
@@ -279,19 +285,18 @@ Channel title templates (hardcoded in `channel_to_title()`):
 - Scoring and summarization run entirely on local backup files
 - `redact_text()` strips obvious secrets from summaries and evidence
 - Full raw messages are never written to candidate output
-- No data leaves the machine during candidate generation
+- No data leaves the machine during candidate generation (Google sync is a separate explicit step)
 
 ---
 
-## Future extension points
+## Post-generation review and sync
 
-The script header notes planned optional enhancements:
+After candidates are written:
 
-- AI summarization/classification (not implemented)
-- Direct Google Calendar API push (not implemented; ICS import is the current path)
-
-The scoring and grouping functions are designed as pure, testable units so new signals can be added without changing the overall pipeline shape.
+1. **`--review-ics`** — interactive terminal wizard to approve, remove, or modify ICS entries in-memory before saving
+2. **Manual JSON edit** — set `"status": "approved"` on entries to sync
+3. **`--sync-google`** — programmatic push of approved JSON or reviewed ICS to Google Calendar `primary`
 
 ---
 
-[← Back to AlibiGen README](README.md)
+[← Back to TimeFinder README](README.md)

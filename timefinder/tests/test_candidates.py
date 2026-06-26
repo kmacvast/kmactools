@@ -1,15 +1,14 @@
-"""Tests for get_alibigen_candidates.py."""
+"""Tests for candidates.py."""
 from __future__ import annotations
 
 import json
-import shutil
 from datetime import datetime
 from pathlib import Path
 
 import pytest
 
-from alibigen import get_alibigen_candidates as cal
-from alibigen.tests.conftest import FIXTURES_DIR, load_fixture_messages, ts_at, write_slack_backup
+from timefinder import candidates as cal
+from timefinder.tests.conftest import FIXTURES_DIR, load_fixture_messages, ts_at, write_slack_backup
 
 
 REFERENCE_DATE = datetime(2026, 6, 22, 23, 59, 59)
@@ -193,7 +192,10 @@ def test_write_json_markdown_ics_outputs(populated_input_dir, tmp_path):
 
     payload = json.loads(json_path.read_text(encoding="utf-8"))
     assert payload["candidate_count"] == len(candidates)
-    assert "BEGIN:VCALENDAR" in ics_path.read_text(encoding="utf-8")
+    ics_text = ics_path.read_text(encoding="utf-8")
+    assert "BEGIN:VCALENDAR" in ics_text
+    assert "TimeFinder" in ics_text
+    assert "alibigen" not in ics_text.lower()
     assert "# Calendar Candidates" in md_path.read_text(encoding="utf-8")
 
 
@@ -242,10 +244,10 @@ def test_malformed_json_is_skipped(tmp_path, user_map):
     assert messages == []
 
 
-def test_cli_date_override(populated_input_dir, tmp_path):
+def test_run_generate_candidates(populated_input_dir, tmp_path):
     input_dir, user_map_path = populated_input_dir
     output_dir = tmp_path / "out"
-    exit_code = cal.main(
+    args = cal.parse_generate_args(
         [
             "--input-dir",
             str(input_dir),
@@ -258,7 +260,7 @@ def test_cli_date_override(populated_input_dir, tmp_path):
             "--no-ics",
         ]
     )
-    assert exit_code == 0
+    assert cal.run_generate_candidates(args) == 0
     assert (output_dir / "calendar_candidates.json").exists()
     assert (output_dir / "calendar_candidates.md").exists()
     assert not (output_dir / "calendar_candidates.ics").exists()
@@ -266,7 +268,7 @@ def test_cli_date_override(populated_input_dir, tmp_path):
 
 def test_dry_run(populated_input_dir, capsys):
     input_dir, user_map_path = populated_input_dir
-    exit_code = cal.main(
+    args = cal.parse_generate_args(
         [
             "--input-dir",
             str(input_dir),
@@ -277,7 +279,7 @@ def test_dry_run(populated_input_dir, capsys):
             "--dry-run",
         ]
     )
-    assert exit_code == 0
+    assert cal.run_generate_candidates(args) == 0
     captured = capsys.readouterr()
     assert "Dry run" in captured.out
 
@@ -285,7 +287,7 @@ def test_dry_run(populated_input_dir, capsys):
 def test_include_trivial_debug_output(populated_input_dir, tmp_path):
     input_dir, user_map_path = populated_input_dir
     output_dir = tmp_path / "out"
-    cal.main(
+    args = cal.parse_generate_args(
         [
             "--input-dir",
             str(input_dir),
@@ -299,6 +301,7 @@ def test_include_trivial_debug_output(populated_input_dir, tmp_path):
             "--no-ics",
         ]
     )
+    cal.run_generate_candidates(args)
     debug = json.loads((output_dir / "trivial_excluded.json").read_text(encoding="utf-8"))
     assert debug["excluded_count"] >= 1
 

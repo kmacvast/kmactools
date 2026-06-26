@@ -1,22 +1,4 @@
-#!/usr/bin/env python3
-"""Generate work-journal calendar candidates from local Slack backup JSON.
-
-Usage:
-  ./get_alibigen_candidates.py
-  ./get_alibigen_candidates.py --lookback-days 7
-  ./get_alibigen_candidates.py --min-confidence 0.65
-  ./get_alibigen_candidates.py --date 2026-06-22
-  ./get_alibigen_candidates.py --include-trivial-debug
-  ./get_alibigen_candidates.py --dry-run --verbose
-
-Outputs (default ~/.alibigen_cache/calendar_review/):
-  calendar_candidates.json
-  calendar_candidates.md
-  calendar_candidates.ics
-
-TODO: Google Calendar integration (pending_review -> approved -> create event)
-TODO: Optional AI summarization/classification extension point
-"""
+"""Rule-based calendar candidate generation from local Slack backups."""
 from __future__ import annotations
 
 import argparse
@@ -31,9 +13,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
-DEFAULT_INPUT_DIR = os.path.expanduser("~/.alibigen_cache")
-DEFAULT_OUTPUT_DIR = os.path.expanduser("~/.alibigen_cache/calendar_review")
-DEFAULT_USER_MAP_PATH = os.path.expanduser("~/.alibigen_cache/slack_users.json")
+DEFAULT_INPUT_DIR = os.path.expanduser("~/.timefinder_cache")
+DEFAULT_OUTPUT_DIR = os.path.expanduser("~/.timefinder_cache/calendar_review")
+DEFAULT_USER_MAP_PATH = os.path.expanduser("~/.timefinder_cache/slack_users.json")
 
 SLACK_FILE_RE = re.compile(r"^slack_(.+)_(\d{4}-\d{2}-\d{2})\.json$")
 TRIVIAL_RE = re.compile(
@@ -119,11 +101,9 @@ class MessageGroup:
         return max(message.ts for message in self.messages)
 
 
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    """Parse command-line arguments."""
-    parser = argparse.ArgumentParser(
-        description="Generate work-journal calendar candidates from Slack backups.",
-    )
+def parse_generate_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse command-line arguments for candidate generation."""
+    parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--input-dir", default=DEFAULT_INPUT_DIR)
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--user-map", default=DEFAULT_USER_MAP_PATH)
@@ -508,9 +488,9 @@ def build_evidence(group: MessageGroup, limit: int = 5) -> list[dict[str, str]]:
             excerpt = excerpt[:117] + "..."
         evidence.append(
             {
-                "timestamp": message.ts.isoformat(timespec="seconds"),
-                "channel": message.channel,
                 "user": message.user_display,
+                "channel": message.channel,
+                "timestamp": message.ts.isoformat(timespec="seconds"),
                 "text_excerpt": excerpt,
             }
         )
@@ -741,12 +721,12 @@ def write_ics_output(candidates: list[dict[str, Any]], path: str) -> None:
     lines = [
         "BEGIN:VCALENDAR",
         "VERSION:2.0",
-        "PRODID:-//AlibiGen//Slack Calendar Candidates//EN",
+        "PRODID:-//TimeFinder//Slack Calendar Candidates//EN",
         "CALSCALE:GREGORIAN",
         "METHOD:PUBLISH",
     ]
     for candidate in candidates:
-        uid = f"{candidate['id']}@alibigen.local"
+        uid = f"{candidate['id']}@timefinder.local"
         start = datetime.fromisoformat(candidate["start_time"])
         end = datetime.fromisoformat(candidate["end_time"])
         description = ics_escape(
@@ -783,6 +763,7 @@ def process_slack_backups(
     include_trivial_debug: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """End-to-end processing pipeline returning candidates and excluded groups."""
+    del include_trivial_debug
     messages = load_slack_files(input_dir, lookback_days, reference_date, name_map)
     messages = dedupe_messages(messages)
     groups = group_messages(messages, cluster_window_minutes)
@@ -821,9 +802,8 @@ def process_slack_backups(
     return dedupe_candidates(candidates), excluded
 
 
-def main(argv: list[str] | None = None) -> int:
-    """CLI entry point."""
-    args = parse_args(argv)
+def run_generate_candidates(args: argparse.Namespace) -> int:
+    """Generate calendar candidate files from local Slack backups."""
     configure_logging(args.verbose, args.debug)
 
     if args.reference_date:
@@ -872,7 +852,3 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"Wrote {len(candidates)} candidates to {output_dir}")
     return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

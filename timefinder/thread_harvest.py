@@ -1,12 +1,5 @@
-#!/usr/bin/env python3
-"""Harvest all messages and thread replies from a specific Slack channel.
-
-Credentials and browser session cookies are automatically read from 
-~/.slack/credentials.json to support high-privilege browser tokens.
-
-Usage:
-  ./threadharvest.py --channel C0123456789
-"""
+"""Harvest all messages and thread replies from a specific Slack channel."""
+from __future__ import annotations
 
 import argparse
 import json
@@ -22,39 +15,23 @@ from typing import Any
 DEFAULT_CREDS_PATH = os.path.expanduser("~/.slack/credentials.json")
 
 
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    """Parse command-line arguments."""
-    parser = argparse.ArgumentParser(
-        description="Harvest all channel messages and their associated threads into a flat JSON backup.",
-    )
-    parser.add_argument(
-        "--channel", "-c", 
-        required=True, 
-        help="The Slack Channel ID to harvest (e.g., C0123456789)"
-    )
-    parser.add_argument(
-        "--credentials", 
-        default=DEFAULT_CREDS_PATH,
-        help=f"Path to local credentials JSON file (defaults to {DEFAULT_CREDS_PATH})"
-    )
-    parser.add_argument(
-        "--team-id",
-        help="Specific Slack Team ID to pull the token for if multiple exist in credentials.json"
-    )
-    parser.add_argument(
-        "--output", "-o", 
-        help="Path to output JSON file (defaults to ~/Downloads/slack_<channel_id>.json)"
-    )
+def parse_harvest_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse command-line arguments for thread harvest."""
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--channel", "-c", required=True, help="Slack Channel ID to harvest.")
+    parser.add_argument("--credentials", default=DEFAULT_CREDS_PATH)
+    parser.add_argument("--team-id", default=None)
+    parser.add_argument("--output", "-o", default=None)
     return parser.parse_args(argv)
 
 
 def print_succinct_setup_instructions() -> None:
-    """Print clean, clear, copy-pasteable instructions for setting up credentials.json."""
+    """Print setup instructions for Slack browser credentials."""
     instructions = """
 ===========================================================================
 [-] SLACK AUTHENTICATION FAILED (invalid_auth)
 ===========================================================================
-Your token or session cookie is invalid, missing, or expired. 
+Your token or session cookie is invalid, missing, or expired.
 
 Follow these succinct steps to refresh your configuration:
 
@@ -94,8 +71,9 @@ def check_token_expiry(team_id: str, team_info: dict[str, Any]) -> None:
             exp_time = datetime.fromtimestamp(float(exp))
             if datetime.now() > exp_time:
                 print(
-                    f"[-] Warning: The token for Team {team_id} expired on {exp_time.strftime('%Y-%m-%d %H:%M:%S')} local time.",
-                    file=sys.stderr
+                    f"[-] Warning: The token for Team {team_id} expired on "
+                    f"{exp_time.strftime('%Y-%m-%d %H:%M:%S')} local time.",
+                    file=sys.stderr,
                 )
         except (ValueError, OverflowError):
             pass
@@ -110,7 +88,7 @@ def resolve_credentials(creds_path: str, team_id: str | None) -> tuple[str | Non
     try:
         with open(creds_path, "r", encoding="utf-8") as handle:
             creds_data = json.load(handle)
-        
+
         if not isinstance(creds_data, dict) or not creds_data:
             print(f"Error: Invalid or empty JSON structure in {creds_path}", file=sys.stderr)
             return None, None
@@ -133,16 +111,21 @@ def resolve_credentials(creds_path: str, team_id: str | None) -> tuple[str | Non
 
     except (json.JSONDecodeError, OSError) as exc:
         print(f"Error reading credentials file {creds_path}: {exc}", file=sys.stderr)
-    
+
     return None, None
 
 
-def slack_api_call(method: str, token: str, params: dict[str, Any], cookie: str | None = None) -> dict[str, Any]:
+def slack_api_call(
+    method: str,
+    token: str,
+    params: dict[str, Any],
+    cookie: str | None = None,
+) -> dict[str, Any]:
     """Make a rate-limit aware GET request to the Slack API using urllib."""
     url = f"https://slack.com/api/{method}?{urllib.parse.urlencode(params)}"
     req = urllib.request.Request(url)
     req.add_header("Authorization", f"Bearer {token}")
-    
+
     if cookie:
         clean_cookie = cookie.strip()
         if clean_cookie.startswith("d="):
@@ -150,11 +133,11 @@ def slack_api_call(method: str, token: str, params: dict[str, Any], cookie: str 
         req.add_header("Cookie", f"d={clean_cookie}")
 
     max_retries = 5
-    for attempt in range(max_retries):
+    for _attempt in range(max_retries):
         try:
             with urllib.request.urlopen(req) as response:
                 res = json.loads(response.read().decode("utf-8"))
-                
+
                 if not res.get("ok"):
                     error_code = res.get("error")
                     if error_code == "ratelimited":
@@ -162,11 +145,11 @@ def slack_api_call(method: str, token: str, params: dict[str, Any], cookie: str 
                         print(f"Rate limited by Slack. Sleeping for {retry_after}s...", file=sys.stderr)
                         time.sleep(retry_after)
                         continue
-                    elif error_code == "token_expired":
+                    if error_code == "token_expired":
                         print("\n[-] Error: Slack API reports that your token is expired.", file=sys.stderr)
                         print_succinct_setup_instructions()
                         sys.exit(1)
-                    elif error_code == "invalid_auth":
+                    if error_code == "invalid_auth":
                         print_succinct_setup_instructions()
                         sys.exit(1)
                     raise RuntimeError(f"Slack API Error [{method}]: {error_code}")
@@ -183,9 +166,8 @@ def slack_api_call(method: str, token: str, params: dict[str, Any], cookie: str 
     raise RuntimeError(f"Failed to complete Slack API call to {method} after maximum retries.")
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
-
+def run_harvest_thread(args: argparse.Namespace) -> int:
+    """Harvest channel messages and thread replies to JSON."""
     token, cookie = resolve_credentials(args.credentials, args.team_id)
     if not token:
         print(f"Error: Could not find a valid Slack token inside {args.credentials}", file=sys.stderr)
@@ -198,13 +180,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[*] Loaded Cookie: {c_disp}", file=sys.stderr)
 
     channel_id = args.channel
-    
-    # Defaults out to the user's local Downloads catalog
     output_path = args.output or os.path.expanduser(f"~/Downloads/slack_{channel_id}.json")
 
     messages_map: dict[str, dict[str, Any]] = {}
-    
-    # 1. Fetch top-level channel history
+
     print(f"[*] Fetching history for channel {channel_id}...", flush=True)
     cursor = None
     while True:
@@ -214,28 +193,23 @@ def main(argv: list[str] | None = None) -> int:
 
         res = slack_api_call("conversations.history", token, params, cookie=cookie)
         messages = res.get("messages", [])
-        
+
         for msg in messages:
             messages_map[msg["ts"]] = msg
 
         print(f"    Loaded {len(messages)} messages (Total unique: {len(messages_map)})", flush=True)
-        
+
         cursor = res.get("response_metadata", {}).get("next_cursor")
         if not cursor:
             break
 
-    # 2. Identify messages that serve as thread roots
-    thread_roots = [
-        ts for ts, msg in messages_map.items() 
-        if msg.get("reply_count", 0) > 0
-    ]
-    
+    thread_roots = [ts for ts, msg in messages_map.items() if msg.get("reply_count", 0) > 0]
+
     if thread_roots:
         print(f"[*] Found {len(thread_roots)} threads to harvest recursively...", flush=True)
     else:
         print("[*] No threaded replies found in this channel window.", flush=True)
 
-    # 3. Recursively pull thread messages
     for idx, root_ts in enumerate(thread_roots, start=1):
         print(f"    [{idx}/{len(thread_roots)}] Fetching replies for thread root {root_ts}...", flush=True)
         cursor = None
@@ -246,7 +220,7 @@ def main(argv: list[str] | None = None) -> int:
 
             res = slack_api_call("conversations.replies", token, params, cookie=cookie)
             replies = res.get("messages", [])
-            
+
             for reply in replies:
                 messages_map[reply["ts"]] = reply
 
@@ -254,9 +228,8 @@ def main(argv: list[str] | None = None) -> int:
             if not cursor:
                 break
 
-    # 4. Sort flat messages chronologically and export
-    final_list = sorted(messages_map.values(), key=lambda x: float(x["ts"]))
-    
+    final_list = sorted(messages_map.values(), key=lambda item: float(item["ts"]))
+
     print(f"[*] Writing {len(final_list)} total messages to {output_path}...", flush=True)
     with open(output_path, "w", encoding="utf-8") as handle:
         json.dump(final_list, handle, indent=2)
@@ -264,7 +237,3 @@ def main(argv: list[str] | None = None) -> int:
 
     print("[+] Done!")
     return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

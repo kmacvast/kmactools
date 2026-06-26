@@ -1,4 +1,4 @@
-"""Slack message fetch helpers for AlibiGen."""
+"""Slack message fetch helpers for TimeFinder."""
 from __future__ import annotations
 
 import json
@@ -9,9 +9,9 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta
 
-DEFAULT_CONFIG_PATH = os.path.expanduser("~/.alibigen_cache/slack_channels.json")
-DEFAULT_OUTPUT_DIR = os.path.expanduser("~/.alibigen_cache")
-DEFAULT_USER_MAP_PATH = os.path.expanduser("~/.alibigen_cache/slack_users.json")
+DEFAULT_CONFIG_PATH = os.path.expanduser("~/.timefinder_cache/slack_channels.json")
+DEFAULT_OUTPUT_DIR = os.path.expanduser("~/.timefinder_cache")
+DEFAULT_USER_MAP_PATH = os.path.expanduser("~/.timefinder_cache/slack_users.json")
 
 
 def slack_api_get(url, params, token, d_cookie, urlopen_fn=urllib.request.urlopen):

@@ -18,5 +18,5 @@ def test_cli_generate_candidates_dispatch():
 
 def test_cli_gather_dispatch():
     with patch("timefinder.timefinder.run_gather_messages", return_value=0) as mock_run:
-        assert timefinder.main(["--gather-candidate-entries", "--slack"]) == 0
+        assert timefinder.main(["--gather-candidate-entries"]) == 0
     mock_run.assert_called_once()

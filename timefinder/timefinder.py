@@ -12,7 +12,8 @@ if __package__ is None:
 from timefinder.candidates import parse_generate_args, run_generate_candidates
 from timefinder.channels_init import run_init_channels
 from timefinder.channels_resolve import run_add_slack_channels
-from timefinder.google_calendar import run_setup_google_auth, run_sync_google
+from timefinder.google_auth import run_setup_google_auth
+from timefinder.google_calendar import run_sync_google
 from timefinder.ics_review import run_ics_review
 from timefinder.message_gather import parse_gather_args, run_gather_messages
 from timefinder.thread_harvest import parse_harvest_args, run_harvest_thread
@@ -27,7 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
 Examples:
   %(prog)s --init-channels
   %(prog)s --add-slack-channels
-  %(prog)s --gather-candidate-entries --slack
+  %(prog)s --gather-candidate-entries
   %(prog)s --generate-candidates --date 2026-06-22
   %(prog)s --harvest-thread --channel C0123456789
   %(prog)s --review-ics ~/.timefinder_cache/calendar_review/calendar_candidates.ics
@@ -45,7 +46,7 @@ Examples:
     parser.add_argument(
         "--gather-candidate-entries",
         action="store_true",
-        help="Gather Slack and/or Gmail messages into local cache.",
+        help="Gather Slack and Gmail messages into local cache (both required).",
     )
     parser.add_argument(
         "--generate-candidates",
@@ -73,8 +74,6 @@ Examples:
         help="Sync approved events from JSON or ICS to Google Calendar.",
     )
 
-    parser.add_argument("--slack", action="store_true", help="Gather Slack only (with --gather-candidate-entries).")
-    parser.add_argument("--gmail", action="store_true", help="Gather Gmail only (with --gather-candidate-entries).")
     parser.add_argument("--lookback-days", type=int, default=7)
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--slack-config", default=None)
@@ -129,12 +128,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.gather_candidate_entries:
-        gather_argv = []
-        if args.slack:
-            gather_argv.append("--slack")
-        if args.gmail:
-            gather_argv.append("--gmail")
-        gather_argv.extend(["--lookback-days", str(args.lookback_days)])
+        gather_argv = ["--lookback-days", str(args.lookback_days)]
         if args.output_dir:
             gather_argv.extend(["--output-dir", args.output_dir])
         if args.slack_config:

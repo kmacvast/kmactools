@@ -18,22 +18,12 @@ def _mock_response(payload: dict) -> MagicMock:
     return response
 
 
-def test_resolve_sources_defaults_to_both():
+def test_resolve_sources_always_includes_slack_and_gmail():
     args = message_gather.parse_gather_args([])
     assert message_gather.resolve_sources(args) == {"slack", "gmail"}
 
 
-def test_resolve_sources_slack_only():
-    args = message_gather.parse_gather_args(["--slack"])
-    assert message_gather.resolve_sources(args) == {"slack"}
-
-
-def test_resolve_sources_gmail_only():
-    args = message_gather.parse_gather_args(["--gmail"])
-    assert message_gather.resolve_sources(args) == {"gmail"}
-
-
-def test_run_gather_messages_runs_both_sources_by_default():
+def test_run_gather_messages_runs_both_sources():
     args = message_gather.parse_gather_args([])
     with patch.object(message_gather, "run_slack_backup", return_value=["/tmp/slack.json"]) as slack_mock, patch.object(
         message_gather, "run_gmail_backup", return_value=["/tmp/gmail.json"]
@@ -43,14 +33,24 @@ def test_run_gather_messages_runs_both_sources_by_default():
     gmail_mock.assert_called_once()
 
 
-def test_run_gather_messages_slack_only():
-    args = message_gather.parse_gather_args(["--slack"])
-    with patch.object(message_gather, "run_slack_backup", return_value=["/tmp/slack.json"]) as slack_mock, patch.object(
-        message_gather, "run_gmail_backup", return_value=[]
-    ) as gmail_mock:
-        assert message_gather.run_gather_messages(args) == 0
-    slack_mock.assert_called_once()
-    gmail_mock.assert_not_called()
+def test_run_gather_messages_fails_when_gmail_errors():
+    args = message_gather.parse_gather_args([])
+    with patch.object(message_gather, "run_slack_backup", return_value=["/tmp/slack.json"]), patch.object(
+        message_gather,
+        "run_gmail_backup",
+        side_effect=FileNotFoundError("Gmail configuration not found"),
+    ):
+        assert message_gather.run_gather_messages(args) == 1
+
+
+def test_run_gather_messages_fails_when_slack_errors():
+    args = message_gather.parse_gather_args([])
+    with patch.object(
+        message_gather,
+        "run_slack_backup",
+        side_effect=FileNotFoundError("Slack configuration not found"),
+    ), patch.object(message_gather, "run_gmail_backup", return_value=["/tmp/gmail.json"]):
+        assert message_gather.run_gather_messages(args) == 1
 
 
 def test_dedupe_messages_by_ts():

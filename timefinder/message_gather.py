@@ -19,8 +19,6 @@ LOG_FILE = "/tmp/timefinder_messages.log"
 def parse_gather_args(argv=None):
     """Parse command-line arguments for message gathering."""
     parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--slack", action="store_true", help="Gather Slack messages only.")
-    parser.add_argument("--gmail", action="store_true", help="Gather Gmail messages only.")
     parser.add_argument("--lookback-days", type=int, default=7)
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--slack-config", default=SLACK_CONFIG_PATH)
@@ -46,20 +44,13 @@ def configure_logging(verbose: bool) -> None:
         root.addHandler(stream_handler)
 
 
-def resolve_sources(args) -> set[str]:
-    """Resolve which message sources to gather."""
-    if args.slack or args.gmail:
-        sources = set()
-        if args.slack:
-            sources.add("slack")
-        if args.gmail:
-            sources.add("gmail")
-        return sources
+def resolve_sources(_args) -> set[str]:
+    """Resolve message sources to gather. Slack and Gmail are both required."""
     return {"slack", "gmail"}
 
 
 def run_gather_messages(args) -> int:
-    """Gather Slack and/or Gmail messages."""
+    """Gather Slack and Gmail messages. Both sources must succeed."""
     configure_logging(args.verbose)
     sources = resolve_sources(args)
 
@@ -80,9 +71,9 @@ def run_gather_messages(args) -> int:
                     lookback_days=args.lookback_days,
                 )
             )
-        except (FileNotFoundError, ValueError) as exc:
+        except (FileNotFoundError, ValueError, RuntimeError) as exc:
             errors.append(f"Slack: {exc}")
-            print(f"  Slack skipped: {exc}")
+            print(f"  Slack failed: {exc}")
 
     if "gmail" in sources:
         print("Gmail:")
@@ -94,9 +85,13 @@ def run_gather_messages(args) -> int:
                     lookback_days=args.lookback_days,
                 )
             )
-        except (FileNotFoundError, ValueError) as exc:
+        except (FileNotFoundError, ValueError, RuntimeError) as exc:
             errors.append(f"Gmail: {exc}")
-            print(f"  Gmail skipped: {exc}")
+            print(f"  Gmail failed: {exc}")
+            print(
+                "  Gmail is required. For Google Workspace use OAuth (SETUP_macOS.md Step 4B); "
+                "consumer Gmail can use IMAP app password (Step 4A)."
+            )
 
     print("\nSummary of created files:")
     if created_files:
@@ -105,6 +100,6 @@ def run_gather_messages(args) -> int:
     else:
         print("  No backup files were generated.")
 
-    if errors and not created_files:
+    if errors:
         return 1
     return 0

@@ -12,7 +12,7 @@ These are not fake meetings. They are evidence-backed work-journal blocks derive
 init/add channels  →  gather entries  →  generate candidates  →  review ICS  →  sync Google
 ```
 
-1. **Configure** Slack channels (and optionally Gmail folders).
+1. **Configure** Slack channels and Gmail IMAP credentials (both required).
 2. **Gather** messages into `~/.timefinder_cache/`.
 3. **Generate** calendar candidate files for human review.
 4. **Review** candidates interactively with `--review-ics` or edit JSON/Markdown manually.
@@ -36,7 +36,7 @@ All capabilities are exposed through a single entry point:
 |------|---------|
 | `--init-channels` | One-shot bootstrap: map a hardcoded channel list to Slack IDs |
 | `--add-slack-channels` | Interactive resolver for channels, DMs, and group DMs |
-| `--gather-candidate-entries` | Gather Slack and/or Gmail messages (default: both) |
+| `--gather-candidate-entries` | Gather Slack and Gmail messages (both required) |
 | `--generate-candidates` | Generate work-journal calendar candidates from local backups |
 | `--harvest-thread` | Harvest all messages and thread replies from a Slack channel |
 | `--review-ics PATH` | Interactive wizard to approve, remove, or modify ICS entries |
@@ -51,7 +51,8 @@ All capabilities are exposed through a single entry point:
 | `gmail_messages.py` | Gmail IMAP fetch and normalization |
 | `candidates.py` | Rule-based candidate generation engine |
 | `ics_review.py` | Interactive ICS review wizard |
-| `google_calendar.py` | Google Calendar OAuth and sync |
+| `google_auth.py` | Shared Google OAuth (Gmail + Calendar) |
+| `google_calendar.py` | Google Calendar sync |
 | `thread_harvest.py` | Full channel + thread JSON harvest |
 | `channels_init.py` | Slack channel bootstrap |
 | `channels_resolve.py` | Interactive Slack target resolver |
@@ -110,41 +111,91 @@ timefinder/
 
 Obtain `slack_token` via `slack auth token` — see **[SETUP_macOS.md](SETUP_macOS.md)**.
 
-### Gmail config example
+### Gmail config (required)
 
-`~/.timefinder_cache/gmail_config.json`:
+TimeFinder supports two Gmail auth modes:
+
+| Mode | Best for | Config |
+|------|----------|--------|
+| **`oauth`** (recommended) | **Google Workspace** (`@vastdata.com`) when app passwords are disabled | OAuth via `--setup-google-auth` |
+| **`imap`** | Personal `@gmail.com` accounts | App-specific password |
+
+Config path: `~/.timefinder_cache/gmail_config.json`
+
+#### Option A — OAuth (Google Workspace / `@vastdata.com`)
+
+Use this when app passwords are blocked by your org (common on Workspace).
+
+1. In [Google Cloud Console](https://console.cloud.google.com/):
+   - Create or select a project
+   - Enable **Gmail API** and **Google Calendar API**
+   - Configure OAuth consent screen (Internal if `@vastdata.com` only)
+   - Create **Desktop app** OAuth credentials
+   - Download JSON → save as `~/.timefinder_cache/google_client_secret.json`
+
+2. Authorize TimeFinder (browser flow — Gmail read + Calendar write):
+
+```bash
+./timefinder/timefinder.py --setup-google-auth
+```
+
+3. Create `~/.timefinder_cache/gmail_config.json`:
 
 ```json
 {
+  "auth": "oauth",
+  "email": "kevin.mcdonald@vastdata.com",
+  "labels": ["INBOX", "SENT"]
+}
+```
+
+`labels` accepts Gmail API label IDs (`INBOX`, `SENT`, `DRAFT`, …) or IMAP-style names like `[Gmail]/Sent Mail`.
+
+Full Workspace walkthrough: **[SETUP_macOS.md](SETUP_macOS.md)** Step 4B.
+
+#### Option B — IMAP app password (personal Gmail)
+
+```json
+{
+  "auth": "imap",
   "email": "you@gmail.com",
-  "app_password": "your-app-specific-password",
+  "app_password": "your-16-char-app-password",
   "folders": ["INBOX", "[Gmail]/Sent Mail"]
 }
 ```
 
-Use a [Google App Password](https://myaccount.google.com/apppasswords) with IMAP enabled.
+**App password setup** (consumer Gmail only):
+
+1. Enable [2-Step Verification](https://myaccount.google.com/security)
+2. Enable IMAP: Gmail → Settings → Forwarding and POP/IMAP → Enable IMAP
+3. Generate password at [Google App Passwords](https://myaccount.google.com/apppasswords)
+4. Paste the 16-character password into `gmail_config.json`
+
+Full IMAP walkthrough: **[SETUP_macOS.md](SETUP_macOS.md)** Step 4A.
 
 ## Setup
 
 **New users:** complete **[SETUP_macOS.md](SETUP_macOS.md)** first (Slack CLI, `slack auth token`, Python venv).
 
-Install optional Google Calendar dependencies:
+Install Google API dependencies (required for Workspace Gmail OAuth and Calendar sync):
 
 ```bash
 pip install -r timefinder/requirements.txt
 ```
 
-### Google Calendar OAuth
+### Google OAuth (Gmail + Calendar)
 
-1. Create a Google Cloud project with Calendar API enabled.
-2. Download OAuth **Desktop app** credentials as `~/.timefinder_cache/google_client_secret.json`.
+One `--setup-google-auth` run authorizes both Gmail read access and Calendar write access. Required for Workspace Gmail; also used for `--sync-google`.
+
+1. Enable **Gmail API** and **Google Calendar API** in Google Cloud Console.
+2. Download OAuth **Desktop app** credentials → `~/.timefinder_cache/google_client_secret.json`.
 3. Run:
 
 ```bash
 ./timefinder/timefinder.py --setup-google-auth
 ```
 
-Token is saved to `~/.timefinder_cache/google_token.json`.
+Token saved to `~/.timefinder_cache/google_token.json`.
 
 ## Usage
 
@@ -163,21 +214,17 @@ cd ~/git/kmactools
 
 ### Gather messages
 
+Both Slack and Gmail must be configured. The gather step fails if either source errors.
+
 ```bash
-# Slack + Gmail (default)
+# Slack + Gmail (required)
 ./timefinder/timefinder.py --gather-candidate-entries
-
-# Slack only
-./timefinder/timefinder.py --gather-candidate-entries --slack
-
-# Gmail only
-./timefinder/timefinder.py --gather-candidate-entries --gmail
 
 # Options
 ./timefinder/timefinder.py --gather-candidate-entries --lookback-days 7 --verbose
 ```
 
-If one source is misconfigured, the other still runs and the missing source is skipped with a message.
+If Gmail is not configured, see **[SETUP_macOS.md](SETUP_macOS.md)** — Step 4B for Workspace OAuth, Step 4A for personal IMAP.
 
 ### Generate calendar candidates
 
@@ -254,7 +301,7 @@ Events are inserted into your default `primary` Google Calendar.
 TimeFinder defaults to a 7-day lookback, so a once-per-week run is a natural cadence:
 
 ```bash
-./timefinder/timefinder.py --gather-candidate-entries --slack
+./timefinder/timefinder.py --gather-candidate-entries
 ./timefinder/timefinder.py --generate-candidates
 ./timefinder/timefinder.py --review-ics ~/.timefinder_cache/calendar_review/calendar_candidates.ics
 # mark approved in JSON if syncing from JSON

@@ -61,10 +61,10 @@ def test_run_sync_google_inserts_events(tmp_path):
     path = tmp_path / "approved.json"
     path.write_text(json.dumps(payload), encoding="utf-8")
 
-    mock_service = MagicMock()
-    mock_service.events.return_value.insert.return_value.execute.return_value = {"id": "evt1"}
-
-    with patch.object(gcal, "build_calendar_service", return_value=mock_service):
+    with patch.object(gcal, "build_google_service") as mock_build:
+        mock_service = MagicMock()
+        mock_service.events.return_value.insert.return_value.execute.return_value = {"id": "evt1"}
+        mock_build.return_value = mock_service
         assert gcal.run_sync_google(str(path)) == 0
 
     mock_service.events.return_value.insert.assert_called_once()

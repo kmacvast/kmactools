@@ -132,7 +132,121 @@ Then run `--add-slack-channels` to populate the `channels` map, or add channel n
 
 ---
 
-## Step 4 — Python environment (macOS)
+## Step 4 — Configure Gmail (required)
+
+TimeFinder **requires** Gmail alongside Slack. Choose **4B for Google Workspace** (`@vastdata.com`) — app passwords are often disabled by org policy.
+
+Config path: **`~/.timefinder_cache/gmail_config.json`**
+
+---
+
+### Step 4A — IMAP app password (personal `@gmail.com` only)
+
+Skip this if you are on Google Workspace and app passwords are denied.
+
+#### 4A.1 Enable 2-Step Verification
+
+1. Open [Google Account → Security](https://myaccount.google.com/security)
+2. Enable **2-Step Verification**
+
+#### 4A.2 Enable IMAP
+
+1. Gmail → **Settings** → **See all settings** → **Forwarding and POP/IMAP**
+2. **Enable IMAP** → **Save Changes**
+
+#### 4A.3 Generate app password
+
+1. Open [Google App Passwords](https://myaccount.google.com/apppasswords)
+2. Create a password for **Mail** / **Mac** (or custom name `TimeFinder`)
+3. Copy the 16-character password
+
+#### 4A.4 Create config
+
+```json
+{
+  "auth": "imap",
+  "email": "you@gmail.com",
+  "app_password": "xxxx xxxx xxxx xxxx",
+  "folders": ["INBOX", "[Gmail]/Sent Mail"]
+}
+```
+
+---
+
+### Step 4B — OAuth Gmail API (Google Workspace — recommended for `@vastdata.com`)
+
+Use this when [App Passwords](https://myaccount.google.com/apppasswords) shows **access denied** or the option is missing. TimeFinder uses the **Gmail API** with the same OAuth token as Google Calendar sync.
+
+#### 4B.1 Google Cloud project
+
+1. Open [Google Cloud Console](https://console.cloud.google.com/)
+2. Create or select a project (personal project is fine)
+3. **APIs & Services → Library** → enable:
+   - **Gmail API**
+   - **Google Calendar API**
+
+#### 4B.2 OAuth consent screen
+
+1. **APIs & Services → OAuth consent screen**
+2. User type: **Internal** (if available for `@vastdata.com`) or **External**
+3. Add scopes (or they are requested at auth time):
+   - `.../auth/gmail.readonly`
+   - `.../auth/calendar.events`
+4. Add your `@vastdata.com` address as a test user if using External + testing mode
+
+> If your Workspace admin blocks third-party apps, ask them to allow your OAuth client or use an admin-approved internal app.
+
+#### 4B.3 Desktop OAuth credentials
+
+1. **APIs & Services → Credentials → Create Credentials → OAuth client ID**
+2. Application type: **Desktop app**
+3. Download JSON → save as:
+
+```bash
+mkdir -p ~/.timefinder_cache
+# save downloaded file as:
+# ~/.timefinder_cache/google_client_secret.json
+```
+
+#### 4B.4 Authorize TimeFinder
+
+```bash
+cd ~/path/to/kmactools
+source .venv/bin/activate   # if using venv
+python3 timefinder/timefinder.py --setup-google-auth
+```
+
+Browser opens → sign in as `kevin.mcdonald@vastdata.com` → grant access.
+
+Token saved to `~/.timefinder_cache/google_token.json`.
+
+#### 4B.5 Create `gmail_config.json`
+
+```json
+{
+  "auth": "oauth",
+  "email": "kevin.mcdonald@vastdata.com",
+  "labels": ["INBOX", "SENT"]
+}
+```
+
+| Field | Notes |
+|-------|-------|
+| `auth` | Must be `"oauth"` |
+| `email` | Your Workspace address (informational) |
+| `labels` | Gmail label IDs: `INBOX`, `SENT`, `DRAFT`, `STARRED`, etc. IMAP names like `[Gmail]/Sent Mail` also work |
+
+#### 4B.6 Verify (optional)
+
+```bash
+python3 timefinder/timefinder.py --gather-candidate-entries --verbose
+```
+
+You should see: `Using Gmail API (OAuth) — recommended for Google Workspace.`
+
+---
+
+## Step 5 — Python environment (macOS)
 
 From the repo root:
 
@@ -145,28 +259,23 @@ pip install -r timefinder/requirements.txt
 
 ---
 
-## Step 5 — Google Calendar OAuth (optional)
+## Step 6 — Google Calendar sync (optional)
 
-1. Enable Google Calendar API in Google Cloud Console.
-2. Create OAuth **Desktop app** credentials.
-3. Save as `~/.timefinder_cache/google_client_secret.json`.
-4. Run:
+If you completed Step 4B, OAuth is already configured. To push approved work-journal entries to Calendar:
 
 ```bash
-python3 timefinder/timefinder.py --setup-google-auth
+python3 timefinder/timefinder.py --sync-google ~/.timefinder_cache/calendar_review/calendar_candidates.json
 ```
 
-Token is saved to `~/.timefinder_cache/google_token.json`.
+If you skipped 4B and only need Calendar sync (not Workspace Gmail), enable Calendar API, save `google_client_secret.json`, and run `--setup-google-auth`.
 
----
-
-## Step 6 — Verify TimeFinder end-to-end
+## Step 7 — Verify TimeFinder end-to-end
 
 ```bash
 source ~/path/to/kmactools/.venv/bin/activate
 cd ~/path/to/kmactools
 
-python3 timefinder/timefinder.py --gather-candidate-entries --slack
+python3 timefinder/timefinder.py --gather-candidate-entries
 python3 timefinder/timefinder.py --generate-candidates
 open ~/.timefinder_cache/calendar_review/calendar_candidates.md
 python3 timefinder/timefinder.py --review-ics ~/.timefinder_cache/calendar_review/calendar_candidates.ics
@@ -187,6 +296,11 @@ pytest timefinder/tests/ -v
 | `slack: command not found` | `~/.local/bin` not on PATH | Add to `~/.zshrc`, reload shell |
 | `invalid_auth` from TimeFinder | Expired or wrong token | Run `slack auth token` again and update `slack_channels.json` |
 | `Slack configuration not found` | Missing config file | Complete Step 3 |
+| `Gmail configuration not found` | Missing `gmail_config.json` | Complete Step 4A or 4B |
+| App passwords denied / unavailable | Workspace policy | Use OAuth — Step 4B |
+| `Google token not found` | OAuth not run | Run `--setup-google-auth` (Step 4B.4) |
+| Gmail API 403 / access blocked | OAuth app not allowed | Workspace admin must allow app; use Internal OAuth or test-user list |
+| `Gmail config requires email and app_password` | Wrong auth mode | Use `"auth": "oauth"` for Workspace |
 | `slack auth token` fails | CLI not logged in | Run `slack auth login` first |
 | Token expired | Service tokens rotate | Repeat Step 2 and update `slack_channels.json` |
 | Google sync fails | Missing OAuth token | Run `--setup-google-auth` |
@@ -195,7 +309,7 @@ pytest timefinder/tests/ -v
 
 ## Security reminders
 
-- Never commit `~/.timefinder_cache/slack_channels.json` or tokens to git.
+- Never commit `~/.timefinder_cache/slack_channels.json`, `gmail_config.json`, or tokens to git.
 - Treat `xoxp-` tokens like passwords — they grant access to your Slack workspace.
 - Raw message backups under `~/.timefinder_cache/` may contain sensitive content; keep that directory private.
 

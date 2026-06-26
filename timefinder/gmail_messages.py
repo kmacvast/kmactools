@@ -1,6 +1,7 @@
 """Gmail message fetch helpers for TimeFinder."""
 from __future__ import annotations
 
+import base64
 import email
 import imaplib
 import json
@@ -10,9 +11,22 @@ import re
 from datetime import datetime, timedelta
 from email.header import decode_header
 from email.utils import parsedate_to_datetime
+from typing import Any
 
 DEFAULT_CONFIG_PATH = os.path.expanduser("~/.timefinder_cache/gmail_config.json")
 DEFAULT_OUTPUT_DIR = os.path.expanduser("~/.timefinder_cache")
+
+# IMAP folder names -> Gmail API system label IDs
+IMAP_FOLDER_TO_LABEL = {
+    "INBOX": "INBOX",
+    "[Gmail]/Sent Mail": "SENT",
+    "[Gmail]/Drafts": "DRAFT",
+    "[Gmail]/All Mail": "ALL",
+    "[Gmail]/Starred": "STARRED",
+    "[Gmail]/Important": "IMPORTANT",
+    "[Gmail]/Trash": "TRASH",
+    "[Gmail]/Spam": "SPAM",
+}
 
 
 def decode_mime_header(value: str | None) -> str:
@@ -49,7 +63,7 @@ def extract_body_excerpt(msg: email.message.Message, limit: int = 500) -> str:
 
 
 def folder_to_slug(folder: str) -> str:
-    """Convert an IMAP folder name to a filesystem-safe slug."""
+    """Convert an IMAP folder or Gmail label to a filesystem-safe slug."""
     slug = folder.lower()
     slug = slug.replace("[gmail]/", "")
     slug = re.sub(r"[^a-z0-9]+", "_", slug)
@@ -83,29 +97,122 @@ def normalize_gmail_message(msg_id: str, folder: str, raw_bytes: bytes) -> dict:
     }
 
 
-def load_gmail_config(config_path=DEFAULT_CONFIG_PATH):
-    """Load Gmail IMAP credentials and folder list."""
+def _header_map(payload: dict[str, Any]) -> dict[str, str]:
+    headers = payload.get("headers") or []
+    return {item.get("name", ""): item.get("value", "") for item in headers if item.get("name")}
+
+
+def _decode_api_body_data(data: str) -> str:
+    if not data:
+        return ""
+    padded = data + "=" * (-len(data) % 4)
+    return base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8", errors="replace")
+
+
+def extract_body_from_api_payload(payload: dict[str, Any], limit: int = 500) -> str:
+    """Extract plain-text body from a Gmail API message payload."""
+    if not payload:
+        return ""
+    body = payload.get("body") or {}
+    if body.get("data") and payload.get("mimeType", "").startswith("text/plain"):
+        return _decode_api_body_data(body["data"]).strip()[:limit]
+    for part in payload.get("parts") or []:
+        mime = part.get("mimeType", "")
+        if mime == "text/plain" and part.get("body", {}).get("data"):
+            return _decode_api_body_data(part["body"]["data"]).strip()[:limit]
+    for part in payload.get("parts") or []:
+        nested = extract_body_from_api_payload(part, limit=limit)
+        if nested:
+            return nested
+    return ""
+
+
+def normalize_gmail_api_message(msg: dict[str, Any], label: str) -> dict:
+    """Normalize a Gmail API message resource into backup JSON shape."""
+    headers = _header_map(msg.get("payload") or {})
+    internal_ms = msg.get("internalDate")
+    parsed_date = None
+    if internal_ms:
+        try:
+            parsed_date = datetime.fromtimestamp(int(internal_ms) / 1000)
+        except (TypeError, ValueError, OverflowError):
+            parsed_date = None
+    if parsed_date is None and headers.get("Date"):
+        try:
+            parsed_date = parsedate_to_datetime(headers["Date"])
+        except (TypeError, ValueError, OverflowError):
+            parsed_date = None
+
+    body = extract_body_from_api_payload(msg.get("payload") or {}, limit=500)
+    snippet = (msg.get("snippet") or body[:200]).strip()
+
+    return {
+        "id": msg.get("id", ""),
+        "folder": label,
+        "thread_id": msg.get("threadId") or headers.get("Message-ID") or msg.get("id", ""),
+        "from": headers.get("From", ""),
+        "to": headers.get("To", ""),
+        "subject": headers.get("Subject", ""),
+        "date": parsed_date.isoformat(timespec="seconds") if parsed_date else None,
+        "snippet": snippet[:200],
+        "body_excerpt": body[:500],
+    }
+
+
+def resolve_label_id(name: str) -> str:
+    """Map config folder/label name to a Gmail API label ID."""
+    return IMAP_FOLDER_TO_LABEL.get(name, name)
+
+
+def load_gmail_config(config_path=DEFAULT_CONFIG_PATH) -> dict[str, Any]:
+    """Load Gmail configuration for IMAP or OAuth API access."""
     logging.info("Loading Gmail configuration from: %s", config_path)
     if not os.path.exists(config_path):
-        msg = f"Gmail configuration not found at {config_path}"
+        msg = (
+            f"Gmail configuration not found at {config_path}. "
+            "Create this file before running --gather-candidate-entries. "
+            "For Google Workspace use auth oauth — see timefinder/SETUP_macOS.md Step 4B."
+        )
         logging.error(msg)
         raise FileNotFoundError(msg)
 
     with open(config_path, "r", encoding="utf-8") as handle:
         config = json.load(handle)
 
-    email_address = config.get("email")
-    app_password = config.get("app_password")
-    folders = config.get("folders") or ["INBOX"]
+    email_address = config.get("email", "")
+    app_password = config.get("app_password", "")
+    auth = str(config.get("auth", "")).lower().strip()
+    labels = config.get("labels") or config.get("folders") or ["INBOX"]
 
-    if not email_address or not app_password:
-        raise ValueError("Gmail config requires email and app_password.")
+    if auth not in {"oauth", "imap", ""}:
+        raise ValueError(f"Unsupported gmail auth mode: {auth!r}. Use 'oauth' or 'imap'.")
 
-    return email_address, app_password, folders
+    if not auth:
+        auth = "imap" if app_password else "oauth"
+
+    if auth == "imap":
+        if not email_address or not app_password:
+            raise ValueError(
+                "IMAP auth requires email and app_password in gmail_config.json, "
+                "or set \"auth\": \"oauth\" for Google Workspace. "
+                "See timefinder/SETUP_macOS.md Step 4B."
+            )
+        return {
+            "auth": "imap",
+            "email": email_address,
+            "folders": labels,
+            "app_password": app_password,
+        }
+
+    return {
+        "auth": "oauth",
+        "email": email_address,
+        "labels": [resolve_label_id(label) for label in labels],
+    }
 
 
 def fetch_gmail_folder(imap, folder: str, since_dt: datetime) -> list[dict]:
-    """Fetch messages from one Gmail folder since since_dt."""
+    """Fetch messages from one Gmail folder since since_dt via IMAP."""
     status, _ = imap.select(f'"{folder}"', readonly=True)
     if status != "OK":
         raise RuntimeError(f"Could not select Gmail folder: {folder}")
@@ -125,31 +232,65 @@ def fetch_gmail_folder(imap, folder: str, since_dt: datetime) -> list[dict]:
         raw_bytes = fetched[0][1]
         messages.append(normalize_gmail_message(msg_id, folder, raw_bytes))
 
-    logging.info("Fetched %d Gmail messages from %s.", len(messages), folder)
+    logging.info("Fetched %d Gmail messages from %s via IMAP.", len(messages), folder)
     return messages
 
 
-def run_gmail_backup(
-    output_dir=DEFAULT_OUTPUT_DIR,
-    config_path=DEFAULT_CONFIG_PATH,
-    lookback_days=7,
-    reference_date=None,
-    imap_class=imaplib.IMAP4_SSL,
-):
-    """Fetch Gmail messages for configured folders and write JSON backup files."""
-    email_address, app_password, folders = load_gmail_config(config_path)
-    os.makedirs(output_dir, exist_ok=True)
+def fetch_gmail_label_api(service, label_id: str, since_dt: datetime) -> list[dict]:
+    """Fetch messages for a Gmail label since since_dt via Gmail API."""
+    query = f"after:{since_dt.strftime('%Y/%m/%d')}"
+    messages: list[dict] = []
+    page_token = None
 
-    now = reference_date or datetime.now()
-    since_dt = now - timedelta(days=lookback_days)
-    date_str = now.strftime("%Y-%m-%d")
-    created_files = []
+    while True:
+        params: dict[str, Any] = {
+            "userId": "me",
+            "labelIds": [label_id],
+            "q": query,
+            "maxResults": 100,
+        }
+        if page_token:
+            params["pageToken"] = page_token
+        response = service.users().messages().list(**params).execute()
+
+        for item in response.get("messages") or []:
+            msg_id = item.get("id")
+            if not msg_id:
+                continue
+            full = (
+                service.users()
+                .messages()
+                .get(userId="me", id=msg_id, format="full")
+                .execute()
+            )
+            messages.append(normalize_gmail_api_message(full, label_id))
+
+        page_token = response.get("nextPageToken")
+        if not page_token:
+            break
+
+    logging.info("Fetched %d Gmail messages from label %s via API.", len(messages), label_id)
+    return messages
+
+
+def run_gmail_backup_imap(
+    output_dir: str,
+    config: dict[str, Any],
+    since_dt: datetime,
+    date_str: str,
+    imap_class=imaplib.IMAP4_SSL,
+) -> list[str]:
+    """Fetch Gmail via IMAP and write JSON backup files."""
+    email_address = config["email"]
+    app_password = config["app_password"]
+    folders = config["folders"]
+    created_files: list[str] = []
 
     imap = imap_class("imap.gmail.com")
     try:
-        imap.login(email_address, app_password)
+        imap.login(email_address, app_password.replace(" ", ""))
         for folder in folders:
-            logging.info("Backing up Gmail folder %s", folder)
+            logging.info("Backing up Gmail folder %s (IMAP)", folder)
             try:
                 messages = fetch_gmail_folder(imap, folder, since_dt)
             except RuntimeError as exc:
@@ -173,4 +314,70 @@ def run_gmail_backup(
         except Exception:
             pass
 
+    if not created_files:
+        raise RuntimeError("Gmail IMAP backup produced no messages.")
     return created_files
+
+
+def run_gmail_backup_oauth(
+    output_dir: str,
+    config: dict[str, Any],
+    since_dt: datetime,
+    date_str: str,
+    service=None,
+) -> list[str]:
+    """Fetch Gmail via OAuth Gmail API and write JSON backup files."""
+    from timefinder.google_auth import build_google_service
+
+    gmail = service or build_google_service("gmail", "v1")
+    labels = config["labels"]
+    created_files: list[str] = []
+
+    for label_id in labels:
+        logging.info("Backing up Gmail label %s (OAuth API)", label_id)
+        try:
+            messages = fetch_gmail_label_api(gmail, label_id, since_dt)
+        except Exception as exc:
+            logging.exception("Gmail API fetch failed for label %s", label_id)
+            raise RuntimeError(f"Gmail API error for label {label_id}: {exc}") from exc
+
+        if not messages:
+            print(f"  Gmail {label_id}: no records parsed.")
+            continue
+
+        slug = folder_to_slug(label_id)
+        output_file = os.path.join(output_dir, f"gmail_{slug}_{date_str}.json")
+        with open(output_file, "w", encoding="utf-8") as handle:
+            json.dump(messages, handle, indent=4)
+        print(f"  Gmail {label_id}: saved {len(messages)} entries.")
+        created_files.append(output_file)
+
+    if not created_files:
+        raise RuntimeError(
+            "Gmail OAuth backup produced no messages. Check labels and lookback window."
+        )
+    return created_files
+
+
+def run_gmail_backup(
+    output_dir=DEFAULT_OUTPUT_DIR,
+    config_path=DEFAULT_CONFIG_PATH,
+    lookback_days=7,
+    reference_date=None,
+    imap_class=imaplib.IMAP4_SSL,
+    gmail_service=None,
+):
+    """Fetch Gmail messages and write JSON backup files (IMAP or OAuth API)."""
+    config = load_gmail_config(config_path)
+    os.makedirs(output_dir, exist_ok=True)
+
+    now = reference_date or datetime.now()
+    since_dt = now - timedelta(days=lookback_days)
+    date_str = now.strftime("%Y-%m-%d")
+
+    if config["auth"] == "oauth":
+        print("  Using Gmail API (OAuth) — recommended for Google Workspace.")
+        return run_gmail_backup_oauth(output_dir, config, since_dt, date_str, service=gmail_service)
+
+    print("  Using Gmail IMAP (app password).")
+    return run_gmail_backup_imap(output_dir, config, since_dt, date_str, imap_class=imap_class)

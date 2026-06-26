@@ -8,10 +8,10 @@ from unittest.mock import MagicMock
 from timefinder import gmail_messages as gmail
 
 
-def test_load_gmail_config_defaults_to_oauth_without_app_password(tmp_path):
+def test_load_gmail_config_oauth_mode(tmp_path):
     path = tmp_path / "gmail_config.json"
     path.write_text(
-        json.dumps({"email": "user@vastdata.com", "labels": ["INBOX", "SENT"]}),
+        json.dumps({"auth": "oauth", "email": "user@example.com", "labels": ["INBOX", "SENT"]}),
         encoding="utf-8",
     )
     config = gmail.load_gmail_config(str(path))
@@ -43,8 +43,8 @@ def test_normalize_gmail_api_message():
         "internalDate": str(int(datetime(2026, 6, 20, 10, 0, 0).timestamp() * 1000)),
         "payload": {
             "headers": [
-                {"name": "From", "value": "Alice <alice@vastdata.com>"},
-                {"name": "To", "value": "Bob <bob@vastdata.com>"},
+                {"name": "From", "value": "Alice <alice@example.com>"},
+                {"name": "To", "value": "Bob <bob@example.com>"},
                 {"name": "Subject", "value": "RCA follow-up"},
             ],
             "mimeType": "text/plain",
@@ -53,7 +53,7 @@ def test_normalize_gmail_api_message():
     }
     normalized = gmail.normalize_gmail_api_message(msg, "INBOX")
     assert normalized["subject"] == "RCA follow-up"
-    assert "alice@vastdata.com" in normalized["from"]
+    assert "alice@example.com" in normalized["from"]
     assert normalized["folder"] == "INBOX"
 
 

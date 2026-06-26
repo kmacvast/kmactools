@@ -134,15 +134,70 @@ Then run `--add-slack-channels` to populate the `channels` map, or add channel n
 
 ## Step 4 — Configure Gmail (required)
 
-TimeFinder **requires** Gmail alongside Slack. Choose **4B for Google Workspace** (`@vastdata.com`) — app passwords are often disabled by org policy.
+TimeFinder **requires** Gmail alongside Slack. Pick the path that matches what your account allows:
+
+| Step | Method | When to use |
+|------|--------|-------------|
+| **4C** | Local import (Takeout / `.eml`) | App passwords denied **and** no Google Cloud project |
+| **4A** | IMAP app password | Personal `@gmail.com` |
+| **4B** | OAuth Gmail API | You can create a Google Cloud OAuth client |
 
 Config path: **`~/.timefinder_cache/gmail_config.json`**
 
 ---
 
+### Step 4C — Local import (no API credentials)
+
+Use this when app passwords are blocked and you cannot create a Google Cloud project. You export mail yourself; TimeFinder only reads local files.
+
+#### 4C.1 Export mail via Google Takeout
+
+1. Open [Google Takeout](https://takeout.google.com) while signed into your work account
+2. Click **Deselect all**, then enable **Mail** only
+3. Choose delivery (download link is fine)
+4. If format options appear, prefer **`.mbox`**
+5. Create export and wait for the download email (can take hours for large mailboxes)
+
+#### 4C.2 Place files in the import directory
+
+```bash
+mkdir -p ~/.timefinder_cache/gmail_import
+```
+
+Extract the Takeout ZIP and copy `.mbox` files into `gmail_import/`, for example:
+
+```text
+~/.timefinder_cache/gmail_import/
+├── Inbox.mbox
+└── Sent.mbox
+```
+
+You can also drop individual `.eml` files here (Gmail → open message → **Show original** → **Download original**).
+
+#### 4C.3 Create `gmail_config.json`
+
+```json
+{
+  "auth": "import",
+  "import_dir": "~/.timefinder_cache/gmail_import"
+}
+```
+
+#### 4C.4 Run gather
+
+```bash
+python3 timefinder/timefinder.py --gather-candidate-entries --verbose
+```
+
+You should see: `Using local Gmail import (.eml / .mbox — no API credentials).`
+
+Only messages within `--lookback-days` (default 7) are imported. Re-export from Takeout periodically to stay current.
+
+---
+
 ### Step 4A — IMAP app password (personal `@gmail.com` only)
 
-Skip this if you are on Google Workspace and app passwords are denied.
+Skip if app passwords are unavailable on your account.
 
 #### 4A.1 Enable 2-Step Verification
 
@@ -173,50 +228,32 @@ Skip this if you are on Google Workspace and app passwords are denied.
 
 ---
 
-### Step 4B — OAuth Gmail API (Google Workspace — recommended for `@vastdata.com`)
+### Step 4B — OAuth Gmail API (requires Google Cloud project)
 
-Use this when [App Passwords](https://myaccount.google.com/apppasswords) shows **access denied** or the option is missing. TimeFinder uses the **Gmail API** with the same OAuth token as Google Calendar sync.
+Use when you **can** create OAuth credentials and want live API access without manual Takeout exports.
 
 #### 4B.1 Google Cloud project
 
 1. Open [Google Cloud Console](https://console.cloud.google.com/)
-2. Create or select a project (personal project is fine)
-3. **APIs & Services → Library** → enable:
-   - **Gmail API**
-   - **Google Calendar API**
+2. Create or select a project
+3. **APIs & Services → Library** → enable **Gmail API** and **Google Calendar API**
 
 #### 4B.2 OAuth consent screen
 
 1. **APIs & Services → OAuth consent screen**
-2. User type: **Internal** (if available for `@vastdata.com`) or **External**
-3. Add scopes (or they are requested at auth time):
-   - `.../auth/gmail.readonly`
-   - `.../auth/calendar.events`
-4. Add your `@vastdata.com` address as a test user if using External + testing mode
-
-> If your Workspace admin blocks third-party apps, ask them to allow your OAuth client or use an admin-approved internal app.
+2. Configure user type (**Internal** for single-org Workspace, or **External**)
+3. Add test users if using External in testing mode
 
 #### 4B.3 Desktop OAuth credentials
 
-1. **APIs & Services → Credentials → Create Credentials → OAuth client ID**
-2. Application type: **Desktop app**
-3. Download JSON → save as:
-
-```bash
-mkdir -p ~/.timefinder_cache
-# save downloaded file as:
-# ~/.timefinder_cache/google_client_secret.json
-```
+1. **Credentials → Create Credentials → OAuth client ID → Desktop app**
+2. Download JSON → save as `~/.timefinder_cache/google_client_secret.json`
 
 #### 4B.4 Authorize TimeFinder
 
 ```bash
-cd ~/path/to/kmactools
-source .venv/bin/activate   # if using venv
 python3 timefinder/timefinder.py --setup-google-auth
 ```
-
-Browser opens → sign in as `kevin.mcdonald@vastdata.com` → grant access.
 
 Token saved to `~/.timefinder_cache/google_token.json`.
 
@@ -225,16 +262,10 @@ Token saved to `~/.timefinder_cache/google_token.json`.
 ```json
 {
   "auth": "oauth",
-  "email": "kevin.mcdonald@vastdata.com",
+  "email": "you@your-company.com",
   "labels": ["INBOX", "SENT"]
 }
 ```
-
-| Field | Notes |
-|-------|-------|
-| `auth` | Must be `"oauth"` |
-| `email` | Your Workspace address (informational) |
-| `labels` | Gmail label IDs: `INBOX`, `SENT`, `DRAFT`, `STARRED`, etc. IMAP names like `[Gmail]/Sent Mail` also work |
 
 #### 4B.6 Verify (optional)
 
@@ -242,7 +273,7 @@ Token saved to `~/.timefinder_cache/google_token.json`.
 python3 timefinder/timefinder.py --gather-candidate-entries --verbose
 ```
 
-You should see: `Using Gmail API (OAuth) — recommended for Google Workspace.`
+You should see: `Using Gmail API (OAuth).`
 
 ---
 
@@ -296,11 +327,12 @@ pytest timefinder/tests/ -v
 | `slack: command not found` | `~/.local/bin` not on PATH | Add to `~/.zshrc`, reload shell |
 | `invalid_auth` from TimeFinder | Expired or wrong token | Run `slack auth token` again and update `slack_channels.json` |
 | `Slack configuration not found` | Missing config file | Complete Step 3 |
-| `Gmail configuration not found` | Missing `gmail_config.json` | Complete Step 4A or 4B |
-| App passwords denied / unavailable | Workspace policy | Use OAuth — Step 4B |
-| `Google token not found` | OAuth not run | Run `--setup-google-auth` (Step 4B.4) |
-| Gmail API 403 / access blocked | OAuth app not allowed | Workspace admin must allow app; use Internal OAuth or test-user list |
-| `Gmail config requires email and app_password` | Wrong auth mode | Use `"auth": "oauth"` for Workspace |
+| `Gmail configuration not found` | Missing `gmail_config.json` | Complete Step 4 |
+| App passwords denied | Workspace policy | Use local import — Step 4C |
+| No Google Cloud project | Cannot create OAuth client | Use local import — Step 4C |
+| `No .eml or .mbox files found` | Empty import directory | Run Takeout export; copy files to `gmail_import/` |
+| Takeout export empty in lookback | Export is stale | Create a fresh Takeout export |
+| `Google token not found` | OAuth not run | Run `--setup-google-auth` (Step 4B) or use import (4C) |
 | `slack auth token` fails | CLI not logged in | Run `slack auth login` first |
 | Token expired | Service tokens rotate | Repeat Step 2 and update `slack_channels.json` |
 | Google sync fails | Missing OAuth token | Run `--setup-google-auth` |

@@ -53,7 +53,7 @@ Format Template:
   "YOUR_TEAM_ID": {
     "token": "xoxc-YOUR-NEW-BROWSER-TOKEN",
     "refresh_token": "xoxd-YOUR-NEW-COOKIE-STRING",
-    "team_domain": "vastdata",
+    "team_domain": "your-org",
     "team_id": "YOUR_TEAM_ID",
     "user_id": "YOUR_USER_ID"
   }

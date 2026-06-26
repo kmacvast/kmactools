@@ -89,8 +89,8 @@ def run_gather_messages(args) -> int:
             errors.append(f"Gmail: {exc}")
             print(f"  Gmail failed: {exc}")
             print(
-                "  Gmail is required. For Google Workspace use OAuth (SETUP_macOS.md Step 4B); "
-                "consumer Gmail can use IMAP app password (Step 4A)."
+                "  Gmail is required. Use local import (SETUP_macOS.md Step 4C), "
+                "IMAP app password (Step 4A), or OAuth API (Step 4B)."
             )
 
     print("\nSummary of created files:")

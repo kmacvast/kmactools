@@ -48,7 +48,8 @@ All capabilities are exposed through a single entry point:
 | Module | Purpose |
 |--------|---------|
 | `slack_messages.py` | Slack API fetch, thread replies, user name map |
-| `gmail_messages.py` | Gmail IMAP fetch and normalization |
+| `gmail_messages.py` | Gmail IMAP / OAuth fetch and normalization |
+| `gmail_import.py` | Local Gmail import from `.eml` / `.mbox` (Takeout) |
 | `candidates.py` | Rule-based candidate generation engine |
 | `ics_review.py` | Interactive ICS review wizard |
 | `google_auth.py` | Shared Google OAuth (Gmail + Calendar) |
@@ -86,7 +87,8 @@ timefinder/
 | Path | Description |
 |------|-------------|
 | `slack_channels.json` | Slack token, session cookie, channel name → ID map |
-| `gmail_config.json` | Gmail IMAP credentials and folder list |
+| `gmail_config.json` | Gmail auth mode and credentials |
+| `gmail_import/` | Drop `.eml` or `.mbox` files here for local import |
 | `slack_users.json` | Slack user ID → display name map (auto-updated) |
 | `google_client_secret.json` | Google OAuth desktop client credentials (you provide) |
 | `google_token.json` | Google OAuth token (created by `--setup-google-auth`) |
@@ -113,45 +115,44 @@ Obtain `slack_token` via `slack auth token` — see **[SETUP_macOS.md](SETUP_mac
 
 ### Gmail config (required)
 
-TimeFinder supports two Gmail auth modes:
+TimeFinder supports three Gmail auth modes:
 
-| Mode | Best for | Config |
-|------|----------|--------|
-| **`oauth`** (recommended) | **Google Workspace** (`@vastdata.com`) when app passwords are disabled | OAuth via `--setup-google-auth` |
+| Mode | Best for | Requires |
+|------|----------|----------|
+| **`import`** (recommended for locked-down Workspace) | No app passwords, no Google Cloud project | [Google Takeout](https://takeout.google.com) export or saved `.eml` files |
 | **`imap`** | Personal `@gmail.com` accounts | App-specific password |
+| **`oauth`** | Automated API access when you can run OAuth | Google Cloud OAuth client + `--setup-google-auth` |
 
 Config path: `~/.timefinder_cache/gmail_config.json`
 
-#### Option A — OAuth (Google Workspace / `@vastdata.com`)
+#### Option A — Local import (no credentials)
 
-Use this when app passwords are blocked by your org (common on Workspace).
+Use when app passwords are disabled **and** you cannot create a Google Cloud project. TimeFinder reads mail you export yourself — nothing calls Google APIs during gather.
 
-1. In [Google Cloud Console](https://console.cloud.google.com/):
-   - Create or select a project
-   - Enable **Gmail API** and **Google Calendar API**
-   - Configure OAuth consent screen (Internal if `@vastdata.com` only)
-   - Create **Desktop app** OAuth credentials
-   - Download JSON → save as `~/.timefinder_cache/google_client_secret.json`
+1. Export mail from [Google Takeout](https://takeout.google.com):
+   - Deselect all → select **Mail**
+   - Choose **`.mbox` format** if offered
+   - Create export → download ZIP when ready
 
-2. Authorize TimeFinder (browser flow — Gmail read + Calendar write):
+2. Extract `.mbox` files (and/or save individual `.eml` files) into:
 
 ```bash
-./timefinder/timefinder.py --setup-google-auth
+mkdir -p ~/.timefinder_cache/gmail_import
+# copy Inbox.mbox, Sent.mbox, etc. into that directory
 ```
 
 3. Create `~/.timefinder_cache/gmail_config.json`:
 
 ```json
 {
-  "auth": "oauth",
-  "email": "kevin.mcdonald@vastdata.com",
-  "labels": ["INBOX", "SENT"]
+  "auth": "import",
+  "import_dir": "~/.timefinder_cache/gmail_import"
 }
 ```
 
-`labels` accepts Gmail API label IDs (`INBOX`, `SENT`, `DRAFT`, …) or IMAP-style names like `[Gmail]/Sent Mail`.
+4. Gather as usual — only messages within `--lookback-days` are imported.
 
-Full Workspace walkthrough: **[SETUP_macOS.md](SETUP_macOS.md)** Step 4B.
+Full walkthrough: **[SETUP_macOS.md](SETUP_macOS.md)** Step 4C.
 
 #### Option B — IMAP app password (personal Gmail)
 
@@ -173,19 +174,38 @@ Full Workspace walkthrough: **[SETUP_macOS.md](SETUP_macOS.md)** Step 4B.
 
 Full IMAP walkthrough: **[SETUP_macOS.md](SETUP_macOS.md)** Step 4A.
 
+#### Option C — OAuth Gmail API
+
+Use when you **can** create a Google Cloud project and want live API access without manual exports.
+
+1. Enable **Gmail API** and **Google Calendar API** in Google Cloud Console
+2. Create **Desktop app** OAuth credentials → `~/.timefinder_cache/google_client_secret.json`
+3. Run `./timefinder/timefinder.py --setup-google-auth`
+4. Config:
+
+```json
+{
+  "auth": "oauth",
+  "email": "you@your-company.com",
+  "labels": ["INBOX", "SENT"]
+}
+```
+
+Full OAuth walkthrough: **[SETUP_macOS.md](SETUP_macOS.md)** Step 4B.
+
 ## Setup
 
 **New users:** complete **[SETUP_macOS.md](SETUP_macOS.md)** first (Slack CLI, `slack auth token`, Python venv).
 
-Install Google API dependencies (required for Workspace Gmail OAuth and Calendar sync):
+Install Google API dependencies (only needed for OAuth Gmail or Calendar sync):
 
 ```bash
 pip install -r timefinder/requirements.txt
 ```
 
-### Google OAuth (Gmail + Calendar)
+### Google OAuth (optional — Gmail API + Calendar sync)
 
-One `--setup-google-auth` run authorizes both Gmail read access and Calendar write access. Required for Workspace Gmail; also used for `--sync-google`.
+Skip this if you use **local import** (Option A) for Gmail. Required only for live Gmail API access or `--sync-google`.
 
 1. Enable **Gmail API** and **Google Calendar API** in Google Cloud Console.
 2. Download OAuth **Desktop app** credentials → `~/.timefinder_cache/google_client_secret.json`.
@@ -224,7 +244,7 @@ Both Slack and Gmail must be configured. The gather step fails if either source 
 ./timefinder/timefinder.py --gather-candidate-entries --lookback-days 7 --verbose
 ```
 
-If Gmail is not configured, see **[SETUP_macOS.md](SETUP_macOS.md)** — Step 4B for Workspace OAuth, Step 4A for personal IMAP.
+If Gmail is not configured, see **[SETUP_macOS.md](SETUP_macOS.md)** — Step 4C for local import, 4A for IMAP, 4B for OAuth.
 
 ### Generate calendar candidates
 

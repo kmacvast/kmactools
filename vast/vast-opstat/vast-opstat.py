@@ -104,12 +104,28 @@ def parse_args(argv=None):
         help="Protocol version (required with --nfs, e.g. 3.0)",
     )
 
-    parser.add_argument("--vms", required=True, help="VMS hostname or IP")
     parser.add_argument(
-        "--port",
+        "--vms",
+        required=True,
+        metavar="HOST",
+        help="VMS hostname or IP (use localhost when forwarding via SSH tunnel)",
+    )
+    parser.add_argument(
+        "--vms-port",
+        dest="port",
         type=int,
         default=DEFAULT_PORT,
-        help=f"VMS HTTPS port. Default: {DEFAULT_PORT}",
+        metavar="PORT",
+        help=(
+            f"VMS HTTPS port. Default: {DEFAULT_PORT}. "
+            "Use a local forwarded port for SSH/Teleport tunnels."
+        ),
+    )
+    parser.add_argument(
+        "--port",
+        dest="port",
+        type=int,
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--user",

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 ################################################################################
-# Script:      vast-nfstop.py
+# Script:      nfs_v3.py
 #
-# Descr:       Real-time VAST NFS performance monitor. Queries VMS performance
+# Descr:       NFS v3 performance statistics for vast-opstat. Queries VMS
 #              counters and displays live NFS RPC operation statistics,
 #              including a health summary, workload classification, latency
 #              metrics, throughput, I/O size, workload distribution, and
@@ -16,15 +16,15 @@
 # Revised:     KMac
 # 
 # Usage:
-#   ./vast-nfstop.py --vms <VMS_IP>
+#   ./vast-opstat.py --nfs --version=3.0 --vms <VMS_IP>
 #
 # Examples:
-#   ./vast-nfstop.py --vms <VMS_IP>
-#   ./vast-nfstop.py --vms <VMS_IP> --user vastadmin
-#   ./vast-nfstop.py --vms <VMS_IP> --sample-average 1h
-#   ./vast-nfstop.py --vms <VMS_IP> --csv nfs_stats.csv
-#   ./vast-nfstop.py --vms <VMS_IP> --discover-metrics
-#   ./vast-nfstop.py --vms <VMS_IP> --no-color
+#   ./vast-opstat.py --nfs --version=3.0 --vms <VMS_IP>
+#   ./vast-opstat.py --nfs --version=3.0 --vms <VMS_IP> --user vastadmin
+#   ./vast-opstat.py --nfs --version=3.0 --vms <VMS_IP> --sample-average 1h
+#   ./vast-opstat.py --nfs --version=3.0 --vms <VMS_IP> --csv nfs_stats.csv
+#   ./vast-opstat.py --nfs --version=3.0 --vms <VMS_IP> --discover-metrics
+#   ./vast-opstat.py --nfs --version=3.0 --vms <VMS_IP> --no-color
 #
 # Controls:
 #   Space  - Refresh immediately
@@ -40,7 +40,6 @@
 #
 ################################################################################
 
-import argparse
 import base64
 import csv
 import json
@@ -121,68 +120,23 @@ _MAX_DRILL_OBJECTS = 8      # cap to keep API call count reasonable
 
 
 # ---------------------------------------------------------------------------
-# Argument parsing
+# Runtime configuration (initialized by init_config)
 # ---------------------------------------------------------------------------
 
-def new_argument_parser(description):
-    try:
-        return argparse.ArgumentParser(description=description, color=False)
-    except TypeError:
-        return argparse.ArgumentParser(description=description)
-
-
-def parse_args():
-    parser = new_argument_parser("Live VAST NFS RPC procedure table")
-
-    parser.add_argument("--vms", required=True, help="VMS hostname or IP")
-    parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"VMS HTTPS port. Default: {DEFAULT_PORT}")
-    parser.add_argument("--user", default=DEFAULT_USER, help=f"VMS username. Default: {DEFAULT_USER}")
-    parser.add_argument("--password",default=None,help="VMS password. If omitted, you will be prompted securely.")
-    parser.add_argument("--sample-average", default=None, help="Optional rolling sample-average window, such as 10m, 1h, or 4h.")
-    parser.add_argument("--refresh", type=int, default=DEFAULT_REFRESH_SECONDS, help=f"Refresh interval in seconds. Default: {DEFAULT_REFRESH_SECONDS}")
-    parser.add_argument("--csv", default=None, metavar="FILENAME", help="Write captured samples to the specified CSV file.")
-    parser.add_argument("--no-color", action="store_true", help="Disable ANSI color output.")
-    parser.add_argument("--discover-metrics", action="store_true", help="Enumerate NFS metrics and objects available from VMS, then exit.")
-    parser.add_argument("--version", action="version", version=VERSION, help="Print script version and exit.")
-
-    return parser.parse_args()
-
-
-ARGS = parse_args()
-if not ARGS.password:
-    ARGS.password = os.environ.get("VAST_PASSWORD")
-
-if not ARGS.password:
-    try:
-        ARGS.password = getpass.getpass(
-            f"Password for {ARGS.user}@{ARGS.vms}: "
-        )
-    except KeyboardInterrupt:
-        print()
-        sys.exit(1)
-
-VMS = ARGS.vms
-PORT = ARGS.port
-USER = ARGS.user
-PASSWORD = ARGS.password
-SAMPLE_AVERAGE = ARGS.sample_average
-REFRESH_SECONDS = ARGS.refresh
-CSV_FILE = ARGS.csv
-
-API_TIME_FRAME     = SAMPLE_AVERAGE or DEFAULT_API_TIME_FRAME
-SAMPLE_AVERAGE_MODE = SAMPLE_AVERAGE is not None
-
-BASE_URL = f"https://{VMS}/api" if PORT == 443 else f"https://{VMS}:{PORT}/api"
-
+ARGS = None
+VMS = None
+PORT = None
+USER = None
+PASSWORD = None
+SAMPLE_AVERAGE = None
+REFRESH_SECONDS = DEFAULT_REFRESH_SECONDS
+CSV_FILE = None
+API_TIME_FRAME = DEFAULT_API_TIME_FRAME
+SAMPLE_AVERAGE_MODE = False
+BASE_URL = None
 SSL_CTX = ssl._create_unverified_context()
-AUTH    = base64.b64encode(f"{USER}:{PASSWORD}".encode()).decode()
-
-HEADERS = {
-    "Authorization": f"Basic {AUTH}",
-    "Accept":        "application/json",
-    "Content-Type":  "application/json",
-    "User-Agent":    f"vast-nfstop/{VERSION}",
-}
+AUTH = None
+HEADERS = None
 
 # Mutable globals — all updated by main/fetch/drill helpers
 RPC_MONITOR_ID = None
@@ -204,21 +158,91 @@ DRILL_MONITORS = []    # [(rpc_monitor_id, bw_monitor_id, object_name), ...]
 LAST_DRILL_ROWS = []   # [{"name": ..., "total_ops": ..., "latency_us": ..., ...}]
 DRILL_ERROR    = None  # set when drill-down fails; cleared on success
 
-RUN_STARTED_AT = datetime.now()
+RUN_STARTED_AT = None
 
-RUN_STATS = {
-    label: {
-        "min_us":           None,
-        "max_us":           None,
-        "weighted_sum_us":  0.0,
-        "weight":           0.0,
-        "seen_sample_ids":  set(),
-        "bw_min_gbs":       None,
-        "bw_max_gbs":       None,
-        "bw_seen_sample_ids": set(),
+RUN_STATS = {}
+
+
+def _fresh_run_stats():
+    return {
+        label: {
+            "min_us":           None,
+            "max_us":           None,
+            "weighted_sum_us":  0.0,
+            "weight":           0.0,
+            "seen_sample_ids":  set(),
+            "bw_min_gbs":       None,
+            "bw_max_gbs":       None,
+            "bw_seen_sample_ids": set(),
+        }
+        for _op, label in OPS
     }
-    for _op, label in OPS
-}
+
+
+def init_config(args):
+    """Initialize module globals from parsed CLI connection arguments."""
+    global ARGS, VMS, PORT, USER, PASSWORD, SAMPLE_AVERAGE, REFRESH_SECONDS, CSV_FILE
+    global API_TIME_FRAME, SAMPLE_AVERAGE_MODE, BASE_URL, AUTH, HEADERS, _COLOR
+    global RUN_STARTED_AT, RUN_STATS
+    global RPC_MONITOR_ID, BW_MONITOR_ID, CLUSTER_ID, CLUSTER_NAME, SORT_MODE
+    global ORIGINAL_TERMINAL_SETTINGS, KEYBOARD_ENABLED
+    global LAST_ROWS, LAST_SAMPLE, PREV_ROWS
+    global DRILL_MODE, DRILL_OBJECTS, DRILL_MONITORS, LAST_DRILL_ROWS, DRILL_ERROR
+
+    ARGS = args
+
+    password = args.password
+    if not password:
+        password = os.environ.get("VAST_PASSWORD")
+    if not password:
+        try:
+            password = getpass.getpass(
+                f"Password for {args.user}@{args.vms}: "
+            )
+        except KeyboardInterrupt:
+            print()
+            sys.exit(1)
+
+    VMS = args.vms
+    PORT = args.port
+    USER = args.user
+    PASSWORD = password
+    SAMPLE_AVERAGE = args.sample_average
+    REFRESH_SECONDS = args.refresh
+    CSV_FILE = args.csv
+
+    API_TIME_FRAME = SAMPLE_AVERAGE or DEFAULT_API_TIME_FRAME
+    SAMPLE_AVERAGE_MODE = SAMPLE_AVERAGE is not None
+
+    BASE_URL = f"https://{VMS}/api" if PORT == 443 else f"https://{VMS}:{PORT}/api"
+    AUTH = base64.b64encode(f"{USER}:{PASSWORD}".encode()).decode()
+    HEADERS = {
+        "Authorization": f"Basic {AUTH}",
+        "Accept":        "application/json",
+        "Content-Type":  "application/json",
+        "User-Agent":    f"vast-opstat/nfs-v3/{VERSION}",
+    }
+
+    _COLOR = sys.stdout.isatty() and not args.no_color
+
+    RUN_STARTED_AT = datetime.now()
+    RUN_STATS = _fresh_run_stats()
+
+    RPC_MONITOR_ID = None
+    BW_MONITOR_ID = None
+    CLUSTER_ID = None
+    CLUSTER_NAME = None
+    SORT_MODE = "rpc"
+    ORIGINAL_TERMINAL_SETTINGS = None
+    KEYBOARD_ENABLED = False
+    LAST_ROWS = []
+    LAST_SAMPLE = "-"
+    PREV_ROWS = []
+    DRILL_MODE = None
+    DRILL_OBJECTS = []
+    DRILL_MONITORS = []
+    LAST_DRILL_ROWS = []
+    DRILL_ERROR = None
 
 CSV_HEADER = [
     "local_time", "runtime", "vms", "port", "cluster", "cluster_id",
@@ -290,7 +314,7 @@ _BYELLOW = "\033[1;33m"
 _BCYAN   = "\033[1;36m"
 _BWHITE  = "\033[1;37m"
 
-_COLOR = sys.stdout.isatty() and not ARGS.no_color
+_COLOR = False
 
 
 def c(text, code):
@@ -491,7 +515,7 @@ def build_bw_prop_list():
 def _create_monitor_raw(name_suffix, prop_list, object_type, object_ids):
     """Core monitor creation — object_type and object_ids are caller-supplied."""
     base_payload = {
-        "name":              f"adhoc_vast-nfstop_{name_suffix}_{int(time.time())}",
+        "name":              f"adhoc_vast-opstat_{name_suffix}_{int(time.time())}",
         "object_type":       object_type,
         "object_ids":        object_ids,
         "time_frame":        API_TIME_FRAME,
@@ -1619,7 +1643,7 @@ def render_screen():
     csv_tag   = c(f"  csv:{CSV_FILE}", _DIM) if CSV_FILE else ""
 
     title_line = (
-        c("  VAST NFS", _BCYAN) + c(" nfstop", _BWHITE) + c(f" v{VERSION}", _DIM)
+        c("  VAST NFS", _BCYAN) + c(" opstat", _BWHITE) + c(f" v{VERSION}", _DIM)
         + "   VMS " + c(f"{VMS}:{PORT}", _BWHITE)
         + "   cluster " + c(CLUSTER_NAME, _BWHITE)
         + c(f"   refresh {REFRESH_SECONDS}s", _DIM)
@@ -1849,7 +1873,9 @@ def main():
     return 0
 
 
-if __name__ == "__main__":
+def run(args):
+    """Entry point for NFS v3 statistics collection."""
+    init_config(args)
     exit_code = 0
     try:
         exit_code = main() or 0
@@ -1862,4 +1888,4 @@ if __name__ == "__main__":
         exit_code = 1
     finally:
         cleanup()
-    sys.exit(exit_code)
+    return exit_code

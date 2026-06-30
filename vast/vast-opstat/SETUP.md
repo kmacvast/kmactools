@@ -169,6 +169,24 @@ Replace `var203.selab.vastdata.com` with your VMS hostname or IP. If you omit
   --user admin
 ```
 
+### Remote cluster via SSH tunnel (Teleport / zero-trust)
+
+When the VMS is on a remote cluster behind Teleport, a bastion, or other zero-trust
+access, open an SSH port forward first, then point opstat at the local end of the
+tunnel:
+
+```bash
+# Terminal 1 — forward local port 8443 to remote VMS HTTPS (443)
+ssh -L 8443:var203.selab.vastdata.com:443 user@jump-host
+
+# Terminal 2 — connect through the tunnel
+./vast-opstat.py --nfs --version=3.0 \
+  --vms localhost --vms-port 8443 --user admin
+```
+
+Use the same `--vms localhost --vms-port <LOCAL_PORT>` pattern for NVMe-oTCP block
+monitoring. Default port is `443` when `--vms-port` is omitted.
+
 ### Discover available metrics (no live dashboard)
 
 ```bash

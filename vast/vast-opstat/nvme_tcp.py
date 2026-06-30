@@ -53,6 +53,8 @@ VOLUME_OP_METRICS = {
 }
 # Fabric/admin BlockMetrics are cluster-scoped only on current VMS builds.
 _VOLUME_UNAVAILABLE_OPS = frozenset({"discovery", "handle_request", "transport_free", "get_ns_list"})
+# Read/write use VolumeMetrics at volume scope; all other ops use cluster BlockMetrics.
+VOLUME_PRIMARY_OPS = frozenset({"read", "write"})
 
 # (key, label, category, ops_fqn, avg_fqn)
 OPS = [
@@ -140,6 +142,7 @@ BASE_URL = AUTH = HEADERS = None
 SSL_CTX = ssl._create_unverified_context()
 
 OPS_MONITOR_IDS = []
+CLUSTER_SUPPLEMENT_MONITOR_IDS = []
 PROTO_MONITOR_ID = None
 CLUSTER_ID = CLUSTER_NAME = None
 ORIGINAL_TERMINAL_SETTINGS = None
@@ -207,7 +210,7 @@ def _fresh_run_stats():
 def init_config(args):
     global ARGS, VMS, PORT, USER, PASSWORD, SAMPLE_AVERAGE, REFRESH_SECONDS, CSV_FILE
     global API_TIME_FRAME, SAMPLE_AVERAGE_MODE, BASE_URL, AUTH, HEADERS, _COLOR
-    global RUN_STARTED_AT, RUN_STATS, OPS_MONITOR_IDS, PROTO_MONITOR_ID
+    global RUN_STARTED_AT, RUN_STATS, OPS_MONITOR_IDS, CLUSTER_SUPPLEMENT_MONITOR_IDS, PROTO_MONITOR_ID
     global CLUSTER_ID, CLUSTER_NAME, ORIGINAL_TERMINAL_SETTINGS, KEYBOARD_ENABLED
     global LAST_ROWS, LAST_SAMPLE, PREV_ROWS, PREV_COUNTER_STATE, LAST_POLL_MONOTONIC, DELTA_READY
     global DRILL_MODE, DRILL_OBJECTS, DRILL_MONITORS, LAST_DRILL_ROWS, DRILL_ERROR
@@ -243,6 +246,7 @@ def init_config(args):
     RUN_STARTED_AT = datetime.now()
     RUN_STATS = _fresh_run_stats()
     OPS_MONITOR_IDS = []
+    CLUSTER_SUPPLEMENT_MONITOR_IDS = []
     PROTO_MONITOR_ID = None
     CLUSTER_ID = CLUSTER_NAME = None
     ORIGINAL_TERMINAL_SETTINGS = None
@@ -279,15 +283,30 @@ def active_ops():
     """Return OPS rows with metric FQNs for cluster or volume monitor scope."""
     rows = []
     for key, label, category, cluster_ops, cluster_avg in OPS:
-        if VOLUME_SCOPED:
-            if key in _VOLUME_UNAVAILABLE_OPS:
-                rows.append((key, label, category, None, None))
-                continue
+        if VOLUME_SCOPED and key in VOLUME_PRIMARY_OPS:
             vol_ops, vol_avg = VOLUME_OP_METRICS.get(key, (None, None))
             rows.append((key, label, category, vol_ops, vol_avg))
         else:
             rows.append((key, label, category, cluster_ops, cluster_avg))
     return rows
+
+
+def volume_primary_ops_rows():
+    """Volume object monitors — read/write only."""
+    rows = []
+    for key, label, category, _cluster_ops, _cluster_avg in OPS:
+        if key not in VOLUME_PRIMARY_OPS:
+            continue
+        vol_ops, vol_avg = VOLUME_OP_METRICS.get(key, (None, None))
+        rows.append((key, label, category, vol_ops, vol_avg))
+    return rows
+
+
+def cluster_supplement_ops_rows():
+    """Cluster BlockMetrics for every op except volume-scoped read/write."""
+    return [
+        row for row in OPS if row[0] not in VOLUME_PRIMARY_OPS
+    ]
 
 
 def build_proto_prop_list(cluster_scope_only=False):
@@ -461,9 +480,10 @@ def monitor_scope():
     return "cluster", [CLUSTER_ID]
 
 
-def build_ops_monitor_groups(cluster_scope_only=False):
-    """Return metric groups compatible with the active cluster or volume scope."""
-    ops_rows = OPS if cluster_scope_only else active_ops()
+def build_ops_monitor_groups(cluster_scope_only=False, ops_rows=None):
+    """Return metric groups compatible with the supplied or active scope."""
+    if ops_rows is None:
+        ops_rows = OPS if cluster_scope_only else active_ops()
     groups = []
     fabric_props = []
     for key, _label, _cat, ops_fqn, avg_fqn in ops_rows:
@@ -530,12 +550,11 @@ def query_ops_monitors(monitor_ids):
     return [api_request("GET", f"/monitors/{monitor_id}/query/") for monitor_id in monitor_ids]
 
 
-def _monitor_result_for_op_key(monitor_results, cluster_scope_only=False):
+def _monitor_result_for_op_key(monitor_results, ops_rows):
     """Map each operation key to the monitor query result that owns its metrics."""
     per_op = {}
     idx = 0
     fabric_result = None
-    ops_rows = OPS if cluster_scope_only else active_ops()
     for key, _label, _cat, ops_fqn, _avg_fqn in ops_rows:
         if key in _FABRIC_ADMIN_KEYS:
             continue
@@ -557,36 +576,33 @@ def extract_op_metrics_from_result(result, ops_fqn, avg_fqn):
     if not isinstance(result, dict) or not result.get("data"):
         return None, None, "-", result
     _prop_list, data, prop_idx = _result_parts(result)
-    ops_raw = lat_raw = None
-    sample = "-"
-    for row in data:
-        if ops_raw is None:
-            val = as_float(metric_value_from_row(row, prop_idx, ops_fqn))
-            if val is not None:
-                ops_raw = val
-                sample = row[0] if row else sample
-        if lat_raw is None and avg_fqn:
-            val = as_float(metric_value_from_row(row, prop_idx, avg_fqn))
-            if val is not None:
-                lat_raw = val
-                if sample == "-":
-                    sample = row[0] if row else sample
-        if ops_raw is not None and (lat_raw is not None or not avg_fqn):
-            break
-    if sample == "-" and data and data[0]:
-        sample = data[0][0]
+    ops_row, ops_sample = (
+        select_latest_complete_row(data, prop_idx, [ops_fqn]) if ops_fqn else (None, "-")
+    )
+    lat_row, lat_sample = (
+        select_latest_complete_row(data, prop_idx, [avg_fqn]) if avg_fqn else (None, "-")
+    )
+    selected_row = ops_row or lat_row
+    if selected_row is None:
+        return None, None, "-", result
+    ops_raw = as_float(metric_value_from_row(ops_row, prop_idx, ops_fqn)) if ops_fqn and ops_row else None
+    lat_raw = as_float(metric_value_from_row(lat_row or ops_row, prop_idx, avg_fqn)) if avg_fqn else None
+    sample = ops_sample if ops_sample != "-" else lat_sample
     return ops_raw, lat_raw, sample, result
 
 
-def build_ops_rows_from_monitor_results(monitor_results, scope="cluster", poll_time=None, cluster_scope_only=False):
+def build_ops_rows_from_monitor_results(
+    monitor_results, scope="cluster", poll_time=None, ops_rows=None,
+):
     """Build operation rows — one VMS monitor group per op (avoids merge skew)."""
     if not monitor_results:
         return [], "-"
-    per_op = _monitor_result_for_op_key(monitor_results, cluster_scope_only=cluster_scope_only)
+    if ops_rows is None:
+        ops_rows = active_ops()
+    per_op = _monitor_result_for_op_key(monitor_results, ops_rows)
     rows = []
     samples = []
     poll_time = poll_time if poll_time is not None else time.monotonic()
-    ops_rows = OPS if cluster_scope_only else active_ops()
     for key, label, category, ops_fqn, avg_fqn in ops_rows:
         result = per_op.get(key)
         if result is None:
@@ -916,10 +932,10 @@ def _create_monitor_raw(name_suffix, prop_list, object_type, object_ids):
     return monitor_id
 
 
-def create_ops_monitors(name_prefix, object_type, object_ids, cluster_scope_only=False):
+def create_ops_monitors(name_prefix, object_type, object_ids, ops_rows=None):
     """Create one VMS monitor per compatible metric group."""
     monitor_ids = []
-    for idx, prop_list in enumerate(build_ops_monitor_groups(cluster_scope_only=cluster_scope_only)):
+    for idx, prop_list in enumerate(build_ops_monitor_groups(ops_rows=ops_rows)):
         monitor_ids.append(
             _create_monitor_raw(f"{name_prefix}_ops_{idx}", prop_list, object_type, object_ids)
         )
@@ -928,11 +944,22 @@ def create_ops_monitors(name_prefix, object_type, object_ids, cluster_scope_only
 
 def create_cluster_monitors():
     """Create scope-aware BlockMetrics/VolumeMetrics + optional size/bw monitors."""
-    global OPS_MONITOR_IDS, PROTO_MONITOR_ID
-    object_type, object_ids = monitor_scope()
-    OPS_MONITOR_IDS = create_ops_monitors("nvme", object_type, object_ids)
+    global OPS_MONITOR_IDS, CLUSTER_SUPPLEMENT_MONITOR_IDS, PROTO_MONITOR_ID
+    if VOLUME_SCOPED and VOLUME_IDS:
+        OPS_MONITOR_IDS = create_ops_monitors(
+            "nvme_vol", "volume", VOLUME_IDS, ops_rows=volume_primary_ops_rows(),
+        )
+        CLUSTER_SUPPLEMENT_MONITOR_IDS = create_ops_monitors(
+            "nvme_cl", "cluster", [CLUSTER_ID], ops_rows=cluster_supplement_ops_rows(),
+        )
+    else:
+        object_type, object_ids = monitor_scope()
+        OPS_MONITOR_IDS = create_ops_monitors("nvme", object_type, object_ids)
+        CLUSTER_SUPPLEMENT_MONITOR_IDS = []
     PROTO_MONITOR_ID = _create_monitor_raw(
-        "nvme_proto", build_proto_prop_list(), object_type, object_ids,
+        "nvme_proto", build_proto_prop_list(), *(
+            ("volume", VOLUME_IDS) if VOLUME_SCOPED and VOLUME_IDS else ("cluster", [CLUSTER_ID])
+        ),
     )
 
 
@@ -974,6 +1001,8 @@ def restore_terminal():
 def cleanup():
     restore_terminal()
     for monitor_id in OPS_MONITOR_IDS:
+        delete_monitor(monitor_id)
+    for monitor_id in CLUSTER_SUPPLEMENT_MONITOR_IDS:
         delete_monitor(monitor_id)
     if PROTO_MONITOR_ID is not None:
         delete_monitor(PROTO_MONITOR_ID)
@@ -1150,12 +1179,12 @@ def throughput_mbs_from_iops_size(ops_sec, size_bytes):
     return ops * size / 1_000_000.0
 
 
-def build_rows_from_results(ops_monitor_results, proto_result, scope="cluster", poll_time=None, cluster_scope_only=False):
+def build_rows_from_results(ops_monitor_results, proto_result, scope="cluster", poll_time=None, ops_rows=None):
     if not ops_monitor_results:
         return [], "-"
     poll_time = poll_time if poll_time is not None else time.monotonic()
     rows, selected_sample = build_ops_rows_from_monitor_results(
-        ops_monitor_results, scope=scope, poll_time=poll_time, cluster_scope_only=cluster_scope_only,
+        ops_monitor_results, scope=scope, poll_time=poll_time, ops_rows=ops_rows,
     )
     read_bw = write_bw = read_sz = write_sz = None
     if isinstance(proto_result, dict):
@@ -1187,6 +1216,19 @@ def build_rows_from_results(ops_monitor_results, proto_result, scope="cluster", 
         ops = as_float(r["ops_sec"])
         r["pct"] = ops / total_ops * 100.0 if total_ops > 0 and ops is not None else None
     return rows, selected_sample
+
+
+def merge_volume_and_cluster_rows(vol_rows, cluster_rows):
+    """Combine volume read/write rows with cluster-scoped supplement ops."""
+    by_key = rows_by_key(cluster_rows)
+    for row in vol_rows:
+        by_key[row["key"]] = row
+    rows = [by_key[key] for key in TABLE_ORDER if key in by_key]
+    total_ops = sum(as_float(r["ops_sec"]) or 0 for r in rows)
+    for r in rows:
+        ops = as_float(r["ops_sec"])
+        r["pct"] = ops / total_ops * 100.0 if total_ops > 0 and ops is not None else None
+    return rows
 
 
 def compute_combined_avg_latency(rows, labels=None):
@@ -1392,9 +1434,29 @@ def fetch_monitor_query():
     PREV_ROWS = LAST_ROWS
     poll_time = time.monotonic()
     LAST_POLL_MONOTONIC = poll_time
-    ops_results = query_ops_monitors(OPS_MONITOR_IDS)
     proto_result = api_request("GET", f"/monitors/{PROTO_MONITOR_ID}/query/") if PROTO_MONITOR_ID else None
-    rows, sample = build_rows_from_results(ops_results, proto_result, scope="cluster", poll_time=poll_time)
+
+    if VOLUME_SCOPED and CLUSTER_SUPPLEMENT_MONITOR_IDS:
+        vol_results = query_ops_monitors(OPS_MONITOR_IDS)
+        cluster_results = query_ops_monitors(CLUSTER_SUPPLEMENT_MONITOR_IDS)
+        vol_rows, sample = build_rows_from_results(
+            vol_results, proto_result, scope="volume", poll_time=poll_time,
+            ops_rows=volume_primary_ops_rows(),
+        )
+        cluster_rows, cluster_sample = build_rows_from_results(
+            cluster_results, None, scope="cluster", poll_time=poll_time,
+            ops_rows=cluster_supplement_ops_rows(),
+        )
+        rows = merge_volume_and_cluster_rows(vol_rows, cluster_rows)
+        if sample == "-" and cluster_sample != "-":
+            sample = cluster_sample
+    else:
+        ops_results = query_ops_monitors(OPS_MONITOR_IDS)
+        scope = "volume" if VOLUME_SCOPED else "cluster"
+        rows, sample = build_rows_from_results(
+            ops_results, proto_result, scope=scope, poll_time=poll_time,
+        )
+
     LAST_ROWS = rows
     LAST_SAMPLE = sample
     write_csv_rows(rows, sample)
@@ -1448,7 +1510,7 @@ def enter_drill_mode(mode):
     for obj in DRILL_OBJECTS:
         try:
             ops_ids = create_ops_monitors(
-                f"{mode}_{obj['id']}", cfg["object_type"], [obj["id"]], cluster_scope_only=True,
+                f"{mode}_{obj['id']}", cfg["object_type"], [obj["id"]], ops_rows=OPS,
             )
             proto_id = None
             if cfg["object_type"] != "blockhost":
@@ -1488,7 +1550,7 @@ def fetch_drill_query():
             ops_results = query_ops_monitors(ops_ids)
             proto_result = api_request("GET", f"/monitors/{proto_id}/query/") if proto_id else None
             rows, _ = build_rows_from_results(
-                ops_results, proto_result, scope=scope, poll_time=poll_time, cluster_scope_only=True,
+                ops_results, proto_result, scope=scope, poll_time=poll_time, ops_rows=OPS,
             )
             if not rows:
                 continue

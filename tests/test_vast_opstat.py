@@ -111,6 +111,26 @@ class TestCliParsing:
         assert exc.value.code == 0
         assert opstat.VERSION in capsys.readouterr().out
 
+    def test_vms_port_flag_parse(self):
+        args = opstat.parse_args(
+            ["--nfs", "--version=3.0", "--vms-port", "8443", *BASE_ARGS]
+        )
+        assert args.port == 8443
+
+    def test_port_alias_still_works(self):
+        args = opstat.parse_args(
+            ["--nfs", "--version=3.0", "--port", "9443", *BASE_ARGS]
+        )
+        assert args.port == 9443
+
+    def test_vms_port_builds_base_url(self):
+        nfs_v3.init_config(_connection_args(port=8443))
+        assert nfs_v3.BASE_URL == "https://203.0.113.10:8443/api"
+
+    def test_default_vms_port_omits_colon_in_url(self):
+        nfs_v3.init_config(_connection_args(port=443))
+        assert nfs_v3.BASE_URL == "https://203.0.113.10/api"
+
 
 class TestNfsV3Metrics:
     def test_metric_names_for_op_null(self):
@@ -358,21 +378,24 @@ class TestNvmeTcpMetrics:
         ops = {key: (o, a) for key, _l, _c, o, a in nvme_tcp.active_ops()}
         assert ops["read"][0] == "VolumeMetrics,read_latency__rate"
         assert ops["read"][1] == "VolumeMetrics,read_latency__avg"
-        assert ops["discovery"] == (None, None)
+        assert ops["discovery"][0] == "BlockMetrics,discovery_req"
+        assert ops["unmap"][0] == "BlockMetrics,unmap_req"
         assert nvme_tcp.build_proto_prop_list() == [
             nvme_tcp.VOLUME_READ_SIZE_FQN,
             nvme_tcp.VOLUME_WRITE_SIZE_FQN,
         ]
         nvme_tcp.VOLUME_SCOPED = False
 
-    def test_volume_monitor_groups_exclude_fabric(self):
+    def test_volume_monitor_groups_split_primary_and_supplement(self):
         nvme_tcp.VOLUME_SCOPED = True
-        groups = nvme_tcp.build_ops_monitor_groups()
-        assert len(groups) == 5
-        flat = nvme_tcp.build_ops_prop_list()
-        assert "VolumeMetrics,read_latency__rate" in flat
-        assert "BlockMetrics,read_req" not in flat
-        assert "BlockMetrics,handle_request_latency__rate" not in flat
+        vol_groups = nvme_tcp.build_ops_monitor_groups(ops_rows=nvme_tcp.volume_primary_ops_rows())
+        cluster_groups = nvme_tcp.build_ops_monitor_groups(
+            ops_rows=nvme_tcp.cluster_supplement_ops_rows(),
+        )
+        assert len(vol_groups) == 2
+        assert len(cluster_groups) == 5
+        assert "VolumeMetrics,read_latency__rate" in vol_groups[0]
+        assert "BlockMetrics,handle_request_latency__rate" in cluster_groups[-1]
         nvme_tcp.VOLUME_SCOPED = False
 
     def test_weighted_avg_ignores_none_weights(self):
@@ -454,6 +477,7 @@ class TestNvmeTcpMetrics:
         assert nvme_tcp.compute_combined_data_io_size(rows) == pytest.approx(6144.0)
 
     def test_build_ops_monitor_groups_are_vms_compatible(self):
+        nvme_tcp.VOLUME_SCOPED = False
         groups = nvme_tcp.build_ops_monitor_groups()
         assert len(groups) == 7
         flat = nvme_tcp.build_ops_prop_list()

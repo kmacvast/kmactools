@@ -6,6 +6,8 @@ Displays NFS RPC operation statistics with health summaries, workload
 classification, latency metrics, throughput, I/O sizing, delta tracking, and
 interactive drill-down — in a terminal display that refreshes on an interval.
 
+![vast-opstat NFSv3](images/vast-opstat_NFSv3.png)
+
 ## Quick Start
 
 ```bash
@@ -15,6 +17,16 @@ interactive drill-down — in a terminal display that refreshes on an interval.
 
 If `--password` is omitted, you will be prompted securely. The `VAST_PASSWORD`
 environment variable is also accepted.
+
+### Remote cluster via SSH tunnel
+
+For zero-trust or Teleport environments where VMS is not directly reachable, forward
+a local port and aim opstat at it:
+
+```bash
+ssh -L 8443:var203.selab.vastdata.com:443 user@jump-host
+./vast-opstat.py --nfs --version=3.0 --vms localhost --vms-port 8443 --user admin
+```
 
 ## Usage
 
@@ -26,8 +38,8 @@ vast-opstat.py --nfs --version=3.0 [options]
 |--------|---------|-------------|
 | `--nfs` | — | Select NFS protocol (required) |
 | `--version=3.0` | — | NFS version (required with `--nfs`) |
-| `--vms HOST` | — | VMS hostname or IP |
-| `--port N` | `443` | VMS HTTPS port |
+| `--vms HOST` | — | VMS hostname or IP (use `localhost` with an SSH tunnel) |
+| `--vms-port PORT` | `443` | VMS HTTPS port (`--port` legacy alias) |
 | `--user USER` | `admin` | VMS username |
 | `--password PASS` | — | VMS password |
 | `--sample-average WIN` | — | Rolling average window (e.g. `10m`, `1h`, `4h`) |

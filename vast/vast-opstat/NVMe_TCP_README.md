@@ -5,6 +5,8 @@ Queries VMS performance counters and renders a full-screen terminal dashboard wi
 cluster-wide or multi-volume scoping, host initiator drill-down, path health views,
 and CSV export.
 
+![vast-opstat NVMe-oTCP](images/vast-opstat_NVMe-oTCP.png)
+
 **Implementation:** [nvme_tcp.py](nvme_tcp.py)
 
 ---
@@ -43,7 +45,7 @@ vast-opstat.py --block --nvme-over-tcp --vms <HOST> [options]
 |------|-------------|
 | `--block` | Select block storage protocol |
 | `--nvme-over-tcp` | NVMe-oTCP transport (required with `--block`) |
-| `--vms HOST` | VMS hostname or IP |
+| `--vms HOST` | VMS hostname or IP (use `localhost` with an SSH tunnel) |
 
 ### Block-specific scoping
 
@@ -53,13 +55,14 @@ vast-opstat.py --block --nvme-over-tcp --vms <HOST> [options]
 | `--volumes vol1,vol2` | Comma-separated list of volume names to scope monitors |
 
 When volume scoping is active, monitors use `object_type=volume` and `VolumeMetrics`
-counters. Fabric/admin operations are not available at volume scope and display `-`.
+for **read/write** only. Reclaim, fabric, and admin operations continue to use
+cluster-scoped `BlockMetrics` supplement monitors so those rows stay populated.
 
 ### Shared connection & output options
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--port N` | `443` | VMS HTTPS port |
+| `--vms-port PORT` | `443` | VMS HTTPS port (`--port` legacy alias) |
 | `--user USER` | `admin` | VMS username |
 | `--password PASS` | — | VMS password |
 | `--sample-average WIN` | — | Rolling average window (`10m`, `1h`, `4h`) |
@@ -83,6 +86,10 @@ counters. Fabric/admin operations are not available at volume scope and display 
 # Multi-volume scope
 ./vast-opstat.py --block --nvme-over-tcp --vms var203.selab.vastdata.com \
   --volumes vol-a,vol-b,vol-c
+
+# Remote cluster via SSH tunnel (Teleport / zero-trust)
+ssh -L 8443:var203.selab.vastdata.com:443 user@jump-host
+./vast-opstat.py --block --nvme-over-tcp --vms localhost --vms-port 8443 --user admin
 ```
 
 ---
@@ -162,8 +169,16 @@ reports as ops/sec. These are consumed directly (no delta math).
 
 ### Volume-scoped metrics
 
-At volume scope, `BlockMetrics,read_req` and similar counters are **not available**.
-Instead, monitors use:
+At volume scope, VMS exposes read/write IOPS and latency on the volume object. opstat
+creates **two parallel monitor sets** and merges the results:
+
+| Scope | Object | Operations |
+|-------|--------|------------|
+| Volume | `object_type=volume` | READ, WRITE (+ `VolumeMetrics,*_size__avg` for throughput) |
+| Cluster supplement | `object_type=cluster` | COMPARE & WRITE, UNMAP, WRITE ZEROES, fabric, admin |
+
+Reclaim and fabric rows therefore reflect **cluster-wide** activity even when read/write
+are scoped to a named volume.
 
 | Field | VolumeMetrics FQN |
 |-------|-------------------|
@@ -227,17 +242,17 @@ Press any drill key again to toggle back to the main view.
 
 ## Monitored Operations
 
-| UI Label | Cluster BlockMetrics | Volume VolumeMetrics | Category |
-|----------|---------------------|----------------------|----------|
-| READ | `read_req` + `read_latency__avg` | `read_latency__rate` + `read_latency__avg` | Data I/O |
-| WRITE | `write_req` + `write_latency__avg` | `write_latency__rate` + `write_latency__avg` | Data I/O |
-| COMPARE & WRITE | `compare_and_write_req` + avg | `compare_and_write_latency__rate` + avg | Data I/O |
-| UNMAP (TRIM) | `unmap_req` + avg | `unmap_latency__rate` + avg | Reclamation |
-| WRITE ZEROES | `write_zeros_req` + avg | `write_zeroes_latency__rate` + avg | Reclamation |
-| FABRIC DISCOVERY | `discovery_req` + avg | *not available* | Fabric |
-| FABRIC REQ HANDLE | `handle_request_latency__rate/avg` | *not available* | Fabric |
-| FABRIC XPORT FREE | `transport_free_latency__rate/avg` | *not available* | Fabric |
-| ADMIN GET NS | `get_ns_list_latency__rate/avg` | *not available* | Admin |
+| UI Label | Cluster BlockMetrics | When `--volumes` is set | Category |
+|----------|---------------------|-------------------------|----------|
+| READ | `read_req` + `read_latency__avg` | `VolumeMetrics,read_latency__rate/avg` | Data I/O |
+| WRITE | `write_req` + `write_latency__avg` | `VolumeMetrics,write_latency__rate/avg` | Data I/O |
+| COMPARE & WRITE | `compare_and_write_req` + avg | cluster supplement (BlockMetrics) | Data I/O |
+| UNMAP (TRIM) | `unmap_req` + avg | cluster supplement (BlockMetrics) | Reclamation |
+| WRITE ZEROES | `write_zeros_req` + avg | cluster supplement (BlockMetrics) | Reclamation |
+| FABRIC DISCOVERY | `discovery_req` + avg | cluster supplement (BlockMetrics) | Fabric |
+| FABRIC REQ HANDLE | `handle_request_latency__rate/avg` | cluster supplement (BlockMetrics) | Fabric |
+| FABRIC XPORT FREE | `transport_free_latency__rate/avg` | cluster supplement (BlockMetrics) | Fabric |
+| ADMIN GET NS | `get_ns_list_latency__rate/avg` | cluster supplement (BlockMetrics) | Admin |
 
 VMS constraint: unrelated BlockMetrics operations cannot share one monitor. opstat
 creates one monitor per compatible metric group and merges query results client-side.
@@ -286,15 +301,13 @@ vast-opstat.py  (--block --nvme-over-tcp)
     ▼
 nvme_tcp.run()
     ├── configure_volume_scope()     # optional --volume / --volumes
-    ├── create_cluster_monitors()    # per-op BlockMetrics/VolumeMetrics + ProtoMetrics
+    ├── create_cluster_monitors()    # volume read/write + cluster supplement + ProtoMetrics
     └── loop every REFRESH_SECONDS
             ├── fetch_monitor_query()
+            │       └── merge volume + cluster supplement rows when scoped
             ├── apply_op_rates()     # counter deltas → IOPS
             ├── fetch_drill_query()  # if vip / cnode / host drill active
             └── render_screen()
-                    ├── BLOCK HEALTH & WORKLOAD
-                    ├── PERFORMANCE INSIGHTS
-                    └── OPERATIONS table (or drill-down ranking)
 ```
 
 ---

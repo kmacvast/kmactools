@@ -7,6 +7,10 @@ from the terminal.
 Supports **cluster-wide** and **multi-volume scoping** for block storage, plus **host
 initiator metrics** drill-down for NVMe-oTCP workloads.
 
+![vast-opstat NVMe-oTCP](images/vast-opstat_NVMe-oTCP.png)
+
+![vast-opstat NFSv3](images/vast-opstat_NFSv3.png)
+
 ---
 
 ## Getting Started & Setup
@@ -27,6 +31,9 @@ cd vast/vast-opstat
 
 # NVMe-oTCP block — cluster-wide
 ./vast-opstat.py --block --nvme-over-tcp --vms <VMS_HOST> --user <USER>
+
+# NVMe-oTCP via SSH tunnel (Teleport / zero-trust)
+./vast-opstat.py --block --nvme-over-tcp --vms localhost --vms-port 8443 --user <USER>
 
 # NVMe-oTCP block — scoped to one or more volumes
 ./vast-opstat.py --block --nvme-over-tcp --vms <VMS_HOST> \
@@ -63,6 +70,7 @@ cd vast/vast-opstat
 ### NVMe-oTCP (block)
 
 - Cluster-wide or multi-volume scoping (`--volume` / `--volumes`)
+- Hybrid volume mode: per-volume read/write via `VolumeMetrics`; reclaim, fabric, and admin ops via cluster `BlockMetrics` supplement monitors
 - Counter-delta IOPS engine (true real-time rates, not lifetime counters)
 - Three-panel TUI: Block Health & Workload, Performance Insights, Operations table
 - Interactive drill-down: host initiators (`h`), VIP paths (`v`), cNode paths (`c`)
@@ -87,7 +95,7 @@ These flags apply to all implemented protocols:
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--vms HOST` | — | VMS hostname or IP (required) |
-| `--port N` | `443` | VMS HTTPS port |
+| `--vms-port PORT` | `443` | VMS HTTPS port (`--port` accepted as legacy alias) |
 | `--user USER` | `admin` | VMS username |
 | `--password PASS` | — | VMS password (prompted if omitted) |
 | `--sample-average WIN` | — | Rolling average window (e.g. `10m`, `1h`, `4h`) |
@@ -95,6 +103,20 @@ These flags apply to all implemented protocols:
 | `--csv FILENAME` | — | Append captured samples to a CSV file |
 | `--no-color` | — | Disable ANSI color output |
 | `--discover-metrics` | — | Enumerate metrics and objects, then exit |
+
+### Remote clusters via SSH tunnel (Teleport / zero-trust)
+
+When VMS is reachable only through a forwarded local port (common with Teleport,
+bastion hops, or zero-trust access), point `--vms` at the tunnel endpoint and pass
+the forwarded port with `--vms-port`:
+
+```bash
+# Terminal 1 — forward local 8443 to remote VMS HTTPS (443)
+ssh -L 8443:var203.selab.vastdata.com:443 user@jump-host
+
+# Terminal 2 — opstat via the tunnel
+./vast-opstat.py --nfs --version=3.0 --vms localhost --vms-port 8443 --user admin
+```
 
 NVMe-oTCP-only scoping flags:
 

@@ -1,0 +1,10 @@
+# vast-opstat runtime dependencies
+#
+# vast-opstat.py, nfs_v3.py, and nvme_tcp.py use Python 3.8+ standard library only
+# (urllib, ssl, argparse, csv, termios, etc.). No third-party pip packages are
+# required to run the application.
+#
+# Python version: >=3.8
+#
+# Optional — development / unit tests (from repository root):
+#   pip install pytest>=8.0.0 pytest-mock>=3.12.0

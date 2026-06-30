@@ -2,7 +2,8 @@
 ################################################################################
 # Script Name: vast-opstat.py
 # Description: Multi-protocol VAST performance statistics tool. Phase 1 routes
-#              --nfs --version=3.0 to the NFS v3 monitor.
+#              --nfs --version=3.0 to NFS v3; Phase 2 routes --block
+#              --nvme-over-tcp to NVMe-oTCP block statistics.
 #
 # Author: KMac kmac@vastdata.com
 # Version: 1.0.0
@@ -17,6 +18,7 @@ if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
 import nfs_v3
+import nvme_tcp
 
 VERSION = "1.0.0"
 
@@ -61,7 +63,7 @@ def validate_protocol_args(args):
                 "ERROR: --block requires --nvme-over-tcp.\n"
                 "Example: vast-opstat.py --block --nvme-over-tcp --vms <VMS_IP>"
             )
-        raise SystemExit("ERROR: NVMe-oTCP statistics are not implemented yet.")
+        return
 
     if args.smb:
         raise SystemExit("ERROR: SMB statistics are not implemented yet.")
@@ -144,7 +146,21 @@ def parse_args(argv=None):
     parser.add_argument(
         "--discover-metrics",
         action="store_true",
-        help="Enumerate NFS metrics and objects available from VMS, then exit.",
+        help="Enumerate protocol metrics and objects available from VMS, then exit.",
+    )
+    parser.add_argument(
+        "--volume",
+        dest="volumes",
+        default=None,
+        metavar="NAME",
+        help="Limit block stats to one volume name (NVMe-oTCP). Alias: --volumes.",
+    )
+    parser.add_argument(
+        "--volumes",
+        dest="volumes",
+        default=None,
+        metavar="NAMES",
+        help="Comma-separated volume names to scope block stats (NVMe-oTCP).",
     )
     parser.add_argument(
         "-V",
@@ -163,6 +179,8 @@ def dispatch(args):
     """Route parsed arguments to the appropriate protocol handler."""
     if args.nfs and args.protocol_version == "3.0":
         return nfs_v3.run(args)
+    if args.block and args.nvme_over_tcp:
+        return nvme_tcp.run(args)
     raise SystemExit("ERROR: No protocol handler matched the supplied flags.")
 
 

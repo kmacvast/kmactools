@@ -18,6 +18,7 @@ import pytest
 _OPSTAT_DIR = os.path.join(os.path.dirname(__file__), "..", "vast", "vast-opstat")
 _OPSTAT_SCRIPT = os.path.join(_OPSTAT_DIR, "vast-opstat.py")
 _NFS_V3_SCRIPT = os.path.join(_OPSTAT_DIR, "nfs_v3.py")
+_NVME_TCP_SCRIPT = os.path.join(_OPSTAT_DIR, "nvme_tcp.py")
 
 
 def _load_module(name, path):
@@ -30,6 +31,7 @@ def _load_module(name, path):
 
 opstat = _load_module("vast_opstat", _OPSTAT_SCRIPT)
 nfs_v3 = _load_module("vast_opstat_nfs_v3", _NFS_V3_SCRIPT)
+nvme_tcp = _load_module("vast_opstat_nvme_tcp", _NVME_TCP_SCRIPT)
 
 BASE_ARGS = [
     "--vms", "203.0.113.10",
@@ -87,10 +89,16 @@ class TestCliParsing:
             opstat.parse_args(["--block", *BASE_ARGS])
         assert "--block requires --nvme-over-tcp" in str(exc.value)
 
-    def test_block_nvme_over_tcp_not_implemented(self):
-        with pytest.raises(SystemExit) as exc:
-            opstat.parse_args(["--block", "--nvme-over-tcp", *BASE_ARGS])
-        assert "NVMe-oTCP statistics are not implemented yet" in str(exc.value)
+    def test_block_nvme_over_tcp_flags_parse(self):
+        args = opstat.parse_args(["--block", "--nvme-over-tcp", *BASE_ARGS])
+        assert args.block is True
+        assert args.nvme_over_tcp is True
+
+    def test_block_volume_flags_parse(self):
+        args = opstat.parse_args(
+            ["--block", "--nvme-over-tcp", "--volumes", "vol-a,vol-b", *BASE_ARGS]
+        )
+        assert args.volumes == "vol-a,vol-b"
 
     def test_smb_not_implemented(self):
         with pytest.raises(SystemExit) as exc:
@@ -225,3 +233,281 @@ class TestDispatch:
         with patch.object(opstat.nfs_v3, "run", return_value=0) as run_mock:
             assert opstat.dispatch(args) == 0
         run_mock.assert_called_once_with(args)
+
+    def test_dispatch_routes_to_nvme_tcp(self):
+        args = opstat.parse_args(["--block", "--nvme-over-tcp", *BASE_ARGS])
+        with patch.object(opstat.nvme_tcp, "run", return_value=0) as run_mock:
+            assert opstat.dispatch(args) == 0
+        run_mock.assert_called_once_with(args)
+
+
+class TestNvmeTcpMetrics:
+    def _connection_args(self, **overrides):
+        values = {
+            "vms": "203.0.113.10",
+            "port": 443,
+            "user": "admin",
+            "password": "secret",
+            "sample_average": None,
+            "refresh": 5,
+            "csv": None,
+            "no_color": True,
+            "discover_metrics": False,
+            "nfs": False,
+            "block": True,
+            "smb": False,
+            "nvme_over_tcp": True,
+            "protocol_version": None,
+        }
+        values.update(overrides)
+        return SimpleNamespace(**values)
+
+    def test_metric_names_for_op_read(self):
+        names = nvme_tcp.metric_names_for_op("read")
+        assert names["ops"] == "BlockMetrics,read_req"
+        assert names["avg"] == "BlockMetrics,read_latency__avg"
+
+    def test_build_ops_prop_list_includes_core_ops(self):
+        props = nvme_tcp.build_ops_prop_list()
+        assert "BlockMetrics,read_req" in props
+        assert "BlockMetrics,unmap_req" in props
+        assert "BlockMetrics,discovery_req" in props
+
+    def test_build_proto_prop_list(self):
+        assert nvme_tcp.build_proto_prop_list() == [
+            nvme_tcp.BLOCK_READ_BW_FQN,
+            nvme_tcp.BLOCK_WRITE_BW_FQN,
+            nvme_tcp.BLOCK_READ_SIZE_FQN,
+            nvme_tcp.BLOCK_WRITE_SIZE_FQN,
+        ]
+
+    def test_build_rows_from_results_single_sample(self):
+        nvme_tcp.init_config(self._connection_args())
+        nvme_tcp.PREV_COUNTER_STATE.clear()
+        nvme_tcp.DELTA_READY = False
+
+        def _op_result(ops_fqn, ops_val, avg_fqn, avg_val, ts="t1"):
+            return {
+                "prop_list": ["timestamp", ops_fqn, avg_fqn],
+                "data": [[ts, ops_val, avg_val]],
+            }
+
+        ops_monitor_results = [
+            _op_result("BlockMetrics,read_req", 1_000_000.0, "BlockMetrics,read_latency__avg", 250.0),
+            _op_result("BlockMetrics,write_req", 500_000.0, "BlockMetrics,write_latency__avg", 800.0),
+            _op_result("BlockMetrics,compare_and_write_req", 0.0, "BlockMetrics,compare_and_write_latency__avg", 0.0),
+            _op_result("BlockMetrics,unmap_req", 0.0, "BlockMetrics,unmap_latency__avg", 0.0),
+            _op_result("BlockMetrics,write_zeros_req", 0.0, "BlockMetrics,write_zeroes_latency__avg", 0.0),
+            _op_result("BlockMetrics,discovery_req", 0.0, "BlockMetrics,discovery_latency__avg", 0.0),
+            {
+                "prop_list": [
+                    "timestamp",
+                    "BlockMetrics,handle_request_latency__rate",
+                    "BlockMetrics,handle_request_latency__avg",
+                    "BlockMetrics,transport_free_latency__rate",
+                    "BlockMetrics,transport_free_latency__avg",
+                    "BlockMetrics,get_ns_list_latency__rate",
+                    "BlockMetrics,get_ns_list_latency__avg",
+                ],
+                "data": [["t1", 300.0, 100.0, 222.0, 50.0, 0.0, 0.0]],
+            },
+        ]
+        proto_result = {
+            "prop_list": [
+                "timestamp",
+                nvme_tcp.BLOCK_READ_BW_FQN,
+                nvme_tcp.BLOCK_WRITE_BW_FQN,
+                nvme_tcp.BLOCK_READ_SIZE_FQN,
+                nvme_tcp.BLOCK_WRITE_SIZE_FQN,
+            ],
+            "data": [["t1", 100_000_000.0, 50_000_000.0, 4096.0, 8192.0]],
+        }
+
+        t0 = 1000.0
+        rows, _ = nvme_tcp.build_rows_from_results(
+            ops_monitor_results, proto_result, scope="cluster", poll_time=t0,
+        )
+        ops_monitor_results[0]["data"][0][1] = 1_000_500.0
+        ops_monitor_results[1]["data"][0][1] = 500_250.0
+        rows, sample = nvme_tcp.build_rows_from_results(
+            ops_monitor_results, proto_result, scope="cluster", poll_time=t0 + 5.0,
+        )
+        by_key = {row["key"]: row for row in rows}
+
+        assert nvme_tcp.DELTA_READY is True
+        assert by_key["read"]["ops_sec"] == pytest.approx(100.0)
+        assert by_key["read"]["avg_us"] == 250.0
+        assert by_key["read"]["bw_mbs"] == pytest.approx(100.0)
+        assert by_key["read"]["avg_io_bytes"] == pytest.approx(1_000_000.0)
+        assert by_key["write"]["ops_sec"] == pytest.approx(50.0)
+        assert by_key["handle_request"]["ops_sec"] == pytest.approx(300.0)
+        assert nvme_tcp.compute_data_io_iops(rows) == pytest.approx(150.0)
+
+    def test_rate_from_counter_delta(self):
+        nvme_tcp.init_config(self._connection_args())
+        nvme_tcp.PREV_COUNTER_STATE.clear()
+        assert nvme_tcp.rate_from_counter_delta("cluster", "read", 10_000_000, 1000.0) is None
+        rate = nvme_tcp.rate_from_counter_delta("cluster", "read", 10_000_500, 1005.0)
+        assert rate == pytest.approx(100.0)
+
+    def test_avg_io_size_from_throughput(self):
+        assert nvme_tcp.avg_io_size_bytes(100.0, 100.0) == pytest.approx(1_000_000.0)
+
+    def test_scoped_metric_fqn_volume_mode(self):
+        nvme_tcp.VOLUME_SCOPED = True
+        ops = {key: (o, a) for key, _l, _c, o, a in nvme_tcp.active_ops()}
+        assert ops["read"][0] == "VolumeMetrics,read_latency__rate"
+        assert ops["read"][1] == "VolumeMetrics,read_latency__avg"
+        assert ops["discovery"] == (None, None)
+        assert nvme_tcp.build_proto_prop_list() == [
+            nvme_tcp.VOLUME_READ_SIZE_FQN,
+            nvme_tcp.VOLUME_WRITE_SIZE_FQN,
+        ]
+        nvme_tcp.VOLUME_SCOPED = False
+
+    def test_volume_monitor_groups_exclude_fabric(self):
+        nvme_tcp.VOLUME_SCOPED = True
+        groups = nvme_tcp.build_ops_monitor_groups()
+        assert len(groups) == 5
+        flat = nvme_tcp.build_ops_prop_list()
+        assert "VolumeMetrics,read_latency__rate" in flat
+        assert "BlockMetrics,read_req" not in flat
+        assert "BlockMetrics,handle_request_latency__rate" not in flat
+        nvme_tcp.VOLUME_SCOPED = False
+
+    def test_weighted_avg_ignores_none_weights(self):
+        assert nvme_tcp._weighted_avg([(None, 100.0), (50.0, 200.0)]) == pytest.approx(200.0)
+        assert nvme_tcp._weighted_avg([(None, 100.0), (None, 200.0)]) is None
+
+    def test_compute_data_io_iops_excludes_fabric(self):
+        rows = [
+            {"key": "read", "ops_sec": 100.0},
+            {"key": "write", "ops_sec": 50.0},
+            {"key": "compare_and_write", "ops_sec": 10.0},
+            {"key": "handle_request", "ops_sec": 300.0},
+            {"key": "transport_free", "ops_sec": 222.0},
+        ]
+        assert nvme_tcp.compute_data_io_iops(rows) == pytest.approx(160.0)
+
+    def test_format_block_size_scaling(self):
+        assert nvme_tcp.format_block_size(4096.0)[0] == "4.00 KB"
+        assert nvme_tcp.format_block_size(131072.0)[0] == "128.00 KB"
+        assert nvme_tcp.format_block_size(1048576.0)[0] == "1.00 MB"
+        assert nvme_tcp.format_block_size(None)[0] == "-"
+
+    def test_block_health_label_healthy(self):
+        label, _color = nvme_tcp.block_health_label(5000.0, 400.0, 600.0)
+        assert label == "HEALTHY"
+
+    def test_block_health_label_high_latency(self):
+        label, _color = nvme_tcp.block_health_label(5000.0, 2500.0, 600.0)
+        assert label == "HIGH LATENCY"
+        label, _color = nvme_tcp.block_health_label(5000.0, 400.0, 6000.0)
+        assert label == "HIGH LATENCY"
+
+    def test_block_workload_mix(self):
+        rows = [
+            {"key": "read", "ops_sec": 350.0},
+            {"key": "write", "ops_sec": 550.0},
+            {"key": "unmap", "ops_sec": 50.0},
+            {"key": "handle_request", "ops_sec": 50.0},
+        ]
+        read_pct, write_pct, reclaim_pct, fabric_pct = nvme_tcp.block_workload_mix(rows)
+        assert read_pct == pytest.approx(35.0)
+        assert write_pct == pytest.approx(55.0)
+        assert reclaim_pct == pytest.approx(5.0)
+        assert fabric_pct == pytest.approx(5.0)
+
+    def test_classify_block_workload_read_heavy(self):
+        rows = [
+            {"key": "read", "ops_sec": 9000, "avg_io_bytes": 1_048_576},
+            {"key": "write", "ops_sec": 100, "avg_io_bytes": None},
+            {"key": "unmap", "ops_sec": 10, "avg_io_bytes": None},
+        ]
+        result = nvme_tcp.classify_block_workload(rows)
+        assert "read-heavy" in result
+        assert "large-block sequential" in result
+
+    def test_classify_block_workload_fabric_dominant(self):
+        rows = [
+            {"key": "read", "ops_sec": 10},
+            {"key": "write", "ops_sec": 10},
+            {"key": "handle_request", "ops_sec": 500},
+            {"key": "transport_free", "ops_sec": 500},
+        ]
+        assert "fabric-overhead dominant" in nvme_tcp.classify_block_workload(rows)
+
+    def test_classify_block_workload_reclaim_heavy(self):
+        rows = [
+            {"key": "read", "ops_sec": 100},
+            {"key": "write", "ops_sec": 100},
+            {"key": "unmap", "ops_sec": 300},
+            {"key": "write_zeros", "ops_sec": 100},
+        ]
+        assert "space-reclamation heavy" in nvme_tcp.classify_block_workload(rows)
+
+    def test_compute_combined_data_io_size(self):
+        rows = [
+            {"key": "read", "ops_sec": 1000, "avg_io_bytes": 4096},
+            {"key": "write", "ops_sec": 1000, "avg_io_bytes": 8192},
+        ]
+        assert nvme_tcp.compute_combined_data_io_size(rows) == pytest.approx(6144.0)
+
+    def test_build_ops_monitor_groups_are_vms_compatible(self):
+        groups = nvme_tcp.build_ops_monitor_groups()
+        assert len(groups) == 7
+        flat = nvme_tcp.build_ops_prop_list()
+        assert "BlockMetrics,read_req" in flat
+        assert "BlockMetrics,handle_request_latency__rate" in flat
+        assert sum(len(g) for g in groups) == len(flat)
+
+    def test_merge_monitor_query_results(self):
+        merged = nvme_tcp.merge_monitor_query_results([
+            {
+                "prop_list": ["timestamp", "BlockMetrics,read_req", "BlockMetrics,read_latency__avg"],
+                "data": [["t1", 100.0, 250.0]],
+            },
+            {
+                "prop_list": ["timestamp", "BlockMetrics,write_req", "BlockMetrics,write_latency__avg"],
+                "data": [["t1", 50.0, 900.0]],
+            },
+        ])
+        assert "BlockMetrics,read_req" in merged["prop_list"]
+        assert "BlockMetrics,write_req" in merged["prop_list"]
+        assert merged["data"][0][0] == "t1"
+
+    def test_create_monitor_uses_opstat_prefix(self):
+        nvme_tcp.init_config(self._connection_args())
+        created = []
+
+        def fake_api_request(method, path, payload=None):
+            if method == "POST" and path == "/monitors/":
+                created.append(payload["name"])
+                return {"id": len(created)}
+            raise AssertionError(f"Unexpected API call: {method} {path}")
+
+        with patch.object(nvme_tcp, "api_request", side_effect=fake_api_request):
+            nvme_tcp.CLUSTER_ID = 1
+            ids = nvme_tcp.create_ops_monitors("nvme", "cluster", [1])
+
+        assert len(ids) == 7
+        assert all(name.startswith("adhoc_vast-opstat_nvme_ops_") for name in created)
+
+    def test_format_latency_us_sub_millisecond(self):
+        text, us = nvme_tcp.format_latency_us(250.0)
+        assert us == 250.0
+        assert text.endswith("µs") or text.endswith("us")
+
+    def test_format_latency_us_millisecond(self):
+        text, us = nvme_tcp.format_latency_us(2500.0)
+        assert us == 2500.0
+        assert text == "2.50 ms"
+
+    def test_format_throughput_scaling(self):
+        assert nvme_tcp.format_throughput_mbs(0.5)[0] == "512.00 KB/s"
+        assert nvme_tcp.format_throughput_mbs(10.0)[0] == "10.00 MB/s"
+        assert nvme_tcp.format_throughput_mbs(2048.0)[0] == "2.00 GB/s"
+
+    def test_display_names_cover_table_order(self):
+        for key in nvme_tcp.TABLE_ORDER:
+            assert key in nvme_tcp.DISPLAY_NAMES

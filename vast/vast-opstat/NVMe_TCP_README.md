@@ -70,6 +70,7 @@ cluster-scoped `BlockMetrics` supplement monitors so those rows stay populated.
 | `--csv FILENAME` | — | Append captured samples to CSV |
 | `--no-color` | — | Disable ANSI color output |
 | `--discover-metrics` | — | Print available metrics/objects, then exit |
+| `--log-api-calls` | — | Log VMS REST API traffic to `/tmp/vast-opstat-api-*.log` |
 | `-V` / `--tool-version` | — | Print vast-opstat version |
 
 ### Examples
@@ -90,7 +91,16 @@ cluster-scoped `BlockMetrics` supplement monitors so those rows stay populated.
 # Remote cluster via SSH tunnel (Teleport / zero-trust)
 ssh -L 8443:var203.selab.vastdata.com:443 user@jump-host
 ./vast-opstat.py --block --nvme-over-tcp --vms localhost --vms-port 8443 --user admin
+
+# Debug VMS API traffic
+./vast-opstat.py --block --nvme-over-tcp --vms var203.selab.vastdata.com --log-api-calls
 ```
+
+### API call logging
+
+With `--log-api-calls`, every VMS REST request is appended to
+`/tmp/vast-opstat-api-<protocol>-<vms>-<port>-<pid>.log`. The path is printed on
+stderr at startup. Response bodies are truncated; credentials are never logged.
 
 ---
 

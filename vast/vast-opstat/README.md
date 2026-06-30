@@ -7,9 +7,7 @@ from the terminal.
 Supports **cluster-wide** and **multi-volume scoping** for block storage, plus **host
 initiator metrics** drill-down for NVMe-oTCP workloads.
 
-![vast-opstat NVMe-oTCP](images/vast-opstat_NVMe-oTCP.png)
-
-![vast-opstat NFSv3](images/vast-opstat_NFSv3.png)
+![vast-opstat NVMe-oTCP](images/vast-opstat.png)
 
 ---
 
@@ -103,6 +101,7 @@ These flags apply to all implemented protocols:
 | `--csv FILENAME` | — | Append captured samples to a CSV file |
 | `--no-color` | — | Disable ANSI color output |
 | `--discover-metrics` | — | Enumerate metrics and objects, then exit |
+| `--log-api-calls` | — | Log VMS REST API traffic to `/tmp/vast-opstat-api-*.log` |
 
 ### Remote clusters via SSH tunnel (Teleport / zero-trust)
 
@@ -124,6 +123,20 @@ NVMe-oTCP-only scoping flags:
 |--------|-------------|
 | `--volume NAME` | Limit block stats to one volume |
 | `--volumes a,b,c` | Comma-separated volume names |
+
+### API call logging
+
+Pass `--log-api-calls` to record every VMS HTTPS request and response to a file under
+`/tmp`. The log path is printed on startup:
+
+```
+API call logging enabled: /tmp/vast-opstat-api-nvme-tcp-var203.selab.vastdata.com-443-12345.log
+```
+
+Each line includes the HTTP method, full URL, elapsed time, status code, and a
+truncated response body. Authorization headers and passwords are never written to
+the log. Useful for debugging monitor creation, metric availability, and tunnel
+connectivity issues.
 
 ---
 

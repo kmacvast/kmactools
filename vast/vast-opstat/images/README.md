@@ -1,15 +1,11 @@
 # vast-opstat screenshots
 
-Add terminal captures here using this naming convention:
-
-| Protocol | Filename |
-|----------|----------|
-| NFS v3 | `vast-opstat_NFSv3.png` |
-| NVMe-oTCP | `vast-opstat_NVMe-oTCP.png` |
+| Use | Filename |
+|-----|----------|
+| Main [README.md](../README.md) hero | `vast-opstat.png` |
+| NFS v3 protocol page | `vast-opstat_NFSv3.png` |
+| NVMe-oTCP protocol page | `vast-opstat_NVMe-oTCP.png` |
 | SMB (planned) | `vast-opstat_SMB.png` |
 
-Markdown anchor format:
-
-```markdown
-![vast-opstat NFSv3](images/vast-opstat_NFSv3.png)
-```
+Protocol-specific pages use `![vast-opstat ${PROTOCOL}](images/vast-opstat_${PROTOCOL}.png)`.
+The main README uses a single curated screenshot: `images/vast-opstat.png`.

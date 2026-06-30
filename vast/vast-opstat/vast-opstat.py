@@ -179,6 +179,11 @@ def parse_args(argv=None):
         help="Comma-separated volume names to scope block stats (NVMe-oTCP).",
     )
     parser.add_argument(
+        "--log-api-calls",
+        action="store_true",
+        help="Log VMS REST API requests/responses to a file under /tmp.",
+    )
+    parser.add_argument(
         "-V",
         "--tool-version",
         action="version",

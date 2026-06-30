@@ -58,6 +58,8 @@ import urllib.error
 import urllib.request
 from datetime import datetime
 
+import vast_api_log
+
 VERSION = "1.1.0"
 
 DEFAULT_PORT = 443
@@ -222,6 +224,12 @@ def init_config(args):
         "Content-Type":  "application/json",
         "User-Agent":    f"vast-opstat/nfs-v3/{VERSION}",
     }
+
+    log_path = vast_api_log.configure(
+        getattr(args, "log_api_calls", False), "nfs-v3", VMS, PORT,
+    )
+    if log_path:
+        print(f"API call logging enabled: {log_path}", file=sys.stderr, flush=True)
 
     _COLOR = sys.stdout.isatty() and not args.no_color
 
@@ -436,15 +444,23 @@ def api_request(method, path, payload=None):
     url  = f"{BASE_URL}{path}"
     data = json.dumps(payload).encode() if payload is not None else None
     req  = urllib.request.Request(url, data=data, headers=HEADERS, method=method)
+    started = time.monotonic()
 
     try:
         with urllib.request.urlopen(req, context=SSL_CTX, timeout=30) as resp:
             body = resp.read().decode()
+            elapsed_ms = (time.monotonic() - started) * 1000
+            vast_api_log.log_call(method, url, payload, resp.status, body, None, elapsed_ms)
             return json.loads(body) if body else None
     except urllib.error.HTTPError as e:
         body = e.read().decode(errors="replace")
-        raise RuntimeError(f"{method} {url} failed: HTTP {e.code}: {body}")
+        elapsed_ms = (time.monotonic() - started) * 1000
+        err = f"HTTP {e.code}: {body}"
+        vast_api_log.log_call(method, url, payload, e.code, body, err, elapsed_ms)
+        raise RuntimeError(f"{method} {url} failed: {err}")
     except Exception as e:
+        elapsed_ms = (time.monotonic() - started) * 1000
+        vast_api_log.log_call(method, url, payload, None, None, e, elapsed_ms)
         raise RuntimeError(f"{method} {url} failed: {e}")
 
 
@@ -583,6 +599,7 @@ def cleanup():
     delete_monitor(RPC_MONITOR_ID)
     delete_monitor(BW_MONITOR_ID)
     _cleanup_drill_monitors()
+    vast_api_log.close()
 
 
 def signal_handler(_signum, _frame):

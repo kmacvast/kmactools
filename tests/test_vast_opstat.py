@@ -19,6 +19,7 @@ _OPSTAT_DIR = os.path.join(os.path.dirname(__file__), "..", "vast", "vast-opstat
 _OPSTAT_SCRIPT = os.path.join(_OPSTAT_DIR, "vast-opstat.py")
 _NFS_V3_SCRIPT = os.path.join(_OPSTAT_DIR, "nfs_v3.py")
 _NVME_TCP_SCRIPT = os.path.join(_OPSTAT_DIR, "nvme_tcp.py")
+_VAST_API_LOG_SCRIPT = os.path.join(_OPSTAT_DIR, "vast_api_log.py")
 
 
 def _load_module(name, path):
@@ -32,6 +33,7 @@ def _load_module(name, path):
 opstat = _load_module("vast_opstat", _OPSTAT_SCRIPT)
 nfs_v3 = _load_module("vast_opstat_nfs_v3", _NFS_V3_SCRIPT)
 nvme_tcp = _load_module("vast_opstat_nvme_tcp", _NVME_TCP_SCRIPT)
+vast_api_log = _load_module("vast_opstat_api_log", _VAST_API_LOG_SCRIPT)
 
 BASE_ARGS = [
     "--vms", "203.0.113.10",
@@ -52,6 +54,7 @@ def _connection_args(**overrides):
         "csv": None,
         "no_color": True,
         "discover_metrics": False,
+        "log_api_calls": False,
         "nfs": True,
         "block": False,
         "smb": False,
@@ -130,6 +133,60 @@ class TestCliParsing:
     def test_default_vms_port_omits_colon_in_url(self):
         nfs_v3.init_config(_connection_args(port=443))
         assert nfs_v3.BASE_URL == "https://203.0.113.10/api"
+
+    def test_log_api_calls_flag_parse(self):
+        args = opstat.parse_args(
+            ["--nfs", "--version=3.0", "--log-api-calls", *BASE_ARGS]
+        )
+        assert args.log_api_calls is True
+
+
+class TestVastApiLog:
+    def setup_method(self):
+        vast_api_log.close()
+
+    def teardown_method(self):
+        vast_api_log.close()
+
+    def test_configure_writes_under_tmp(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(vast_api_log.os, "getpid", lambda: 99999)
+        log_path = vast_api_log.configure(True, "nfs-v3", "vms.example.com", 443)
+        assert log_path.startswith("/tmp/vast-opstat-api-nfs-v3-vms.example.com-443-99999.log")
+        vast_api_log.log_call("GET", "https://vms.example.com/api/clusters/", None, 200, "[]", None, 12.5)
+        vast_api_log.close()
+        with open(log_path, encoding="utf-8") as handle:
+            text = handle.read()
+        assert "session start" in text
+        assert "GET https://vms.example.com/api/clusters/" in text
+        assert "HTTP 200" in text
+        os.remove(log_path)
+
+    def test_api_request_logs_when_enabled(self):
+        vast_api_log.configure(True, "nfs-v3", "203.0.113.10", 443)
+        log_path = vast_api_log.log_path()
+        nfs_v3.init_config(_connection_args(log_api_calls=True))
+
+        class FakeResp:
+            status = 200
+
+            def read(self):
+                return b'[{"id": 1}]'
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        with patch.object(nfs_v3.urllib.request, "urlopen", return_value=FakeResp()):
+            result = nfs_v3.api_request("GET", "/clusters/")
+
+        assert result == [{"id": 1}]
+        nfs_v3.vast_api_log.close()
+        with open(log_path, encoding="utf-8") as handle:
+            text = handle.read()
+        assert "GET https://203.0.113.10/api/clusters/" in text
+        os.remove(log_path)
 
 
 class TestNfsV3Metrics:
@@ -273,6 +330,7 @@ class TestNvmeTcpMetrics:
             "csv": None,
             "no_color": True,
             "discover_metrics": False,
+            "log_api_calls": False,
             "nfs": False,
             "block": True,
             "smb": False,

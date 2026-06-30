@@ -47,6 +47,7 @@ vast-opstat.py --nfs --version=3.0 [options]
 | `--csv FILENAME` | — | Append captured samples to a CSV file |
 | `--no-color` | — | Disable ANSI color output (for piping/logging) |
 | `--discover-metrics` | — | Print available metrics and objects, then exit |
+| `--log-api-calls` | — | Log VMS REST API traffic to `/tmp/vast-opstat-api-*.log` |
 
 ## Display Layout
 

@@ -194,6 +194,15 @@ monitoring. Default port is `443` when `--vms-port` is omitted.
   --vms var203.selab.vastdata.com --discover-metrics
 ```
 
+### Debug API calls
+
+```bash
+./vast-opstat.py --block --nvme-over-tcp \
+  --vms var203.selab.vastdata.com --log-api-calls --discover-metrics
+```
+
+Log file location is printed on startup under `/tmp/vast-opstat-api-*.log`.
+
 ---
 
 ## 6. Using the Dashboard

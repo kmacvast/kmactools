@@ -1,124 +1,79 @@
-# TimeFinder macOS Environment Setup
+# TimeFinder macOS Setup
 
 > **Platform:** TimeFinder is developed and tested on **macOS only**.
-> It could be ported to Windows if someone wants to do that work — this author has no Windows workstations for development. macOS > Windows.
 
-Complete this guide before running TimeFinder. When finished, return to [README.md](README.md) for day-to-day usage.
+Complete this guide once, then use [README.md](README.md) for day-to-day commands. For system design, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ---
 
-## Step 1 — Install and configure the Slack CLI
+## What you need
 
-TimeFinder uses the **[Slack CLI](https://docs.slack.dev/tools/slack-cli/)** — an open-source command-line tool from Slack for creating, managing, and interacting with Slack apps and workspace APIs from your terminal.
+| Component | Required? | Notes |
+|-----------|-----------|-------|
+| Slack CLI + service token | **Yes** | Read channel history |
+| `slack_channels.json` | **Yes** | Channel name → ID map |
+| Gmail config | No | Skip for Slack-only workflow |
+| Google OAuth | No | Only for `--sync-google` or live Gmail API |
 
-We did not build the Slack CLI. Credit and thanks to the Slack developer platform team for maintaining it. Install and authenticate it as described below; TimeFinder then uses it for setup tasks like generating a service token and verifying API access.
+**Minimum viable path:** Steps 1–3 and 5 → gather with `--slack-only` → generate → review ICS.
 
-The Slack CLI is used to authenticate, generate a service token for TimeFinder, resolve channel IDs, and verify API access.
+---
 
-### 1. Installation command
+## Step 1 — Install the Slack CLI
 
-Install using the official Slack CLI bootstrap script:
+TimeFinder uses the official **[Slack CLI](https://docs.slack.dev/tools/slack-cli/)** for authentication and token generation.
 
 ```bash
 curl -fsSL https://downloads.slack-edge.com/slack-cli/install.sh | bash
 ```
 
-### 2. What this command does
-
-- **Downloads and executes** the latest Slack CLI release package.
-- **Installs binaries** into a hidden directory in your home path:
-  - `~/.slack/bin/slack`
-- **Creates a symlink** at `~/.local/bin/slack` pointing to the main executable.
-
-Ensure `~/.local/bin` is on your `PATH`. Add to `~/.zshrc` if needed:
+Ensure `~/.local/bin` is on your `PATH` (add to `~/.zshrc` if needed):
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
-```
-
-Reload your shell:
-
-```bash
 source ~/.zshrc
 ```
 
-Verify the symlink:
-
-```bash
-ls -l ~/.local/bin/slack
-# should point to ~/.slack/bin/slack
-```
-
-### 3. Authentication
-
-Log in to your workspace:
-
-```bash
-slack auth login
-```
-
-This opens a browser window to authorize the CLI. Credentials are stored in `~/.slack/credentials.json`.
-
-### 4. Verification
+Verify:
 
 ```bash
 slack --help
+slack auth login          # opens browser — credentials → ~/.slack/credentials.json
 slack auth list
-```
-
-Test API access:
-
-```bash
 slack api conversations.list
 ```
 
-If these commands succeed, the Slack CLI is installed and authenticated.
+---
+
+## Step 2 — Generate a Slack service token
+
+TimeFinder needs a **user service token** (`xoxp-…`) to read channel history:
+
+```bash
+slack auth token
+```
+
+Copy the token — you will paste it into `slack_channels.json` in Step 3.
+
+### Browser credentials (advanced)
+
+For `--harvest-thread` only, browser session tokens (`xoxc-` + `d` cookie) may be required. Extract from Developer Tools → Network → `client.counts` request, or save to `~/.slack/credentials.json`. See [README.md](README.md#cli-reference).
 
 ---
 
-## Step 2 — Generate a Slack service token (for TimeFinder)
+## Step 3 — Configure Slack channels
 
-TimeFinder needs a **user service token** to read channel history. The easiest way to get one is through the Slack CLI — no browser dev tools required.
+Config file: **`~/.timefinder_cache/slack_channels.json`**
 
-### Browser credentials (for thread harvest)
+### Option A — Discover then add inline (recommended)
 
-For `--harvest-thread`, high-privilege browser session credentials (`xoxc` tokens and `xoxd` cookies) may be required. Extract them from your browser Developer Tools Network tab (`client.counts` request) and save to `~/.slack/credentials.json`. See the thread harvest section in [README.md](README.md).
-
----
-
-## Step 3 — Save credentials for TimeFinder
-
-TimeFinder stores automation credentials in:
-
-**`~/.timefinder_cache/slack_channels.json`**
-
-### Option A — Interactive setup (recommended)
-
-```bash
-cd ~/path/to/kmactools
-python3 timefinder/timefinder.py --add-slack-channels
-```
-
-When prompted:
-
-- **Token** → paste the `xoxp-...` service token from Step 2
-- **d cookie** → press Enter to skip (not needed for `xoxp-` tokens)
-
-Resolve the channels, DMs, or group DMs you want to track, then save when prompted.
-
-Or use the one-shot initializer (fixed channel list in `channels_init.py`):
-
-```bash
-python3 timefinder/timefinder.py --init-channels
-```
-
-### Option B — Manual config file
+After you have a token in config (minimal shell below), run discovery for a recent week:
 
 ```bash
 mkdir -p ~/.timefinder_cache
 ```
 
-Create `~/.timefinder_cache/slack_channels.json`:
+Create a starter config with your token:
 
 ```json
 {
@@ -128,17 +83,41 @@ Create `~/.timefinder_cache/slack_channels.json`:
 }
 ```
 
-Then run `--add-slack-channels` to populate the `channels` map, or add channel name → ID pairs manually.
+Then:
+
+```bash
+python3 timefinder/timefinder.py --discover-slack-channels --lookback-days 7
+```
+
+When prompted, choose **[A]dd All** or **[S]elect Individually** to write discovered channels into config — no separate resolver step required.
+
+### Option B — Interactive resolver
+
+```bash
+python3 timefinder/timefinder.py --add-slack-channels
+```
+
+Paste your `xoxp-` token when prompted. Leave **d cookie** blank for service tokens. Resolve channel names, DMs, or group DMs, then save.
+
+### Option C — One-shot initializer
+
+Maps a hardcoded channel list from `channels_init.py`:
+
+```bash
+python3 timefinder/timefinder.py --init-channels
+```
 
 ---
 
-## Step 4 — Configure Gmail (required)
+## Step 4 — Configure Gmail (optional)
 
-TimeFinder **requires** Gmail alongside Slack. Pick the path that matches what your account allows:
+Skip this step for **Slack-only** workflows (`--gather-candidate-entries --slack-only`).
+
+When you want Gmail in gather, pick one path:
 
 | Step | Method | When to use |
 |------|--------|-------------|
-| **4C** | Local import (Takeout / `.eml`) | App passwords denied **and** no Google Cloud project |
+| **4C** | Local import (Takeout / `.eml`) | No app passwords, no Google Cloud project |
 | **4A** | IMAP app password | Personal `@gmail.com` |
 | **4B** | OAuth Gmail API | You can create a Google Cloud OAuth client |
 
@@ -148,33 +127,21 @@ Config path: **`~/.timefinder_cache/gmail_config.json`**
 
 ### Step 4C — Local import (no API credentials)
 
-Use this when app passwords are blocked and you cannot create a Google Cloud project. You export mail yourself; TimeFinder only reads local files.
+#### 4C.1 Export via Google Takeout
 
-#### 4C.1 Export mail via Google Takeout
+1. Open [Google Takeout](https://takeout.google.com)
+2. **Deselect all** → enable **Mail** only
+3. Prefer **`.mbox`** format if offered
+4. Download when the export email arrives
 
-1. Open [Google Takeout](https://takeout.google.com) while signed into your work account
-2. Click **Deselect all**, then enable **Mail** only
-3. Choose delivery (download link is fine)
-4. If format options appear, prefer **`.mbox`**
-5. Create export and wait for the download email (can take hours for large mailboxes)
-
-#### 4C.2 Place files in the import directory
+#### 4C.2 Import directory
 
 ```bash
 mkdir -p ~/.timefinder_cache/gmail_import
+# copy Inbox.mbox, Sent.mbox, or individual .eml files here
 ```
 
-Extract the Takeout ZIP and copy `.mbox` files into `gmail_import/`, for example:
-
-```text
-~/.timefinder_cache/gmail_import/
-├── Inbox.mbox
-└── Sent.mbox
-```
-
-You can also drop individual `.eml` files here (Gmail → open message → **Show original** → **Download original**).
-
-#### 4C.3 Create `gmail_config.json`
+#### 4C.3 Config
 
 ```json
 {
@@ -183,39 +150,17 @@ You can also drop individual `.eml` files here (Gmail → open message → **Sho
 }
 ```
 
-#### 4C.4 Run gather
+Gather prints: `Using local Gmail import (.eml / .mbox — no API credentials).`
 
-```bash
-python3 timefinder/timefinder.py --gather-candidate-entries --verbose
-```
-
-You should see: `Using local Gmail import (.eml / .mbox — no API credentials).`
-
-Only messages within `--lookback-days` (default 7) are imported. Re-export from Takeout periodically to stay current.
+Re-export periodically; only messages within `--lookback-days` are read.
 
 ---
 
-### Step 4A — IMAP app password (personal `@gmail.com` only)
+### Step 4A — IMAP app password (personal Gmail)
 
-Skip if app passwords are unavailable on your account.
-
-#### 4A.1 Enable 2-Step Verification
-
-1. Open [Google Account → Security](https://myaccount.google.com/security)
-2. Enable **2-Step Verification**
-
-#### 4A.2 Enable IMAP
-
-1. Gmail → **Settings** → **See all settings** → **Forwarding and POP/IMAP**
-2. **Enable IMAP** → **Save Changes**
-
-#### 4A.3 Generate app password
-
-1. Open [Google App Passwords](https://myaccount.google.com/apppasswords)
-2. Create a password for **Mail** / **Mac** (or custom name `TimeFinder`)
-3. Copy the 16-character password
-
-#### 4A.4 Create config
+1. Enable [2-Step Verification](https://myaccount.google.com/security)
+2. Gmail → Settings → **Enable IMAP**
+3. Create password at [Google App Passwords](https://myaccount.google.com/apppasswords)
 
 ```json
 {
@@ -228,36 +173,12 @@ Skip if app passwords are unavailable on your account.
 
 ---
 
-### Step 4B — OAuth Gmail API (requires Google Cloud project)
+### Step 4B — OAuth Gmail API
 
-Use when you **can** create OAuth credentials and want live API access without manual Takeout exports.
-
-#### 4B.1 Google Cloud project
-
-1. Open [Google Cloud Console](https://console.cloud.google.com/)
-2. Create or select a project
-3. **APIs & Services → Library** → enable **Gmail API** and **Google Calendar API**
-
-#### 4B.2 OAuth consent screen
-
-1. **APIs & Services → OAuth consent screen**
-2. Configure user type (**Internal** for single-org Workspace, or **External**)
-3. Add test users if using External in testing mode
-
-#### 4B.3 Desktop OAuth credentials
-
-1. **Credentials → Create Credentials → OAuth client ID → Desktop app**
-2. Download JSON → save as `~/.timefinder_cache/google_client_secret.json`
-
-#### 4B.4 Authorize TimeFinder
-
-```bash
-python3 timefinder/timefinder.py --setup-google-auth
-```
-
-Token saved to `~/.timefinder_cache/google_token.json`.
-
-#### 4B.5 Create `gmail_config.json`
+1. [Google Cloud Console](https://console.cloud.google.com/) → enable **Gmail API** and **Google Calendar API**
+2. Create **Desktop app** OAuth client → save as `~/.timefinder_cache/google_client_secret.json`
+3. Run `python3 timefinder/timefinder.py --setup-google-auth`
+4. Config:
 
 ```json
 {
@@ -267,19 +188,9 @@ Token saved to `~/.timefinder_cache/google_token.json`.
 }
 ```
 
-#### 4B.6 Verify (optional)
-
-```bash
-python3 timefinder/timefinder.py --gather-candidate-entries --verbose
-```
-
-You should see: `Using Gmail API (OAuth).`
-
 ---
 
-## Step 5 — Python environment (macOS)
-
-From the repo root:
+## Step 5 — Python environment
 
 ```bash
 cd ~/path/to/kmactools
@@ -288,31 +199,36 @@ source .venv/bin/activate
 pip install -r timefinder/requirements.txt
 ```
 
+Google packages are only needed for OAuth gather or Calendar sync.
+
 ---
 
 ## Step 6 — Google Calendar sync (optional)
 
-If you completed Step 4B, OAuth is already configured. To push approved work-journal entries to Calendar:
+Requires OAuth (Step 4B or standalone Calendar client + `--setup-google-auth`):
 
 ```bash
 python3 timefinder/timefinder.py --sync-google ~/.timefinder_cache/calendar_review/calendar_candidates.json
 ```
 
-If you skipped 4B and only need Calendar sync (not Workspace Gmail), enable Calendar API, save `google_client_secret.json`, and run `--setup-google-auth`.
+Or import `calendar_candidates.ics` manually into any calendar app.
 
-## Step 7 — Verify TimeFinder end-to-end
+---
+
+## Step 7 — Verify end-to-end
 
 ```bash
 source ~/path/to/kmactools/.venv/bin/activate
 cd ~/path/to/kmactools
 
-python3 timefinder/timefinder.py --gather-candidate-entries
+# Slack-only smoke test
+python3 timefinder/timefinder.py --gather-candidate-entries --slack-only --verbose
 python3 timefinder/timefinder.py --generate-candidates
 open ~/.timefinder_cache/calendar_review/calendar_candidates.md
 python3 timefinder/timefinder.py --review-ics ~/.timefinder_cache/calendar_review/calendar_candidates.ics
 ```
 
-Run tests:
+Tests:
 
 ```bash
 pytest timefinder/tests/ -v
@@ -324,27 +240,25 @@ pytest timefinder/tests/ -v
 
 | Symptom | Likely cause | Fix |
 |---------|--------------|-----|
-| `slack: command not found` | `~/.local/bin` not on PATH | Add to `~/.zshrc`, reload shell |
-| `invalid_auth` from TimeFinder | Expired or wrong token | Run `slack auth token` again and update `slack_channels.json` |
-| `Slack configuration not found` | Missing config file | Complete Step 3 |
-| `Gmail configuration not found` | Missing `gmail_config.json` | Complete Step 4 |
-| App passwords denied | Workspace policy | Use local import — Step 4C |
-| No Google Cloud project | Cannot create OAuth client | Use local import — Step 4C |
-| `No .eml or .mbox files found` | Empty import directory | Run Takeout export; copy files to `gmail_import/` |
-| Takeout export empty in lookback | Export is stale | Create a fresh Takeout export |
-| `Google token not found` | OAuth not run | Run `--setup-google-auth` (Step 4B) or use import (4C) |
-| `slack auth token` fails | CLI not logged in | Run `slack auth login` first |
-| Token expired | Service tokens rotate | Repeat Step 2 and update `slack_channels.json` |
-| Google sync fails | Missing OAuth token | Run `--setup-google-auth` |
+| `slack: command not found` | PATH | Add `~/.local/bin` to `~/.zshrc` |
+| `invalid_auth` | Bad/expired token | `slack auth token` → update `slack_channels.json` |
+| `Slack configuration not found` | Missing config | Step 3 |
+| Gmail skipped during gather | No `gmail_config.json` | Expected with `--slack-only`; add Step 4 or use `--require-gmail` to enforce |
+| App passwords denied | Workspace policy | Step 4C import, or Slack-only |
+| No Google Cloud project | OAuth blocked | Step 4C import, or Slack-only |
+| `No .eml or .mbox files found` | Empty import dir | Refresh Takeout export |
+| `Google token not found` | OAuth not run | `--setup-google-auth` or use import mode |
+| `--add-slack-channels` network errors | Proxy / payload truncation | Use `--discover-slack-channels` instead — adds from scan results without extra API round-trips |
+| Stale Takeout data | Old export | New Takeout run; copy into `gmail_import/` |
 
 ---
 
-## Security reminders
+## Security
 
-- Never commit `~/.timefinder_cache/slack_channels.json`, `gmail_config.json`, or tokens to git.
-- Treat `xoxp-` tokens like passwords — they grant access to your Slack workspace.
-- Raw message backups under `~/.timefinder_cache/` may contain sensitive content; keep that directory private.
+- Never commit `~/.timefinder_cache/` or tokens to git.
+- Treat `xoxp-` tokens like passwords.
+- Message backups may contain sensitive content — restrict directory permissions.
 
 ---
 
-[← Back to TimeFinder README](README.md)
+[← README](README.md) · [Architecture →](ARCHITECTURE.md)

@@ -2,7 +2,7 @@
 
 This document describes the deterministic pipeline inside `candidates.py`. TimeFinder converts local Slack backup JSON into proposed work-journal calendar entries using **rules only** — no LLMs, no network calls, no external APIs during scoring.
 
-For setup and day-to-day usage, see [README.md](README.md).
+For setup and day-to-day usage, see [README.md](README.md). For system design, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ---
 
@@ -45,7 +45,7 @@ load_slack_files
 Before any scoring, messages are loaded and normalized:
 
 - **Source files:** `slack_{channel}_{YYYY-MM-DD}.json` in `--input-dir`
-- **Lookback window:** messages with timestamps `>= reference_date - lookback_days`
+- **Lookback window:** inclusive range from **start of** `(reference_date − lookback_days)` through **end of** `reference_date` (or now if `--date` omitted). Messages outside this window are dropped.
 - **Normalization:** each message becomes a `NormalizedMessage` with timestamp, user, text, channel, thread metadata, and flags for files/links/code blocks
 - **User names:** resolved via `--user-map` (`slack_users.json`) when available
 

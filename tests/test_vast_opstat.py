@@ -355,6 +355,11 @@ class TestNfsV41Metrics:
             assert cfg["endpoint"].startswith("/")
             assert not cfg["endpoint"].startswith("/api/"), mode
 
+    def test_data_monitor_props_exclude_size_and_rate(self):
+        props = nfs_v41.build_data_monitor_props()
+        assert nfs_v41._data_fqn("read_size__avg") not in props
+        assert nfs_v41._data_fqn("read_latency__rate") not in props
+
     def test_build_rows_from_nfs4_common_sample(self):
         data_result = {
             "prop_list": [
@@ -365,10 +370,8 @@ class TestNfsV41Metrics:
                 nfs_v41._data_fqn("wr_bw"),
                 nfs_v41._data_fqn("read_latency__avg"),
                 nfs_v41._data_fqn("write_latency__avg"),
-                nfs_v41._data_fqn("read_size__avg"),
-                nfs_v41._data_fqn("write_size__avg"),
             ],
-            "data": [["2026-07-01T00:00:00Z", 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]],
+            "data": [["2026-07-01T00:00:00Z", 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]],
         }
         supplement_result = {
             "prop_list": [
@@ -378,16 +381,23 @@ class TestNfsV41Metrics:
                 nfs_v41._nfs_fqn("write", "rate"),
                 nfs_v41._nfs_fqn("write", "avg"),
                 nfs_v41._nfs_fqn("lookup", "rate"),
+                nfs_v41._nfs_fqn("lookup", "avg"),
             ],
-            "data": [["2026-07-01T00:00:00Z", 100.0, 250.0, 50.0, 500.0, 12.0]],
+            "data": [["2026-07-01T00:00:00Z", 100.0, 250.0, 50.0, 500.0, 12.0, 80.0]],
         }
         bw_result = {
             "prop_list": ["timestamp", f"{nfs_v41._NFS_COMMON},rd_bw", f"{nfs_v41._NFS_COMMON},wr_bw"],
             "data": [["2026-07-01T00:00:00Z", 1_000_000_000.0, 500_000_000.0]],
         }
         meta_result = {
-            "prop_list": ["timestamp", nfs_v41._data_fqn("md_iops"), nfs_v41._data_fqn("latency")],
-            "data": [["2026-07-01T00:00:00Z", 0.0, 0.0]],
+            "prop_list": [
+                "timestamp",
+                nfs_v41._data_fqn("md_iops"),
+                nfs_v41._data_fqn("rd_md_iops"),
+                nfs_v41._data_fqn("wr_md_iops"),
+                nfs_v41._data_fqn("latency"),
+            ],
+            "data": [["2026-07-01T00:00:00Z", 43.0, 30.0, 13.0, 808.0]],
         }
         snapshot, sample = nfs_v41.build_rows_from_results(
             data_result, supplement_result, bw_result, meta_result,
@@ -397,38 +407,35 @@ class TestNfsV41Metrics:
         assert read_row["ops_sec"] == pytest.approx(100.0)
         assert read_row["avg_us"] == pytest.approx(250.0)
         assert read_row["bw_mbs"] == pytest.approx(1000.0)
+        assert read_row["avg_io_bytes"] == pytest.approx(10_000_000.0)
         assert nfs_v41.METRICS_SOURCE == "NfsMetrics supplement"
-        assert snapshot["meta"]["md_iops"] == pytest.approx(12.0)
+        assert snapshot["meta"]["md_iops"] == pytest.approx(43.0)
         lookup_row = next(r for r in snapshot["stateful"] if r["key"] == "lookup")
         assert lookup_row["ops_sec"] == pytest.approx(12.0)
-        md_row = next(r for r in snapshot["session"] if r["key"] == "md_workload")
-        assert md_row["ops_sec"] == pytest.approx(12.0)
-        total_row = next(r for r in snapshot["session"] if r["key"] == "cluster_total")
-        assert total_row["ops_sec"] == pytest.approx(162.0)
+        md_row = next(r for r in snapshot["session"] if r["key"] == "md_iops")
+        assert md_row["ops_sec"] == pytest.approx(43.0)
+        rd_row = next(r for r in snapshot["session"] if r["key"] == "rd_md_iops")
+        assert rd_row["ops_sec"] == pytest.approx(30.0)
 
-    def test_build_rows_native_stateful_ops(self, monkeypatch):
-        monkeypatch.setattr(nfs_v41, "_NATIVE_STATEFUL_OPS", frozenset({"open"}))
-        monkeypatch.setattr(nfs_v41, "_NATIVE_SESSION_OPS", frozenset())
-        monkeypatch.setattr(nfs_v41, "_STATEFUL_METRICS_UNAVAILABLE", False)
-        monkeypatch.setattr(nfs_v41, "_SESSION_METRICS_UNAVAILABLE", True)
-
-        stateful_result = {
+    def test_build_rows_nfs4common_direct_mapping(self):
+        data_result = {
             "prop_list": [
                 "timestamp",
-                nfs_v41._nfs_fqn("open", "rate"),
-                nfs_v41._nfs_fqn("open", "avg"),
+                nfs_v41._data_fqn("rd_iops"),
+                nfs_v41._data_fqn("wr_iops"),
+                nfs_v41._data_fqn("rd_bw"),
+                nfs_v41._data_fqn("wr_bw"),
+                nfs_v41._data_fqn("read_latency__avg"),
+                nfs_v41._data_fqn("write_latency__avg"),
             ],
-            "data": [["2026-07-01T00:00:00Z", 5.0, 100.0]],
+            "data": [["2026-07-01T00:00:00Z", 10.0, 20.0, 5_000_000.0, 10_000_000.0, 100.0, 200.0]],
         }
-        snapshot, _ = nfs_v41.build_rows_from_results(
-            data_result={"prop_list": ["timestamp"], "data": [["2026-07-01T00:00:00Z"]]},
-            supplement_result={"prop_list": ["timestamp"], "data": [["2026-07-01T00:00:00Z"]]},
-            stateful_result=stateful_result,
-        )
-        open_row = next(r for r in snapshot["stateful"] if r["key"] == "open")
-        assert open_row["ops_sec"] == pytest.approx(5.0)
-        close_row = next(r for r in snapshot["stateful"] if r["key"] == "close")
-        assert close_row["ops_sec"] is None
+        snapshot, _ = nfs_v41.build_rows_from_results(data_result)
+        read_row = next(r for r in snapshot["data"] if r["key"] == "read")
+        assert read_row["ops_sec"] == pytest.approx(10.0)
+        assert read_row["bw_mbs"] == pytest.approx(5.0)
+        assert read_row["avg_io_bytes"] == pytest.approx(500_000.0)
+        assert nfs_v41.METRICS_SOURCE == "NFS4Common"
 
 
 class TestDispatch:

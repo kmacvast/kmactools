@@ -82,9 +82,9 @@ keybinds, and architecture.
 
 ### NFS v4.1
 
-- Three-panel TUI: Data Operations, Stateful Metadata & Locking, Session Overhead
-- NFS4Common ProtoMetrics for read/write IOPS, throughput, size, and latency
-- Aggregate metadata/session fallbacks when per-op counters are absent
+- Three-panel TUI: Data Operations, Stateful Overhead (VMS Proxies), Session Workload
+- NFS4Common instantaneous rates with NfsMetrics hybrid fallback (no delta engine)
+- Session panel: NFS4Common md_iops / rd_md_iops / wr_md_iops workload profile
 - cNode / View / Tenant drill-down (`c` / `v` / `t`)
 
 See **[NFSv41_README.md](NFSv41_README.md)**.

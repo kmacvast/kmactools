@@ -2,10 +2,10 @@
 ################################################################################
 # Script:      nfs_v41.py
 #
-# Descr:       NFS v4.1 performance statistics for vast-opstat. Uses VMS
-#              ProtoMetrics (NFS4Common) for data-path telemetry and optional
-#              NfsMetrics per-op counters for stateful/session operations when
-#              exported by the cluster build.
+# Descr:       NFS v4.1 performance statistics for vast-opstat. Polls VMS
+#              instantaneous rates (NFS4Common + NfsMetrics supplement) with
+#              metadata proxy panels when native stateful/session counters are
+#              unexported by the time-series engine.
 #
 # Version:     1.0.0
 # Author:      KMac
@@ -52,50 +52,34 @@ DEFAULT_API_TIME_FRAME = "10m"
 _NFS4 = "ProtoMetrics,proto_name=NFS4Common"
 _NFS_COMMON = "ProtoMetrics,proto_name=NFSCommon"
 
-# NfsMetrics ops confirmed queryable on var203 (open/close/lock/locku/sequence are not).
+# NfsMetrics ops queryable on current VMS builds. OPEN/CLOSE/LOCK/LOCKU/SEQUENCE
+# are not exported by the time-series engine (confirmed via privileged discovery).
 _SUPPLEMENT_DATA_OPS = ("read", "write")
-_SUPPLEMENT_META_OPS = ("lookup", "getattr", "create", "remove")
+_SUPPLEMENT_META_OPS = ("getattr", "lookup", "create", "remove")
 
-# Shown when native OPEN/CLOSE/LOCK/LOCKU counters are absent from VMS.
+STATEFUL_PANEL_TITLE = "STATEFUL OVERHEAD (VMS Proxies)"
+SESSION_PANEL_TITLE = "SESSION WORKLOAD (NFS4Common)"
+
+# NfsMetrics metadata drivers shown when native v4.1 stateful counters are absent.
 METADATA_PROXY_OPS = [
-    ("lookup", "LOOKUP"),
     ("getattr", "GETATTR"),
+    ("lookup", "LOOKUP"),
     ("create", "CREATE"),
     ("remove", "REMOVE"),
 ]
 
-# Shown when native SEQUENCE counter is absent from VMS.
-SESSION_PROXY_OPS = [
-    ("md_workload", "MD WORKLOAD"),
-    ("cluster_total", "CLUSTER TOTAL"),
+# NFS4Common metadata workload profile (session / macro MD view).
+SESSION_META_OPS = [
+    ("md_iops", "MD IOPS"),
+    ("rd_md_iops", "RD MD IOPS"),
+    ("wr_md_iops", "WR MD IOPS"),
 ]
 
-# Data-path operations (NFS4Common aggregate counters — instantaneous rates).
+# Data-path operations — NFS4Common instantaneous rates (no delta engine).
 DATA_OPS = [
     ("read", "READ"),
     ("write", "WRITE"),
 ]
-
-# Stateful metadata / locking (NfsMetrics per-op — build-dependent).
-STATEFUL_OPS = [
-    ("open", "OPEN"),
-    ("close", "CLOSE"),
-    ("lock", "LOCK"),
-    ("locku", "LOCKU"),
-]
-
-SESSION_OPS = [
-    ("sequence", "SEQUENCE"),
-]
-
-_STATEFUL_NFS_OPS = tuple(op for op, _ in STATEFUL_OPS)
-_SESSION_NFS_OPS = tuple(op for op, _ in SESSION_OPS)
-
-# Native lock/session counters — build-dependent (often absent on current VMS).
-_STATEFUL_METRICS_UNAVAILABLE = True
-_SESSION_METRICS_UNAVAILABLE = True
-_NATIVE_STATEFUL_OPS = frozenset()
-_NATIVE_SESSION_OPS = frozenset()
 
 _DRILL_CFG = {
     "cnode": {
@@ -156,7 +140,6 @@ SSL_CTX = ssl._create_unverified_context()
 CLUSTER_ID = CLUSTER_NAME = None
 DATA_MONITOR_ID = META_MONITOR_ID = None
 SUPPLEMENT_MONITOR_ID = BW_MONITOR_ID = None
-STATEFUL_MONITOR_ID = None
 METRICS_SOURCE = "NFS4Common"
 LAST_ROWS = {"data": [], "stateful": [], "session": [], "meta": {}}
 LAST_SAMPLE = "-"
@@ -362,12 +345,11 @@ def _avg_io_from_bw_ops(ops, bw_mbs):
 
 
 def build_data_monitor_props():
+    """NFS4Common data-path rates — poll values map directly to display (no deltas)."""
     return [
         _data_fqn("rd_iops"), _data_fqn("wr_iops"),
         _data_fqn("rd_bw"), _data_fqn("wr_bw"),
-        _data_fqn("read_latency__rate"), _data_fqn("read_latency__avg"),
-        _data_fqn("write_latency__rate"), _data_fqn("write_latency__avg"),
-        _data_fqn("read_size__avg"), _data_fqn("write_size__avg"),
+        _data_fqn("read_latency__avg"), _data_fqn("write_latency__avg"),
     ]
 
 
@@ -389,13 +371,6 @@ def build_meta_monitor_props():
         _data_fqn("md_iops"), _data_fqn("rd_md_iops"), _data_fqn("wr_md_iops"),
         _data_fqn("iops"), _data_fqn("latency"),
     ]
-
-
-def build_stateful_monitor_props():
-    props = []
-    for op in _STATEFUL_NFS_OPS + _SESSION_NFS_OPS:
-        props.extend([_nfs_fqn(op, "rate"), _nfs_fqn(op, "avg")])
-    return props
 
 
 def build_drill_prop_list():
@@ -486,10 +461,7 @@ def _op_metrics(nfs4_values, supplement_values, bw_values, op_key):
             raw_bw_to_mb_sec(_metric(nfs4_values, "rd_bw")),
             raw_bw_to_mb_sec(as_float(bw_values.get(f"{_NFS_COMMON},rd_bw"))),
         )
-        avg_io = _first_positive(
-            _metric(nfs4_values, "read_size__avg"),
-            _avg_io_from_bw_ops(ops, bw_mbs),
-        )
+        avg_io = _avg_io_from_bw_ops(ops, bw_mbs)
     else:
         ops = _first_positive(
             _metric(nfs4_values, "wr_iops"),
@@ -503,10 +475,7 @@ def _op_metrics(nfs4_values, supplement_values, bw_values, op_key):
             raw_bw_to_mb_sec(_metric(nfs4_values, "wr_bw")),
             raw_bw_to_mb_sec(as_float(bw_values.get(f"{_NFS_COMMON},wr_bw"))),
         )
-        avg_io = _first_positive(
-            _metric(nfs4_values, "write_size__avg"),
-            _avg_io_from_bw_ops(ops, bw_mbs),
-        )
+        avg_io = _avg_io_from_bw_ops(ops, bw_mbs)
     return {"ops_sec": ops, "avg_us": avg_us, "bw_mbs": bw_mbs, "avg_io_bytes": avg_io}
 
 
@@ -514,14 +483,6 @@ def _nfs_op_metrics(values, op_key):
     rate = _supplement_metric(values, op_key, "rate")
     avg = _supplement_metric(values, op_key, "avg")
     return {"ops_sec": rate, "avg_us": avg, "bw_mbs": None, "avg_io_bytes": None}
-
-
-def _metadata_weighted_latency(supplement_values):
-    rows = [
-        _nfs_op_metrics(supplement_values, op)
-        for op in _SUPPLEMENT_META_OPS
-    ]
-    return weighted_latency([{"ops_sec": r["ops_sec"], "avg_us": r["avg_us"]} for r in rows])
 
 
 def _metadata_iops_supplement(supplement_values):
@@ -535,62 +496,26 @@ def _metadata_iops_supplement(supplement_values):
     return total if found else None
 
 
-def _session_proxy_metrics(key, supplement_values, meta, data_rows):
-    if key == "md_workload":
+def _build_stateful_rows(supplement_values):
+    """NfsMetrics metadata proxy rows — native OPEN/CLOSE/LOCK/LOCKU are unexported."""
+    return _rows_with_pct(
+        METADATA_PROXY_OPS,
+        lambda k: _nfs_op_metrics(supplement_values, k),
+    )
+
+
+def _build_session_rows(meta):
+    """NFS4Common md_iops workload profile (instantaneous rates, no deltas)."""
+    def _meta_metric(key):
+        val = as_float(meta.get(key))
         return {
-            "ops_sec": _first_positive(
-                meta.get("md_iops"),
-                _metadata_iops_supplement(supplement_values),
-            ),
-            "avg_us": _first_positive(
-                _metadata_weighted_latency(supplement_values),
-            ),
+            "ops_sec": val if val is not None and val > 0 else None,
+            "avg_us": None,
             "bw_mbs": None,
             "avg_io_bytes": None,
         }
-    data_ops = sum(as_float(r["ops_sec"]) or 0 for r in data_rows)
-    md_ops = as_float(meta.get("md_iops")) or 0
-    total_ops = data_ops + md_ops
-    return {
-        "ops_sec": total_ops if total_ops > 0 else None,
-        "avg_us": meta.get("latency_us"),
-        "bw_mbs": None,
-        "avg_io_bytes": None,
-    }
 
-
-def _build_stateful_session_rows(supplement_values, stateful_values, meta, data_rows):
-    """Native lock/session ops when exported; otherwise NfsMetrics proxy rows."""
-    if _NATIVE_STATEFUL_OPS:
-        native_defs = [(op, lbl) for op, lbl in STATEFUL_OPS if op in _NATIVE_STATEFUL_OPS]
-        stateful_rows = _rows_with_pct(
-            native_defs,
-            lambda k: _nfs_op_metrics(stateful_values, k),
-        )
-        for op, lbl in STATEFUL_OPS:
-            if op not in _NATIVE_STATEFUL_OPS:
-                stateful_rows.append({
-                    "key": op, "label": lbl,
-                    "ops_sec": None, "avg_us": None, "pct": None,
-                    "bw_mbs": None, "avg_io_bytes": None,
-                })
-    else:
-        stateful_rows = _rows_with_pct(
-            METADATA_PROXY_OPS,
-            lambda k: _nfs_op_metrics(supplement_values, k),
-        )
-
-    if _NATIVE_SESSION_OPS:
-        session_rows = _rows_with_pct(
-            [(op, lbl) for op, lbl in SESSION_OPS if op in _NATIVE_SESSION_OPS],
-            lambda k: _nfs_op_metrics(stateful_values, k),
-        )
-    else:
-        session_rows = _rows_with_pct(
-            SESSION_PROXY_OPS,
-            lambda k: _session_proxy_metrics(k, supplement_values, meta, data_rows),
-        )
-    return stateful_rows, session_rows
+    return _rows_with_pct(SESSION_META_OPS, _meta_metric)
 
 
 def _rows_with_pct(row_defs, metrics_fn):
@@ -610,14 +535,12 @@ def build_rows_from_results(
     supplement_result=None,
     bw_result=None,
     meta_result=None,
-    stateful_result=None,
 ):
     global METRICS_SOURCE
     nfs4_values, sample = _latest_row(data_result)
     supplement_values, _ = _latest_row(supplement_result) if supplement_result else ({}, sample)
     bw_values, _ = _latest_row(bw_result) if bw_result else ({}, sample)
     meta_values, _ = _latest_row(meta_result) if meta_result else ({}, sample)
-    stateful_values, _ = _latest_row(stateful_result) if stateful_result else ({}, sample)
 
     data_rows = _rows_with_pct(
         DATA_OPS,
@@ -625,9 +548,12 @@ def build_rows_from_results(
     )
     nfs4_active = any(
         (as_float(_metric(nfs4_values, s)) or 0) > 0
-        for s in ("rd_iops", "wr_iops", "read_latency__rate", "write_latency__rate")
+        for s in ("rd_iops", "wr_iops", "rd_bw", "wr_bw")
     )
-    supplement_active = any((as_float(r["ops_sec"]) or 0) > 0 for r in data_rows)
+    supplement_active = any(
+        (as_float(_supplement_metric(supplement_values, op, "rate")) or 0) > 0
+        for op in _SUPPLEMENT_DATA_OPS
+    )
     if nfs4_active and supplement_active:
         METRICS_SOURCE = "NFS4Common + NfsMetrics"
     elif nfs4_active:
@@ -651,9 +577,8 @@ def build_rows_from_results(
             weighted_latency(data_rows),
         ),
     }
-    stateful_rows, session_rows = _build_stateful_session_rows(
-        supplement_values, stateful_values, meta, data_rows,
-    )
+    stateful_rows = _build_stateful_rows(supplement_values)
+    session_rows = _build_session_rows(meta)
 
     return {"data": data_rows, "stateful": stateful_rows, "session": session_rows, "meta": meta}, sample
 
@@ -749,37 +674,48 @@ def _render_stateful_panel(rows, meta, width):
         ("Operation", "label", "<"), ("Ops/s", "iops", ">"), ("", "throughput", ">"),
         ("", "size", ">"), ("Latency", "latency", ">"),
     ]
-    print(box_top("STATEFUL METADATA & LOCKING", width))
+    print(box_top(STATEFUL_PANEL_TITLE, width))
     print(box_row(_table_header_titles(titles), width))
     print(box_sep(width))
     for row in rows:
         print(box_row(_simple_row_cells(row), width))
-    if _STATEFUL_METRICS_UNAVAILABLE:
-        note = (
-            "OPEN/CLOSE/LOCK/LOCKU not exported — showing NfsMetrics metadata proxy "
-            f"(md_iops {format_iops(meta.get('md_iops'))})"
-        )
-        print(box_row(c(note, _DIM), width))
+    note = (
+        "OPEN/CLOSE/LOCK/LOCKU unexported on this VMS — NfsMetrics metadata proxies "
+        f"(md_iops {format_iops(meta.get('md_iops'))})"
+    )
+    print(box_row(c(note, _DIM), width))
     print(box_bottom(width))
+
+
+def _session_summary_line(meta):
+    md = format_iops(meta.get("md_iops"))
+    rd = format_iops(meta.get("rd_md_iops"))
+    wr = format_iops(meta.get("wr_md_iops"))
+    return (
+        c("MD IOPS ", _DIM) + c(md, _YELLOW)
+        + c("   RD MD ", _DIM) + c(rd, _BCYAN)
+        + c("   WR MD ", _DIM) + c(wr, _BYELLOW)
+    )
 
 
 def _render_session_panel(rows, meta, width):
     titles = [
-        ("Operation", "label", "<"), ("Ops/s", "iops", ">"), ("", "throughput", ">"),
+        ("Metric", "label", "<"), ("Ops/s", "iops", ">"), ("", "throughput", ">"),
         ("", "size", ">"), ("Latency", "latency", ">"),
     ]
-    print(box_top("SESSION OVERHEAD", width))
+    print(box_top(SESSION_PANEL_TITLE, width))
+    print(box_row(_session_summary_line(meta), width))
+    print(box_sep(width))
     print(box_row(_table_header_titles(titles), width))
     print(box_sep(width))
     for row in rows:
         print(box_row(_simple_row_cells(row), width))
-    if _SESSION_METRICS_UNAVAILABLE:
-        lat_text, _ = format_latency_us(meta.get("latency_us"))
-        note = (
-            "SEQUENCE not exported — showing session proxy "
-            f"(cluster latency {lat_text})"
-        )
-        print(box_row(c(note, _DIM), width))
+    lat_text, _ = format_latency_us(meta.get("latency_us"))
+    note = (
+        "SEQUENCE unexported on this VMS — NFS4Common metadata workload profile "
+        f"(cluster latency {lat_text})"
+    )
+    print(box_row(c(note, _DIM), width))
     print(box_bottom(width))
 
 
@@ -879,7 +815,7 @@ def fetch_drill_query():
     for monitor_id, obj_name in DRILL_MONITORS:
         try:
             result = api_request("GET", f"/monitors/{monitor_id}/query/")
-            snapshot, _ = build_rows_from_results(result, result, result, result, None)
+            snapshot, _ = build_rows_from_results(result, result, result, result)
             data = snapshot["data"]
             total_ops = sum(as_float(r["ops_sec"]) or 0 for r in data)
             latency = weighted_latency(data)
@@ -942,14 +878,8 @@ def fetch_monitor_query():
     supplement_result = api_request("GET", f"/monitors/{SUPPLEMENT_MONITOR_ID}/query/")
     bw_result = api_request("GET", f"/monitors/{BW_MONITOR_ID}/query/")
     meta_result = api_request("GET", f"/monitors/{META_MONITOR_ID}/query/")
-    stateful_result = None
-    if STATEFUL_MONITOR_ID is not None:
-        try:
-            stateful_result = api_request("GET", f"/monitors/{STATEFUL_MONITOR_ID}/query/")
-        except RuntimeError:
-            stateful_result = None
     LAST_ROWS, LAST_SAMPLE = build_rows_from_results(
-        data_result, supplement_result, bw_result, meta_result, stateful_result,
+        data_result, supplement_result, bw_result, meta_result,
     )
 
 
@@ -988,40 +918,6 @@ def render_screen():
     ), flush=True)
 
 
-def _probe_nfs_op(op):
-    """Return True when a single NfsMetrics op counter is queryable."""
-    props = [_nfs_fqn(op, "rate"), _nfs_fqn(op, "avg")]
-    try:
-        monitor_id = _create_monitor_raw(f"probe_{op}", props, "cluster", [CLUSTER_ID])
-        try:
-            api_request("GET", f"/monitors/{monitor_id}/query/")
-            return True
-        finally:
-            delete_monitor(monitor_id)
-    except RuntimeError:
-        return False
-
-
-def probe_native_nfs_ops():
-    """Detect which native lock/session NfsMetrics ops this VMS build exports."""
-    global _STATEFUL_METRICS_UNAVAILABLE, _SESSION_METRICS_UNAVAILABLE
-    global _NATIVE_STATEFUL_OPS, _NATIVE_SESSION_OPS
-
-    stateful = {op for op in _STATEFUL_NFS_OPS if _probe_nfs_op(op)}
-    session = {op for op in _SESSION_NFS_OPS if _probe_nfs_op(op)}
-    _NATIVE_STATEFUL_OPS = frozenset(stateful)
-    _NATIVE_SESSION_OPS = frozenset(session)
-    _STATEFUL_METRICS_UNAVAILABLE = not _NATIVE_STATEFUL_OPS
-    _SESSION_METRICS_UNAVAILABLE = not _NATIVE_SESSION_OPS
-    return _NATIVE_STATEFUL_OPS, _NATIVE_SESSION_OPS
-
-
-def probe_stateful_metrics():
-    """Backward-compatible wrapper — True when any native lock/session op works."""
-    stateful, session = probe_native_nfs_ops()
-    return bool(stateful or session)
-
-
 def discover_metrics():
     global CLUSTER_ID, CLUSTER_NAME
     print(f"NFS v4.1 metric discovery — VMS {VMS}:{PORT}\n")
@@ -1032,38 +928,28 @@ def discover_metrics():
         print(f"ERROR: Could not connect to VMS: {e}")
         sys.exit(1)
 
-    print("[ NFS4Common ProtoMetrics (data path) ]")
+    print("[ NFS4Common ProtoMetrics (data path — instantaneous rates) ]")
     for suffix in (
         "rd_iops", "wr_iops", "rd_bw", "wr_bw",
-        "read_latency__rate", "read_latency__avg",
-        "write_latency__rate", "write_latency__avg",
-        "read_size__avg", "write_size__avg",
+        "read_latency__avg", "write_latency__avg",
         "md_iops", "rd_md_iops", "wr_md_iops", "iops", "latency",
     ):
         print(f"  {_data_fqn(suffix)}")
 
-    print("\n[ NfsMetrics supplement (hybrid fallback) ]")
+    print("\n[ NfsMetrics supplement (hybrid fallback when NFS4Common is zero) ]")
     for op in _SUPPLEMENT_DATA_OPS + _SUPPLEMENT_META_OPS:
         print(f"  {_nfs_fqn(op, 'rate')} / __avg")
-    print("  Used when NFS4Common counters are zero but NfsMetrics reports NFS traffic.")
+    print("  Data fallback: nfs_{read,write}_latency__rate when NFS4Common IOPS are zero.")
 
     print("\n[ Bandwidth fallback ]")
     for prop in build_bw_monitor_props():
         print(f"  {prop}")
 
-    print("\n[ Stateful / session NfsMetrics (per-op) ]")
-    stateful, session = probe_native_nfs_ops()
-    for op, label in STATEFUL_OPS:
-        status = "available" if op in stateful else "not exported"
-        print(f"  {_nfs_fqn(op, 'rate')} / __avg  ({label}) — {status}")
-    for op, label in SESSION_OPS:
-        status = "available" if op in session else "not exported"
-        print(f"  {_nfs_fqn(op, 'rate')} / __avg  ({label}) — {status}")
-    if not stateful:
-        print("  Stateful panel fallback: NfsMetrics metadata proxy "
-              "(LOOKUP, GETATTR, CREATE, REMOVE)")
-    if not session:
-        print("  Session panel fallback: MD WORKLOAD + CLUSTER TOTAL aggregates")
+    print("\n[ Unexported on current VMS builds (not API-permission gated) ]")
+    for op in ("open", "close", "lock", "locku", "sequence"):
+        print(f"  NfsMetrics,nfs_{op}_latency__rate / __avg — not exported")
+    print("  Stateful panel: NfsMetrics proxies (GETATTR, LOOKUP, CREATE, REMOVE)")
+    print("  Session panel: NFS4Common md_iops / rd_md_iops / wr_md_iops")
 
     print("\n[ Drill-down endpoints ]")
     for mode, cfg in _DRILL_CFG.items():
@@ -1073,8 +959,8 @@ def discover_metrics():
         except RuntimeError as e:
             print(f"  {mode:<8} {cfg['endpoint']:<12} error: {e}")
 
-    print("\nCounters are delivered as VMS monitor instantaneous rates (__rate, rd_iops)")
-    print("and pre-averaged latency/size fields (__avg), not raw cumulative totals.")
+    print("\nPoll semantics: VMS delivers instantaneous rates (__rate, rd_iops) and")
+    print("pre-averaged fields (__avg). No counter-delta engine is used in nfs_v41.")
 
 
 def setup_keyboard():
@@ -1107,7 +993,6 @@ def cleanup():
     delete_monitor(SUPPLEMENT_MONITOR_ID)
     delete_monitor(BW_MONITOR_ID)
     delete_monitor(META_MONITOR_ID)
-    delete_monitor(STATEFUL_MONITOR_ID)
     _cleanup_drill_monitors()
     vast_api_log.close()
 
@@ -1119,7 +1004,7 @@ def signal_handler(_signum, _frame):
 
 def main():
     global DATA_MONITOR_ID, META_MONITOR_ID, SUPPLEMENT_MONITOR_ID, BW_MONITOR_ID
-    global STATEFUL_MONITOR_ID, CLUSTER_ID, CLUSTER_NAME
+    global CLUSTER_ID, CLUSTER_NAME
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
@@ -1130,21 +1015,10 @@ def main():
 
     setup_keyboard()
     CLUSTER_ID, CLUSTER_NAME = get_current_cluster()
-    probe_native_nfs_ops()
     DATA_MONITOR_ID = create_monitor("data", build_data_monitor_props())
     SUPPLEMENT_MONITOR_ID = create_monitor("supplement", build_supplement_monitor_props())
     BW_MONITOR_ID = create_monitor("bw", build_bw_monitor_props())
     META_MONITOR_ID = create_monitor("meta", build_meta_monitor_props())
-    STATEFUL_MONITOR_ID = None
-    if _NATIVE_STATEFUL_OPS or _NATIVE_SESSION_OPS:
-        try:
-            native_ops = sorted(_NATIVE_STATEFUL_OPS | _NATIVE_SESSION_OPS)
-            props = []
-            for op in native_ops:
-                props.extend([_nfs_fqn(op, "rate"), _nfs_fqn(op, "avg")])
-            STATEFUL_MONITOR_ID = create_monitor("stateful", props)
-        except RuntimeError:
-            STATEFUL_MONITOR_ID = None
 
     fetch_monitor_query()
     render_screen()

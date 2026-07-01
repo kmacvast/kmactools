@@ -79,7 +79,7 @@ _NFS_DRILL_BW = 9
 _NFS_DRILL_RPC = 12
 _NFS_DRILL_TOP_PCT = 6
 
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 
 DEFAULT_PORT = 443
 DEFAULT_USER = "admin"
@@ -597,6 +597,38 @@ def build_drill_prop_list(mode):
             _TENANT_READ_MD_CNT, _TENANT_WRITE_MD_CNT,
         ]
     return build_rpc_prop_list() + build_bw_prop_list()
+
+
+def build_drill_rank_prop_list(mode):
+    """Minimal props for one-shot batch ranking of view/tenant candidates."""
+    if mode == "view":
+        return [_VIEW_READ_IOPS, _VIEW_WRITE_IOPS, _VIEW_READ_MD, _VIEW_WRITE_MD]
+    if mode == "tenant":
+        return [
+            _TENANT_READ_IOPS, _TENANT_WRITE_IOPS,
+            _TENANT_READ_MD, _TENANT_WRITE_MD,
+        ]
+    return build_drill_prop_list(mode)
+
+
+def _is_batch_drill_mode(mode=None):
+    mode = mode or DRILL_MODE
+    return mode in ("view", "tenant")
+
+
+def _slice_result_for_object(result, object_id):
+    """Return a monitor query payload containing only one object_id's samples."""
+    if not isinstance(result, dict):
+        return result
+    prop_list, data, prop_idx = _result_parts(result)
+    oid_idx = prop_idx.get("object_id")
+    if oid_idx is None:
+        return result
+    filtered = [
+        row for row in data
+        if len(row) > oid_idx and row[oid_idx] == object_id
+    ]
+    return {"prop_list": prop_list, "data": filtered}
 
 
 def _create_monitor_raw(name_suffix, prop_list, object_type, object_ids, *, no_aggregation=False):
@@ -1392,31 +1424,43 @@ def _build_drill_row(mode, result, obj_name):
 
 
 def _rank_drill_candidates(mode, objects, cfg):
-    """Probe view/tenant objects and return the top-N by current ops/s."""
-    prop_list = build_drill_prop_list(mode)
+    """Rank view/tenant candidates with one batch monitor + one query."""
+    if not objects:
+        return []
+
+    object_ids = [obj["id"] for obj in objects]
+    id_to_name = {
+        obj["id"]: _obj_name(obj, cfg["name_fields"])
+        for obj in objects
+    }
     ranked = []
-    probe_ids = []
-    for obj in objects:
-        obj_id = obj["id"]
-        name = _obj_name(obj, cfg["name_fields"])
-        ops = 0.0
-        try:
-            monitor_id = _create_monitor_raw(
-                f"probe_{mode}_{obj_id}",
-                prop_list,
-                cfg["object_type"],
-                [obj_id],
-                no_aggregation=cfg.get("no_aggregation", False),
-            )
-            probe_ids.append(monitor_id)
-            result = api_request("GET", f"/monitors/{monitor_id}/query/")
-            row = _build_drill_row(mode, result, name)
-            ops = as_float(row.get("total_ops")) or 0.0
-        except RuntimeError:
-            pass
-        ranked.append({"id": obj_id, "name": name, "total_ops": ops})
-    for monitor_id in probe_ids:
-        delete_monitor(monitor_id)
+    rank_monitor_id = None
+    try:
+        rank_monitor_id = _create_monitor_raw(
+            f"rank_{mode}",
+            build_drill_rank_prop_list(mode),
+            cfg["object_type"],
+            object_ids,
+            no_aggregation=cfg.get("no_aggregation", False),
+        )
+        result = api_request("GET", f"/monitors/{rank_monitor_id}/query/")
+        for obj_id in object_ids:
+            name = id_to_name[obj_id]
+            slice_result = _slice_result_for_object(result, obj_id)
+            row = _build_drill_row(mode, slice_result, name)
+            ranked.append({
+                "id": obj_id,
+                "name": name,
+                "total_ops": as_float(row.get("total_ops")) or 0.0,
+            })
+    except RuntimeError:
+        ranked = [
+            {"id": obj["id"], "name": id_to_name[obj["id"]], "total_ops": 0.0}
+            for obj in objects
+        ]
+    finally:
+        delete_monitor(rank_monitor_id)
+
     ranked.sort(key=lambda item: (-item["total_ops"], item["name"].lower()))
     return [{"id": item["id"], "name": item["name"]} for item in ranked[:_MAX_DRILL_OBJECTS]]
 
@@ -1459,18 +1503,32 @@ def enter_drill_mode(mode):
     prop_list = build_drill_prop_list(mode)
     new_monitors = []
     last_error = None
-    for obj in DRILL_OBJECTS:
+
+    if _is_batch_drill_mode(mode):
         try:
             monitor_id = _create_monitor_raw(
-                f"{mode}_{obj['id']}",
+                f"{mode}_batch",
                 prop_list,
                 cfg["object_type"],
-                [obj["id"]],
+                [obj["id"] for obj in DRILL_OBJECTS],
                 no_aggregation=cfg.get("no_aggregation", False),
             )
-            new_monitors.append((monitor_id, obj["name"]))
+            new_monitors.append((monitor_id, None))
         except RuntimeError as e:
             last_error = str(e)
+    else:
+        for obj in DRILL_OBJECTS:
+            try:
+                monitor_id = _create_monitor_raw(
+                    f"{mode}_{obj['id']}",
+                    prop_list,
+                    cfg["object_type"],
+                    [obj["id"]],
+                    no_aggregation=cfg.get("no_aggregation", False),
+                )
+                new_monitors.append((monitor_id, obj["name"]))
+            except RuntimeError as e:
+                last_error = str(e)
 
     if not new_monitors:
         hint = ""
@@ -1508,12 +1566,24 @@ def fetch_drill_query():
         return
     drill_rows = []
     query_errors = 0
-    for monitor_id, obj_name in DRILL_MONITORS:
+
+    if _is_batch_drill_mode() and DRILL_MONITORS:
+        monitor_id, _name = DRILL_MONITORS[0]
         try:
             result = api_request("GET", f"/monitors/{monitor_id}/query/")
-            drill_rows.append(_build_drill_row(DRILL_MODE, result, obj_name))
+            for obj in DRILL_OBJECTS:
+                slice_result = _slice_result_for_object(result, obj["id"])
+                drill_rows.append(_build_drill_row(DRILL_MODE, slice_result, obj["name"]))
         except RuntimeError:
-            query_errors += 1
+            query_errors = len(DRILL_OBJECTS)
+    else:
+        for monitor_id, obj_name in DRILL_MONITORS:
+            try:
+                result = api_request("GET", f"/monitors/{monitor_id}/query/")
+                drill_rows.append(_build_drill_row(DRILL_MODE, result, obj_name))
+            except RuntimeError:
+                query_errors += 1
+
     LAST_DRILL_ROWS = sorted(
         drill_rows,
         key=lambda r: r["total_ops"] or 0,
@@ -1522,7 +1592,7 @@ def fetch_drill_query():
     if not LAST_DRILL_ROWS and query_errors:
         DRILL_ERROR = (
             f"{DRILL_MODE} drill monitors returned no data "
-            f"({query_errors}/{len(DRILL_MONITORS)} queries failed)"
+            f"({query_errors}/{len(DRILL_OBJECTS)} queries failed)"
         )
 
 
@@ -1533,7 +1603,11 @@ def switch_drill_mode(mode):
     exit_drill_mode()
     if mode in ("view", "tenant"):
         SORT_MODE = "ops"
-    DRILL_STATUS = f"Switching to {cfg.get('label', mode.upper())} drill-down, stand by..."
+    label = cfg.get("label", mode.upper())
+    if mode in ("view", "tenant"):
+        DRILL_STATUS = f"Ranking {label} drill-down by activity, stand by..."
+    else:
+        DRILL_STATUS = f"Switching to {label} drill-down, stand by..."
     render_screen()
     try:
         enter_drill_mode(mode)

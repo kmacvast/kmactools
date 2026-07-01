@@ -29,6 +29,12 @@ import urllib.request
 from datetime import datetime
 
 import vast_api_log
+from tui_layout import display_width, join_columns, pad_display, format_fixed_number, format_scaled_metric
+
+# Table column widths — headers and data rows share these exactly.
+_COL_SEP = "  "
+_OPS_W = {"proc": 22, "iops": 14, "throughput": 14, "size": 12, "latency": 14}
+_PATH_W = {"name": 36, "iops": 12, "throughput": 14, "latency": 14}
 
 VERSION = "1.0.0"
 
@@ -668,7 +674,7 @@ def compute_data_io_iops(rows):
 
 
 def _vlen(s):
-    return len(_ANSI_RE.sub("", s))
+    return display_width(s)
 
 
 def c(text, code):
@@ -677,15 +683,14 @@ def c(text, code):
 
 def box_top(title, width):
     raw_pre = f"{_TL}{_H} {title} "
-    fill = max(0, width - len(raw_pre) - 1)
+    fill = max(0, width - display_width(raw_pre) - 1)
     if _COLOR:
         return c(f"{_TL}{_H} ", _DIM) + c(title, _BWHITE) + c(f" {_H * fill}{_TR}", _DIM)
     return f"{raw_pre}{_H * fill}{_TR}"
 
 
 def _vpad(s, width, align="<"):
-    pad = max(0, width - _vlen(s))
-    return (s + " " * pad) if align == "<" else (" " * pad + s)
+    return pad_display(s, width, align)
 
 
 def format_block_size(bytes_val):
@@ -813,18 +818,13 @@ def as_float(value):
 
 
 def fmt(value, width=12, precision=2):
-    if value is None:
-        return f"{'-':>{width}}"
-    try:
-        return f"{float(value):>{width}.{precision}f}"
-    except Exception:
-        return f"{str(value):>{width}}"
+    return format_fixed_number(value, width, precision)
 
 
 def fmt_size(value, width=12):
     value = as_float(value)
     if value is None:
-        return f"{'':>{width}}"
+        return pad_display("", width, ">")
     if value < 1024:
         text = f"{value:.0f} B"
     elif value < 1024 ** 2:
@@ -833,7 +833,7 @@ def fmt_size(value, width=12):
         text = f"{value / (1024 ** 2):.1f} MiB"
     else:
         text = f"{value / (1024 ** 3):.2f} GiB"
-    return f"{text:>{width}}"
+    return format_scaled_metric(text, width)
 
 
 def fmt_delta(value, precision=2):
@@ -1623,11 +1623,12 @@ def _c_ops_text(text, ops):
 def _operation_cell(row):
     name = DISPLAY_NAMES.get(row["key"], row["label"])
     ops = as_float(row["ops_sec"])
+    w = _OPS_W["proc"]
     if row["key"] == "read":
-        return c(_vpad(name, 22), _BCYAN if ops else _DIM)
+        return _label_cell(name, w, _BCYAN if ops else _DIM)
     if row["key"] == "write":
-        return c(_vpad(name, 22), _BYELLOW if ops else _DIM)
-    return c(_vpad(name, 22), _BWHITE if ops else _DIM)
+        return _label_cell(name, w, _BYELLOW if ops else _DIM)
+    return _label_cell(name, w, _BWHITE if ops else _DIM)
 
 
 def _host_display_name(dr):
@@ -1640,7 +1641,38 @@ def _host_display_name(dr):
 
 
 def _dash_cell(width):
-    return c(_vpad("-", width, ">"), _DIM)
+    return c(pad_display("-", width, ">"), _DIM)
+
+
+def _metric_cell(text, width, color_code):
+    """Right-align a value+unit string, then apply color."""
+    return c(format_scaled_metric(text, width), color_code)
+
+
+def _label_cell(text, width, color_code):
+    """Left-align a label, then apply color."""
+    return c(pad_display(text, width, "<"), color_code)
+
+
+def _ops_table_header():
+    w = _OPS_W
+    return join_columns([
+        c(pad_display("Operation", w["proc"], "<"), _BOLD),
+        c(pad_display("IOPS", w["iops"], ">"), _BOLD),
+        c(pad_display("Throughput", w["throughput"], ">"), _BOLD),
+        c(pad_display("Avg Size", w["size"], ">"), _BOLD),
+        c(pad_display("Latency", w["latency"], ">"), _BOLD),
+    ], _COL_SEP)
+
+
+def _path_table_header(col_name):
+    w = _PATH_W
+    return join_columns([
+        c(pad_display(col_name, w["name"], "<"), _BOLD),
+        c(pad_display("IOPS", w["iops"], ">"), _BOLD),
+        c(pad_display("Throughput", w["throughput"], ">"), _BOLD),
+        c(pad_display("Latency", w["latency"], ">"), _BOLD),
+    ], _COL_SEP)
 
 
 def _row_is_active(row):
@@ -1652,31 +1684,47 @@ def _row_is_active(row):
 
 
 def _table_row_cells(row):
+    w = _OPS_W
     active = _row_is_active(row)
     ops = as_float(row.get("ops_sec"))
     bw_val = as_float(row.get("bw_mbs"))
     has_ops = ops is not None and ops > 0
     has_bw = bw_val is not None and bw_val > 0
     if not active:
-        return (
-            _operation_cell(row)
-            + "  " + _dash_cell(14)
-            + "  " + _dash_cell(14)
-            + "  " + _dash_cell(12)
-            + "  " + _dash_cell(14)
-        )
+        return join_columns([
+            _operation_cell(row),
+            _dash_cell(w["iops"]),
+            _dash_cell(w["throughput"]),
+            _dash_cell(w["size"]),
+            _dash_cell(w["latency"]),
+        ], _COL_SEP)
 
-    iops_s = _c_ops_text(_vpad(format_iops(ops), 14, ">"), ops) if has_ops else _dash_cell(14)
-    bw_text, bw_val = format_throughput_mbs(row.get("bw_mbs"))
-    bw_s = c(_vpad(bw_text, 14, ">"), _CYAN if has_bw else _DIM) if has_bw else _dash_cell(14)
-    size_text, size_val = format_block_size(row.get("avg_io_bytes"))
-    size_s = (
-        c(_vpad(size_text, 12, ">"), _CYAN if size_val and row["key"] == "read" else _YELLOW if size_val and row["key"] == "write" else _DIM)
-        if size_val and (has_ops or has_bw) else _dash_cell(12)
+    iops_s = (
+        _c_ops_text(format_scaled_metric(format_iops(ops), w["iops"]), ops)
+        if has_ops else _dash_cell(w["iops"])
     )
+    bw_text, _ = format_throughput_mbs(row.get("bw_mbs"))
+    bw_s = (
+        _metric_cell(bw_text, w["throughput"], _CYAN if has_bw else _DIM)
+        if has_bw else _dash_cell(w["throughput"])
+    )
+    size_text, size_val = format_block_size(row.get("avg_io_bytes"))
+    if size_val and (has_ops or has_bw):
+        if size_val and row["key"] == "read":
+            size_color = _CYAN
+        elif size_val and row["key"] == "write":
+            size_color = _YELLOW
+        else:
+            size_color = _DIM
+        size_s = _metric_cell(size_text, w["size"], size_color)
+    else:
+        size_s = _dash_cell(w["size"])
     lat_text, lat_us = format_latency_us(row.get("avg_us"), active=has_ops)
-    lat_s = _c_latency_text(_vpad(lat_text, 14, ">"), lat_us) if has_ops else _dash_cell(14)
-    return _operation_cell(row) + "  " + iops_s + "  " + bw_s + "  " + size_s + "  " + lat_s
+    lat_s = (
+        _c_latency_text(format_scaled_metric(lat_text, w["latency"]), lat_us)
+        if has_ops else _dash_cell(w["latency"])
+    )
+    return join_columns([_operation_cell(row), iops_s, bw_s, size_s, lat_s], _COL_SEP)
 
 
 def _display_name(row):
@@ -1830,14 +1878,7 @@ def _render_header_block(rows, width):
 def _render_operations_table(rows, width):
     table_rows = ordered_table_rows(rows)
     print(box_top("OPERATIONS", width))
-    header = (
-        c(_vpad("Operation", 22), _BOLD) + "  "
-        + c(_vpad("IOPS (ops/s)", 14, ">"), _BOLD) + "  "
-        + c(_vpad("Throughput (MB/s)", 14, ">"), _BOLD) + "  "
-        + c(_vpad("Avg Size", 12, ">"), _BOLD) + "  "
-        + c(_vpad("Avg Latency", 14, ">"), _BOLD)
-    )
-    print(box_row(header, width))
+    print(box_row(_ops_table_header(), width))
     print(box_sep(width))
     for row in table_rows:
         print(box_row(_table_row_cells(row), width))
@@ -1863,12 +1904,7 @@ def _render_path_table(width):
         print(box_row(c("Collecting initiator metrics…", _DIM), width))
         print(box_bottom(width))
         return
-    header = (
-        c(_vpad(col_name, 36), _BOLD) + "  "
-        + c(_vpad("IOPS", 12, ">"), _BOLD) + "  "
-        + c(_vpad("Throughput (MB/s)", 14, ">"), _BOLD) + "  "
-        + c(_vpad("Avg Latency", 14, ">"), _BOLD)
-    )
+    header = _path_table_header(col_name)
     print(box_row(header, width))
     print(box_sep(width))
     for dr in LAST_DRILL_ROWS:
@@ -1878,12 +1914,15 @@ def _render_path_table(width):
         has_bw = bw_val is not None and bw_val > 0
         lat_text, lat_us = format_latency_us(dr.get("latency_us"), active=has_iops)
         display = _host_display_name(dr) if DRILL_MODE == "host" else dr["name"]
-        line = (
-            c(_vpad(display, 36), _BWHITE if has_iops or has_bw else _DIM)
-            + "  " + (_c_ops_text(_vpad(format_iops(iops), 12, ">"), iops) if has_iops else _dash_cell(12))
-            + "  " + (c(_vpad(bw_text, 14, ">"), _CYAN) if has_bw else _dash_cell(14))
-            + "  " + (_c_latency_text(_vpad(lat_text, 14, ">"), lat_us) if has_iops else _dash_cell(14))
-        )
+        pw = _PATH_W
+        line = join_columns([
+            _label_cell(display, pw["name"], _BWHITE if has_iops or has_bw else _DIM),
+            _c_ops_text(format_scaled_metric(format_iops(iops), pw["iops"]), iops)
+            if has_iops else _dash_cell(pw["iops"]),
+            _metric_cell(bw_text, pw["throughput"], _CYAN) if has_bw else _dash_cell(pw["throughput"]),
+            _c_latency_text(format_scaled_metric(lat_text, pw["latency"]), lat_us)
+            if has_iops else _dash_cell(pw["latency"]),
+        ], _COL_SEP)
         print(box_row(line, width))
     print(box_bottom(width))
 

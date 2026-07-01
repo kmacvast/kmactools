@@ -12,7 +12,7 @@ These are not fake meetings. They are evidence-backed work-journal blocks derive
 init/add channels  →  gather entries  →  generate candidates  →  review ICS  →  sync Google
 ```
 
-1. **Configure** Slack channels and Gmail IMAP credentials (both required).
+1. **Configure** Slack channels and optionally Gmail (import, IMAP, or OAuth).
 2. **Gather** messages into `~/.timefinder_cache/`.
 3. **Generate** calendar candidate files for human review.
 4. **Review** candidates interactively with `--review-ics` or edit JSON/Markdown manually.
@@ -36,7 +36,8 @@ All capabilities are exposed through a single entry point:
 |------|---------|
 | `--init-channels` | One-shot bootstrap: map a hardcoded channel list to Slack IDs |
 | `--add-slack-channels` | Interactive resolver for channels, DMs, and group DMs |
-| `--gather-candidate-entries` | Gather Slack and Gmail messages (both required) |
+| `--discover-slack-channels` | Find conversations where you posted in the `--date` lookback window; optionally add untracked targets inline |
+| `--gather-candidate-entries` | Gather Slack and/or Gmail messages (Gmail optional; use `--slack-only` or `--require-gmail`) |
 | `--generate-candidates` | Generate work-journal calendar candidates from local backups |
 | `--harvest-thread` | Harvest all messages and thread replies from a Slack channel |
 | `--review-ics PATH` | Interactive wizard to approve, remove, or modify ICS entries |

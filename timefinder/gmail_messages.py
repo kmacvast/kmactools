@@ -165,51 +165,67 @@ def resolve_label_id(name: str) -> str:
     return IMAP_FOLDER_TO_LABEL.get(name, name)
 
 
-def load_gmail_config(config_path=DEFAULT_CONFIG_PATH) -> dict[str, Any]:
-    """Load Gmail configuration for IMAP, OAuth API, or local import."""
-    logging.info("Loading Gmail configuration from: %s", config_path)
-    if not os.path.exists(config_path):
-        msg = (
-            f"Gmail configuration not found at {config_path}. "
-            "Create this file before running --gather-candidate-entries. "
-            "See timefinder/SETUP_macOS.md Step 4 for auth options."
-        )
-        logging.error(msg)
-        raise FileNotFoundError(msg)
+def has_import_sources(import_dir: str = DEFAULT_IMPORT_DIR) -> bool:
+    """Return True if the import directory contains .eml or .mbox files."""
+    from timefinder.gmail_import import discover_import_sources
 
-    with open(config_path, "r", encoding="utf-8") as handle:
-        config = json.load(handle)
+    return bool(discover_import_sources(import_dir))
 
-    email_address = config.get("email", "")
-    app_password = config.get("app_password", "")
-    auth = str(config.get("auth", "")).lower().strip()
-    import_dir = config.get("import_dir") or DEFAULT_IMPORT_DIR
-    labels = config.get("labels") or config.get("folders") or ["INBOX"]
 
-    if auth not in {"oauth", "imap", "import", ""}:
-        raise ValueError(f"Unsupported gmail auth mode: {auth!r}. Use 'import', 'imap', or 'oauth'.")
+def _infer_auth_mode(
+    explicit_auth: str,
+    app_password: str,
+    import_dir: str,
+) -> str | None:
+    """Infer Gmail auth mode without selecting OAuth when no token exists."""
+    from timefinder.google_auth import has_google_token
 
-    if not auth:
-        if app_password:
-            auth = "imap"
-        elif os.path.isdir(os.path.expanduser(import_dir)):
-            auth = "import"
-        else:
-            auth = "oauth"
+    if explicit_auth in {"oauth", "imap", "import"}:
+        auth = explicit_auth
+    elif app_password:
+        auth = "imap"
+    elif has_import_sources(import_dir):
+        auth = "import"
+    elif has_google_token():
+        auth = "oauth"
+    else:
+        return None
+
+    if auth == "oauth" and not has_google_token():
+        if has_import_sources(import_dir):
+            return "import"
+        return None
+    if auth == "import" and not has_import_sources(import_dir):
+        return None
+    return auth
+
+
+def _build_gmail_config(raw: dict[str, Any], *, required: bool = True) -> dict[str, Any]:
+    """Build a normalized Gmail config dict from raw JSON."""
+    email_address = raw.get("email", "")
+    app_password = raw.get("app_password", "")
+    explicit_auth = str(raw.get("auth", "")).lower().strip()
+    import_dir = os.path.expanduser(raw.get("import_dir") or DEFAULT_IMPORT_DIR)
+    labels = raw.get("labels") or raw.get("folders") or ["INBOX"]
+
+    if explicit_auth and explicit_auth not in {"oauth", "imap", "import"}:
+        raise ValueError(f"Unsupported gmail auth mode: {explicit_auth!r}. Use 'import', 'imap', or 'oauth'.")
+
+    auth = _infer_auth_mode(explicit_auth, app_password, import_dir)
+    if auth is None:
+        if required:
+            raise ValueError(
+                "Gmail is not configured for gather. Use \"auth\": \"import\" with Takeout files, "
+                "IMAP app_password, or OAuth with a saved token. See timefinder/SETUP_macOS.md Step 4."
+            )
+        return {}
 
     if auth == "import":
-        return {
-            "auth": "import",
-            "email": email_address,
-            "import_dir": import_dir,
-        }
+        return {"auth": "import", "email": email_address, "import_dir": import_dir}
 
     if auth == "imap":
         if not email_address or not app_password:
-            raise ValueError(
-                "IMAP auth requires email and app_password, or set \"auth\": \"import\" "
-                "for local Takeout/.eml files. See timefinder/SETUP_macOS.md Step 4."
-            )
+            raise ValueError("IMAP auth requires email and app_password in gmail_config.json.")
         return {
             "auth": "imap",
             "email": email_address,
@@ -222,6 +238,45 @@ def load_gmail_config(config_path=DEFAULT_CONFIG_PATH) -> dict[str, Any]:
         "email": email_address,
         "labels": [resolve_label_id(label) for label in labels],
     }
+
+
+def resolve_gmail_gather_config(config_path=DEFAULT_CONFIG_PATH) -> dict[str, Any] | None:
+    """Return Gmail config for gather, or None when Gmail should be skipped."""
+    expanded = os.path.expanduser(config_path)
+    if not os.path.exists(expanded):
+        if has_import_sources(DEFAULT_IMPORT_DIR):
+            return {"auth": "import", "email": "", "import_dir": DEFAULT_IMPORT_DIR}
+        return None
+
+    try:
+        with open(expanded, "r", encoding="utf-8") as handle:
+            raw = json.load(handle)
+        config = _build_gmail_config(raw, required=False)
+    except (json.JSONDecodeError, OSError, ValueError) as exc:
+        logging.warning("Gmail config unusable (%s); skipping Gmail gather.", exc)
+        return None
+
+    return config or None
+
+
+def load_gmail_config(config_path=DEFAULT_CONFIG_PATH) -> dict[str, Any]:
+    """Load Gmail configuration for IMAP, OAuth API, or local import."""
+    logging.info("Loading Gmail configuration from: %s", config_path)
+    expanded = os.path.expanduser(config_path)
+    if not os.path.exists(expanded):
+        if has_import_sources(DEFAULT_IMPORT_DIR):
+            return {"auth": "import", "email": "", "import_dir": DEFAULT_IMPORT_DIR}
+        msg = (
+            f"Gmail configuration not found at {config_path}. "
+            "See timefinder/SETUP_macOS.md Step 4 for auth options."
+        )
+        logging.error(msg)
+        raise FileNotFoundError(msg)
+
+    with open(expanded, "r", encoding="utf-8") as handle:
+        raw = json.load(handle)
+
+    return _build_gmail_config(raw, required=True)
 
 
 def fetch_gmail_folder(imap, folder: str, since_dt: datetime) -> list[dict]:
@@ -379,26 +434,27 @@ def run_gmail_backup(
     reference_date=None,
     imap_class=imaplib.IMAP4_SSL,
     gmail_service=None,
+    config: dict[str, Any] | None = None,
 ):
     """Fetch Gmail messages and write JSON backup files."""
     from timefinder.gmail_import import run_gmail_backup_import
 
-    config = load_gmail_config(config_path)
+    cfg = config or load_gmail_config(config_path)
     os.makedirs(output_dir, exist_ok=True)
 
     now = reference_date or datetime.now()
     since_dt = now - timedelta(days=lookback_days)
     date_str = now.strftime("%Y-%m-%d")
 
-    if config["auth"] == "import":
+    if cfg["auth"] == "import":
         print("  Using local Gmail import (.eml / .mbox — no API credentials).")
         return run_gmail_backup_import(
-            output_dir, config["import_dir"], since_dt, now, date_str
+            output_dir, cfg["import_dir"], since_dt, now, date_str
         )
 
-    if config["auth"] == "oauth":
+    if cfg["auth"] == "oauth":
         print("  Using Gmail API (OAuth).")
-        return run_gmail_backup_oauth(output_dir, config, since_dt, date_str, service=gmail_service)
+        return run_gmail_backup_oauth(output_dir, cfg, since_dt, date_str, service=gmail_service)
 
     print("  Using Gmail IMAP (app password).")
-    return run_gmail_backup_imap(output_dir, config, since_dt, date_str, imap_class=imap_class)
+    return run_gmail_backup_imap(output_dir, cfg, since_dt, date_str, imap_class=imap_class)

@@ -41,6 +41,7 @@ def test_load_gmail_config_import_mode(tmp_path):
     config_path = tmp_path / "gmail_config.json"
     import_dir = tmp_path / "gmail_import"
     import_dir.mkdir()
+    _write_eml(import_dir / "sample.eml", "Import test", datetime(2026, 6, 20, 10, 0, 0))
     config_path.write_text(
         json.dumps({"auth": "import", "import_dir": str(import_dir)}),
         encoding="utf-8",

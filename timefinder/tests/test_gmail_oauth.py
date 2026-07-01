@@ -1,9 +1,9 @@
-"""Tests for Gmail OAuth API backup path."""
+"""Tests for Gmail config resolution and OAuth gather behavior."""
 from __future__ import annotations
 
 import json
 from datetime import datetime
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from timefinder import gmail_messages as gmail
 
@@ -14,9 +14,61 @@ def test_load_gmail_config_oauth_mode(tmp_path):
         json.dumps({"auth": "oauth", "email": "user@example.com", "labels": ["INBOX", "SENT"]}),
         encoding="utf-8",
     )
-    config = gmail.load_gmail_config(str(path))
+    with patch("timefinder.google_auth.has_google_token", return_value=True):
+        config = gmail.load_gmail_config(str(path))
     assert config["auth"] == "oauth"
     assert config["labels"] == ["INBOX", "SENT"]
+
+
+def test_load_gmail_config_oauth_without_token_raises(tmp_path):
+    path = tmp_path / "gmail_config.json"
+    path.write_text(json.dumps({"auth": "oauth", "email": "user@example.com"}), encoding="utf-8")
+    with patch("timefinder.google_auth.has_google_token", return_value=False):
+        with patch.object(gmail, "has_import_sources", return_value=False):
+            try:
+                gmail.load_gmail_config(str(path))
+                assert False, "expected ValueError"
+            except ValueError as exc:
+                assert "not configured" in str(exc).lower()
+
+
+def test_load_gmail_config_oauth_falls_back_to_import(tmp_path):
+    path = tmp_path / "gmail_config.json"
+    import_dir = tmp_path / "gmail_import"
+    import_dir.mkdir()
+    (import_dir / "mail.eml").write_text("placeholder", encoding="utf-8")
+    path.write_text(
+        json.dumps({"auth": "oauth", "import_dir": str(import_dir)}),
+        encoding="utf-8",
+    )
+    with patch("timefinder.google_auth.has_google_token", return_value=False):
+        config = gmail.load_gmail_config(str(path))
+    assert config["auth"] == "import"
+
+
+def test_resolve_gmail_gather_config_returns_none_without_config_or_import(tmp_path):
+    missing = tmp_path / "missing.json"
+    with patch.object(gmail, "DEFAULT_IMPORT_DIR", str(tmp_path / "empty_import")):
+        assert gmail.resolve_gmail_gather_config(str(missing)) is None
+
+
+def test_resolve_gmail_gather_config_uses_import_without_config_file(tmp_path, monkeypatch):
+    import_dir = tmp_path / "gmail_import"
+    import_dir.mkdir()
+    (import_dir / "mail.eml").write_text("placeholder", encoding="utf-8")
+    missing = tmp_path / "missing.json"
+    monkeypatch.setattr(gmail, "DEFAULT_IMPORT_DIR", str(import_dir))
+    config = gmail.resolve_gmail_gather_config(str(missing))
+    assert config is not None
+    assert config["auth"] == "import"
+
+
+def test_resolve_gmail_gather_config_skips_oauth_without_token(tmp_path):
+    path = tmp_path / "grip_config.json"
+    path.write_text(json.dumps({"auth": "oauth", "email": "user@example.com"}), encoding="utf-8")
+    with patch("timefinder.google_auth.has_google_token", return_value=False):
+        with patch.object(gmail, "has_import_sources", return_value=False):
+            assert gmail.resolve_gmail_gather_config(str(path)) is None
 
 
 def test_load_gmail_config_imap_when_app_password_set(tmp_path):

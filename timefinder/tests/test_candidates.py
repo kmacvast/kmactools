@@ -79,6 +79,32 @@ def populated_input_dir(tmp_path, user_map):
     return tmp_path, user_map_path
 
 
+def test_resolve_time_window():
+    reference = datetime(2026, 6, 26, 23, 59, 59)
+    start, end = cal.resolve_time_window(reference, 7)
+    assert start == datetime(2026, 6, 19, 0, 0, 0)
+    assert end == reference
+
+
+def test_load_slack_files_excludes_messages_after_reference_date(tmp_path, user_map):
+    in_window = [{"user": "U111", "ts": ts_at(2026, 6, 26, 10), "text": "in window"}]
+    after_window = [{"user": "U111", "ts": ts_at(2026, 6, 29, 10), "text": "too late"}]
+    before_window = [{"user": "U111", "ts": ts_at(2026, 6, 18, 10), "text": "too early"}]
+    write_slack_backup(tmp_path, "apple-openldap", "2026-06-26", in_window)
+    write_slack_backup(tmp_path, "apple-openldap", "2026-06-29", after_window)
+    write_slack_backup(tmp_path, "apple-openldap", "2026-06-18", before_window)
+
+    reference = datetime(2026, 6, 26, 23, 59, 59)
+    messages = cal.load_slack_files(str(tmp_path), 7, reference, user_map)
+    texts = {message.text for message in messages}
+    assert texts == {"in window"}
+
+
+def test_parse_reference_date():
+    assert cal.parse_reference_date("2026-06-26") == datetime(2026, 6, 26, 23, 59, 59)
+    assert cal.parse_reference_date(None).date() == datetime.now().date()
+
+
 def test_parse_slack_timestamp():
     parsed = cal.parse_slack_timestamp("1781895454.799119")
     assert isinstance(parsed, datetime)

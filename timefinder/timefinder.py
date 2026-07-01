@@ -10,6 +10,7 @@ if __package__ is None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from timefinder.candidates import parse_generate_args, run_generate_candidates
+from timefinder.channels_discover import parse_discover_args, run_discover_slack_channels
 from timefinder.channels_init import run_init_channels
 from timefinder.channels_resolve import run_add_slack_channels
 from timefinder.google_auth import run_setup_google_auth
@@ -28,6 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
 Examples:
   %(prog)s --init-channels
   %(prog)s --add-slack-channels
+  %(prog)s --discover-slack-channels --date 2026-06-26 --lookback-days 7
   %(prog)s --gather-candidate-entries
   %(prog)s --generate-candidates --date 2026-06-22
   %(prog)s --harvest-thread --channel C0123456789
@@ -44,9 +46,14 @@ Examples:
         help="Interactively resolve Slack channels, DMs, and group DMs.",
     )
     parser.add_argument(
+        "--discover-slack-channels",
+        action="store_true",
+        help="Find Slack conversations where you posted in the --date lookback window.",
+    )
+    parser.add_argument(
         "--gather-candidate-entries",
         action="store_true",
-        help="Gather Slack and Gmail messages into local cache (both required).",
+        help="Gather Slack and/or Gmail messages into local cache (Gmail optional).",
     )
     parser.add_argument(
         "--generate-candidates",
@@ -75,6 +82,13 @@ Examples:
     )
 
     parser.add_argument("--lookback-days", type=int, default=7)
+    parser.add_argument("--slack-only", action="store_true", help="Gather Slack messages only.")
+    parser.add_argument("--gmail-only", action="store_true", help="Gather Gmail/import messages only.")
+    parser.add_argument(
+        "--require-gmail",
+        action="store_true",
+        help="Fail if Gmail is not configured or gather fails.",
+    )
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--slack-config", default=None)
     parser.add_argument("--gmail-config", default=None)
@@ -108,6 +122,7 @@ def main(argv: list[str] | None = None) -> int:
     actions = [
         args.init_channels,
         args.add_slack_channels,
+        args.discover_slack_channels,
         args.gather_candidate_entries,
         args.generate_candidates,
         args.harvest_thread,
@@ -127,8 +142,25 @@ def main(argv: list[str] | None = None) -> int:
         run_add_slack_channels()
         return 0
 
+    if args.discover_slack_channels:
+        discover_argv = ["--lookback-days", str(args.lookback_days)]
+        if args.reference_date:
+            discover_argv.extend(["--date", args.reference_date])
+        if args.slack_config:
+            discover_argv.extend(["--slack-config", args.slack_config])
+        if args.verbose:
+            discover_argv.append("--verbose")
+        discover_args = parse_discover_args(discover_argv)
+        return run_discover_slack_channels(discover_args)
+
     if args.gather_candidate_entries:
         gather_argv = ["--lookback-days", str(args.lookback_days)]
+        if args.slack_only:
+            gather_argv.append("--slack-only")
+        if args.gmail_only:
+            gather_argv.append("--gmail-only")
+        if args.require_gmail:
+            gather_argv.append("--require-gmail")
         if args.output_dir:
             gather_argv.extend(["--output-dir", args.output_dir])
         if args.slack_config:

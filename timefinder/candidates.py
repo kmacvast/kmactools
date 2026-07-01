@@ -136,6 +136,29 @@ def parse_slack_timestamp(ts_value: str | float) -> datetime:
     return datetime.fromtimestamp(float(ts_value))
 
 
+def parse_reference_date(date_str: str | None) -> datetime:
+    """Parse --date into an inclusive window end (end of day) or use now."""
+    if date_str:
+        parsed = datetime.strptime(date_str, "%Y-%m-%d")
+        return parsed.replace(hour=23, minute=59, second=59, microsecond=0)
+    return datetime.now()
+
+
+def resolve_time_window(reference_date: datetime, lookback_days: int) -> tuple[datetime, datetime]:
+    """Return inclusive [window_start, window_end] for message filtering."""
+    window_end = reference_date
+    window_start = datetime.combine(
+        window_end.date() - timedelta(days=lookback_days),
+        datetime.min.time(),
+    )
+    return window_start, window_end
+
+
+def message_in_window(ts: datetime, window_start: datetime, window_end: datetime) -> bool:
+    """Return True when ts falls within the inclusive reference window."""
+    return window_start <= ts <= window_end
+
+
 def load_user_name_map(path: str) -> dict[str, str]:
     """Load optional Slack user id -> display name map."""
     expanded = os.path.expanduser(path)
@@ -222,7 +245,7 @@ def load_slack_files(
 ) -> list[NormalizedMessage]:
     """Load and normalize Slack messages within the lookback window."""
     pattern = os.path.join(os.path.expanduser(input_dir), "slack_*.json")
-    cutoff = reference_date - timedelta(days=lookback_days)
+    window_start, window_end = resolve_time_window(reference_date, lookback_days)
     messages: list[NormalizedMessage] = []
 
     for path in sorted(glob.glob(pattern)):
@@ -245,9 +268,15 @@ def load_slack_files(
             if not isinstance(raw, dict):
                 continue
             normalized = normalize_message(raw, channel, path, backup_date, name_map)
-            if normalized and normalized.ts >= cutoff:
+            if normalized and message_in_window(normalized.ts, window_start, window_end):
                 messages.append(normalized)
 
+    logging.debug(
+        "Loaded %d messages in window %s -> %s",
+        len(messages),
+        window_start.isoformat(timespec="seconds"),
+        window_end.isoformat(timespec="seconds"),
+    )
     return messages
 
 
@@ -806,13 +835,14 @@ def run_generate_candidates(args: argparse.Namespace) -> int:
     """Generate calendar candidate files from local Slack backups."""
     configure_logging(args.verbose, args.debug)
 
-    if args.reference_date:
-        reference_date = datetime.strptime(args.reference_date, "%Y-%m-%d")
-        reference_date = reference_date.replace(
-            hour=23, minute=59, second=59, microsecond=0
-        )
-    else:
-        reference_date = datetime.now()
+    reference_date = parse_reference_date(args.reference_date)
+    window_start, window_end = resolve_time_window(reference_date, args.lookback_days)
+    logging.info(
+        "Reference window: %s through %s (%d-day lookback)",
+        window_start.date().isoformat(),
+        window_end.date().isoformat(),
+        args.lookback_days,
+    )
 
     name_map = load_user_name_map(args.user_map)
     candidates, excluded = process_slack_backups(

@@ -6,7 +6,7 @@
 #              Phase 2 routes --block --nvme-over-tcp to NVMe-oTCP block statistics.
 #
 # Author: KMac kmac@vastdata.com
-# Version: 1.0.0
+# Version: 0.1.1
 ################################################################################
 
 import argparse
@@ -21,7 +21,7 @@ import nfs_v3
 import nfs_v41
 import nvme_tcp
 
-VERSION = "1.0.0"
+VERSION = "0.1.1"
 
 DEFAULT_PORT = 443
 DEFAULT_USER = "admin"

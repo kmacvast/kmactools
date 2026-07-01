@@ -325,10 +325,10 @@ class TestNfsDrillEndpoints:
         nfs_v3.init_config(_connection_args())
         nfs_v3.CLUSTER_ID = 1
         captured = []
-        monitor_ids = iter([10, 11])
+        monitor_ids = iter([10])
 
         def fake_api_request(method, path, payload=None):
-            captured.append((method, path))
+            captured.append((method, path, payload))
             if method == "GET" and path == "/cnodes/":
                 return [{"id": 1, "name": "cnode-1"}]
             if method == "POST" and path == "/monitors/":
@@ -338,9 +338,126 @@ class TestNfsDrillEndpoints:
         with patch.object(nfs_v3, "api_request", side_effect=fake_api_request):
             nfs_v3.enter_drill_mode("cnode")
 
-        assert captured[0] == ("GET", "/cnodes/")
+        assert captured[0][0:2] == ("GET", "/cnodes/")
         assert nfs_v3.DRILL_MODE == "cnode"
         assert nfs_v3.DRILL_ERROR is None
+        assert len(nfs_v3.DRILL_MONITORS) == 1
+        create_payload = captured[1][2]
+        assert "aggregation" in create_payload
+
+    def test_view_drill_monitor_omits_aggregation(self):
+        nfs_v3.init_config(_connection_args())
+        nfs_v3.CLUSTER_ID = 1
+        payloads = []
+
+        def fake_api_request(method, path, payload=None):
+            if method == "GET" and path == "/views/":
+                return [{"id": 7, "path": "/data"}]
+            if method == "GET" and path.startswith("/monitors/") and path.endswith("/query/"):
+                return {"prop_list": ["timestamp", "object_id", nfs_v3._VIEW_READ_IOPS],
+                        "data": [["2026-07-01T00:00:00Z", 7, 1.0]]}
+            if method == "POST" and path == "/monitors/":
+                payloads.append(payload)
+                return {"id": 42}
+            if method == "DELETE" and path.startswith("/monitors/"):
+                return None
+            raise AssertionError(f"Unexpected API call: {method} {path}")
+
+        with patch.object(nfs_v3, "api_request", side_effect=fake_api_request):
+            nfs_v3.enter_drill_mode("view")
+
+        assert nfs_v3.DRILL_MODE == "view"
+        create_payloads = [p for p in payloads if "aggregation" not in p or p.get("prop_list")]
+        assert create_payloads
+        assert "aggregation" not in create_payloads[0]
+        assert create_payloads[0]["prop_list"][0].startswith("ViewMetrics,")
+
+    def test_build_drill_prop_list_scopes(self):
+        cnode_props = nfs_v3.build_drill_prop_list("cnode")
+        view_props = nfs_v3.build_drill_prop_list("view")
+        tenant_props = nfs_v3.build_drill_prop_list("tenant")
+        assert nfs_v3._VIEW_READ_IOPS in view_props
+        assert nfs_v3._TENANT_READ_IOPS in tenant_props
+        assert any(p.startswith("NfsMetrics,") for p in cnode_props)
+
+    def test_build_view_drill_row_from_rates(self):
+        result = {
+            "prop_list": [
+                "timestamp",
+                "object_id",
+                nfs_v3._VIEW_READ_IOPS,
+                nfs_v3._VIEW_WRITE_IOPS,
+                nfs_v3._VIEW_READ_LAT,
+                nfs_v3._VIEW_WRITE_LAT,
+                nfs_v3._VIEW_READ_BW,
+                nfs_v3._VIEW_WRITE_BW,
+            ],
+            "data": [["2026-07-01T00:00:00Z", 1, 10.0, 5.0, 100.0, 200.0, 1_000_000_000.0, 0.0]],
+        }
+        row = nfs_v3._build_view_drill_row(result, "/data")
+        assert row["name"] == "/data"
+        assert row["total_ops"] == pytest.approx(15.0)
+        assert row["top_rpc"] == "READ"
+        assert row["bw_gbs"] == pytest.approx(1.0)
+
+    def test_rank_drill_candidates_sorts_by_ops(self):
+        nfs_v3.init_config(_connection_args())
+        cfg = nfs_v3._DRILL_CFG["view"]
+        objects = [{"id": 1, "path": "/idle"}, {"id": 2, "path": "/hot"}]
+        rows_by_id = {
+            1: {"total_ops": 0.1},
+            2: {"total_ops": 9.5},
+        }
+        monitor_ids = iter([101, 102, 201, 202])
+
+        def fake_create(*_args, **_kwargs):
+            return next(monitor_ids)
+
+        def fake_query(_mode, result, name):
+            obj_id = 2 if name == "/hot" else 1
+            return {"total_ops": rows_by_id[obj_id]["total_ops"]}
+
+        with patch.object(nfs_v3, "_create_monitor_raw", side_effect=fake_create), \
+             patch.object(nfs_v3, "api_request", return_value={}), \
+             patch.object(nfs_v3, "_build_drill_row", side_effect=fake_query), \
+             patch.object(nfs_v3, "delete_monitor"):
+            ranked = nfs_v3._rank_drill_candidates("view", objects, cfg)
+
+        assert [item["name"] for item in ranked] == ["/hot", "/idle"]
+
+    def test_switch_drill_mode_sets_ops_sort_for_view(self):
+        nfs_v3.init_config(_connection_args())
+        nfs_v3.SORT_MODE = "rpc"
+        nfs_v3.CLUSTER_ID = 1
+        nfs_v3.LAST_ROWS = []
+        nfs_v3.CLUSTER_NAME = "test"
+
+        with patch.object(nfs_v3, "render_screen"), \
+             patch.object(nfs_v3, "enter_drill_mode"), \
+             patch.object(nfs_v3, "fetch_drill_query"):
+            nfs_v3.switch_drill_mode("view")
+
+        assert nfs_v3.SORT_MODE == "ops"
+
+    def test_build_tenant_drill_row_from_cumulative_samples(self):
+        result = {
+            "prop_list": [
+                "timestamp",
+                "object_id",
+                nfs_v3._TENANT_READ_IOPS,
+                nfs_v3._TENANT_WRITE_IOPS,
+                nfs_v3._TENANT_READ_LAT,
+                nfs_v3._TENANT_READ_CNT,
+            ],
+            "data": [
+                ["2026-07-01T00:10:00Z", 1, 1200.0, 600.0, 120000.0, 120.0],
+                ["2026-07-01T00:00:00Z", 1, 600.0, 300.0, 60000.0, 60.0],
+            ],
+        }
+        row = nfs_v3._build_tenant_drill_row(result, "tenant-a")
+        assert row["name"] == "tenant-a"
+        assert row["total_ops"] == pytest.approx(1.5)
+        assert row["latency_us"] == pytest.approx(1000.0)
 
 
 class TestNfsV41Metrics:

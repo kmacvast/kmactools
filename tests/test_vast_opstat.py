@@ -304,6 +304,38 @@ class TestNfsV3ApiLayer:
         assert created["name"].startswith("adhoc_vast-opstat_rpc_")
 
 
+class TestNfsDrillEndpoints:
+    """Drill-down paths must be relative to BASE_URL (/api), not include /api again."""
+
+    def test_drill_cfg_endpoints_are_single_prefix_paths(self):
+        for mode, cfg in nfs_v3._DRILL_CFG.items():
+            endpoint = cfg["endpoint"]
+            assert endpoint.startswith("/"), mode
+            assert not endpoint.startswith("/api/"), mode
+            assert "//" not in endpoint.strip("/"), mode
+
+    def test_enter_drill_mode_requests_correct_url(self):
+        nfs_v3.init_config(_connection_args())
+        nfs_v3.CLUSTER_ID = 1
+        captured = []
+        monitor_ids = iter([10, 11])
+
+        def fake_api_request(method, path, payload=None):
+            captured.append((method, path))
+            if method == "GET" and path == "/cnodes/":
+                return [{"id": 1, "name": "cnode-1"}]
+            if method == "POST" and path == "/monitors/":
+                return {"id": next(monitor_ids)}
+            raise AssertionError(f"Unexpected API call: {method} {path}")
+
+        with patch.object(nfs_v3, "api_request", side_effect=fake_api_request):
+            nfs_v3.enter_drill_mode("cnode")
+
+        assert captured[0] == ("GET", "/cnodes/")
+        assert nfs_v3.DRILL_MODE == "cnode"
+        assert nfs_v3.DRILL_ERROR is None
+
+
 class TestDispatch:
     def test_dispatch_routes_to_nfs_v3(self):
         args = opstat.parse_args(["--nfs", "--version=3.0", *BASE_ARGS])

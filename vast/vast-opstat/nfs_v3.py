@@ -122,17 +122,17 @@ META_LABELS = frozenset(label for _, label in OPS) - IO_LABELS
 _DRILL_CFG = {
     "cnode":  {
         "object_type": "cnode",
-        "endpoint":    "/api/cnodes/",
+        "endpoint":    "/cnodes/",
         "name_fields": ("name", "hostname", "mgmt_ip"),
     },
     "view":   {
         "object_type": "view",
-        "endpoint":    "/api/views/",
+        "endpoint":    "/views/",
         "name_fields": ("path", "title", "name"),
     },
     "tenant": {
         "object_type": "tenant",
-        "endpoint":    "/api/tenants/",
+        "endpoint":    "/tenants/",
         "name_fields": ("name",),
     },
 }
@@ -1770,11 +1770,11 @@ def discover_metrics():
     # ── Object types ─────────────────────────────────────────────────────────
     print("[ Object Types ]")
     object_endpoints = {
-        "clusters": "/api/clusters/",
-        "cnodes":   "/api/cnodes/",
-        "views":    "/api/views/",
-        "vips":     "/api/vips/",
-        "tenants":  "/api/tenants/",
+        "clusters": "/clusters/",
+        "cnodes":   "/cnodes/",
+        "views":    "/views/",
+        "vips":     "/vips/",
+        "tenants":  "/tenants/",
     }
     drill_available = {}
     for name, endpoint in object_endpoints.items():

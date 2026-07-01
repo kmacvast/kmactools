@@ -5,6 +5,8 @@ procedures), v4.1 is session-oriented with compound operations and in-protocol
 locking. This module maps **instantaneous monitor rates** directly to the TUI on
 each refresh — no counter-delta engine.
 
+![vast-opstat NFS v4.1](images/vast-opstat_NFSv41.png)
+
 ## Quick Start
 
 ```bash

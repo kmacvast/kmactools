@@ -3,9 +3,15 @@
 | Use | Filename |
 |-----|----------|
 | Main [README.md](../README.md) hero | `vast-opstat.png` |
-| NFS v3 protocol page | `vast-opstat_NFSv3.png` |
-| NVMe-oTCP protocol page | `vast-opstat_NVMe-oTCP.png` |
-| SMB (planned) | `vast-opstat_SMB.png` |
+| [NFSv3_README.md](../NFSv3_README.md) | `nfs_v3_tui.png` |
+| [NVMe_TCP_README.md](../NVMe_TCP_README.md) | `nvme_tcp_tui.png` |
+| [NFSv41_README.md](../NFSv41_README.md) | `nfs_v41_tui.png` |
 
-Protocol-specific pages use `![vast-opstat ${PROTOCOL}](images/vast-opstat_${PROTOCOL}.png)`.
-The main README uses a single curated screenshot: `images/vast-opstat.png`.
+Legacy filenames (`vast-opstat_NFSv3.png`, `vast-opstat_NVMe-oTCP.png`,
+`vast-opstat_NFSv41.png`) are retained for backward compatibility in older links.
+
+Protocol pages embed screenshots with root-relative paths, for example:
+
+```markdown
+![NFS v3 TUI Dashboard](images/nfs_v3_tui.png)
+```

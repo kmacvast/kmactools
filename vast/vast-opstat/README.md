@@ -4,21 +4,37 @@ Multi-protocol VAST performance statistics tool. Query VMS performance counters 
 display live protocol operation rates, latency, throughput, and workload classification
 from the terminal.
 
-Supports **cluster-wide** and **multi-volume scoping** for block storage, plus **host
-initiator metrics** drill-down for NVMe-oTCP workloads.
-
-![vast-opstat NVMe-oTCP](images/vast-opstat.png)
-
 ---
 
-## Getting Started & Setup
+## Getting Started
 
-**New to Python?** Follow the step-by-step guide:
+**New here?** Start with the step-by-step environment guide:
 
 **[SETUP.md — Install Python, create a virtual environment, and run vast-opstat](SETUP.md)**
 
-Runtime dependencies: [requirements.txt](requirements.txt) (stdlib only — no pip packages
-required for execution).
+Runtime dependencies: [requirements.txt](requirements.txt) (stdlib only for execution;
+`pytest` is optional for development).
+
+![vast-opstat overview](images/vast-opstat.png)
+
+---
+
+## Protocol Reference
+
+| Protocol | CLI flags | Status | Documentation |
+|----------|-----------|--------|---------------|
+| **NFS v3** | `--nfs --version=3.0` | **Fully Implemented** | **[NFSv3_README.md](NFSv3_README.md)** |
+| **NFS v4.1** | `--nfs --version=4.1` | **Fully Implemented** | **[NFSv41_README.md](NFSv41_README.md)** |
+| **NVMe-oTCP (block)** | `--block --nvme-over-tcp` | **Fully Implemented** | **[NVMe_TCP_README.md](NVMe_TCP_README.md)** |
+| NFS v4.2 | `--nfs --version=4.2` | Planned | — |
+| SMB | `--smb` | Planned | — |
+
+### Flag rules
+
+- `--block` requires `--nvme-over-tcp`.
+- `--version` is **required** with `--nfs` (e.g. `--version=3.0` or `--version=4.1`).
+- `--version` is **not** used with `--block` or `--smb`.
+- Use `-V` / `--tool-version` to print the vast-opstat release version (currently **0.1.1**).
 
 ---
 
@@ -27,128 +43,101 @@ required for execution).
 ```bash
 cd vast/vast-opstat
 
-# NVMe-oTCP block — cluster-wide
-./vast-opstat.py --block --nvme-over-tcp --vms <VMS_HOST> --user <USER>
+# NFS v3 — cluster-wide
+./vast-opstat.py --nfs --version=3.0 --vms <VMS_HOST> --user <USER>
 
-# NVMe-oTCP via SSH tunnel (Teleport / zero-trust)
-./vast-opstat.py --block --nvme-over-tcp --vms localhost --vms-port 8443 --user <USER>
+# NFS v4.1 — cluster-wide
+./vast-opstat.py --nfs --version=4.1 --vms <VMS_HOST> --user <USER>
+
+# NVMe-oTCP block — cluster-wide (all volumes)
+./vast-opstat.py --block --nvme-over-tcp --vms <VMS_HOST> --user <USER>
 
 # NVMe-oTCP block — scoped to one or more volumes
 ./vast-opstat.py --block --nvme-over-tcp --vms <VMS_HOST> \
   --volumes vol1,vol2 --user <USER>
 
-# NFS v3
-./vast-opstat.py --nfs --version=3.0 --vms <VMS_HOST> --user <USER>
-
-# NFS v4.1
-./vast-opstat.py --nfs --version=4.1 --vms <VMS_HOST> --user <USER>
+# Remote cluster via SSH tunnel (Teleport / zero-trust)
+./vast-opstat.py --nfs --version=3.0 --vms localhost --vms-port 8443 --user <USER>
 ```
 
 ---
 
-## Protocol Reference
+## Global Connection & Ingestion Flags
 
-| Protocol | CLI flags | Status | Documentation |
-|----------|-----------|--------|---------------|
-| **NVMe-oTCP** | `--block --nvme-over-tcp` | **Fully Implemented** | **[NVMe_TCP_README.md](NVMe_TCP_README.md)** |
-| NFS v3 | `--nfs --version=3.0` | Implemented | [NFSv3_README.md](NFSv3_README.md) |
-| NFS v4.1 | `--nfs --version=4.1` | **Implemented** | **[NFSv41_README.md](NFSv41_README.md)** |
-| NFS v4.2 | `--nfs --version=4.2` | Planned | — |
-| SMB | `--smb` | Planned | — |
-
-### Flag rules
-
-- `--block` requires `--nvme-over-tcp`.
-- `--volume NAME` or `--volumes a,b,c` scope NVMe-oTCP stats to named volumes (optional).
-- `--version` is **required** with `--nfs` (e.g. `--version=3.0` or `--version=4.1`).
-- `--version` is **not** used with `--smb`.
-- Use `-V` / `--tool-version` to print the vast-opstat release version.
-
----
-
-## Features by Protocol
-
-### NVMe-oTCP (block)
-
-- Cluster-wide or multi-volume scoping (`--volume` / `--volumes`)
-- Hybrid volume mode: per-volume read/write via `VolumeMetrics`; reclaim, fabric, and admin ops via cluster `BlockMetrics` supplement monitors
-- Counter-delta IOPS engine (true real-time rates, not lifetime counters)
-- Three-panel TUI: Block Health & Workload, Performance Insights, Operations table
-- Interactive drill-down: host initiators (`h`), VIP paths (`v`), cNode paths (`c`)
-- CSV export and metric discovery mode
-
-See **[NVMe_TCP_README.md](NVMe_TCP_README.md)** for CLI syntax, metric calculations,
-keybinds, and architecture.
-
-### NFS v4.1
-
-- Three-panel TUI: Data Operations, Stateful Overhead (VMS Proxies), Session Workload
-- NFS4Common instantaneous rates with NfsMetrics hybrid fallback (no delta engine)
-- Session panel: NFS4Common md_iops / rd_md_iops / wr_md_iops workload profile
-- cNode / View / Tenant drill-down (`c` / `v` / `t`)
-
-See **[NFSv41_README.md](NFSv41_README.md)**.
-
-### NFS v3
-
-- Live NFS operation rates, latency, and workload classification
-- VIP and cNode path drill-down
-
-See [NFSv3_README.md](NFSv3_README.md).
-
----
-
-## Shared Connection Options
-
-These flags apply to all implemented protocols:
+These flags apply to **every implemented protocol** (NFS v3, NFS v4.1, NVMe-oTCP):
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--vms HOST` | — | VMS hostname or IP (required) |
-| `--vms-port PORT` | `443` | VMS HTTPS port (`--port` accepted as legacy alias) |
+| `--vms HOST` | — | VMS hostname or IP (**required**). Use `localhost` with an SSH tunnel. |
+| `--vms-port PORT` | `443` | VMS HTTPS port (`--port` accepted as legacy alias). |
 | `--user USER` | `admin` | VMS username |
-| `--password PASS` | — | VMS password (prompted if omitted) |
-| `--sample-average WIN` | — | Rolling average window (e.g. `10m`, `1h`, `4h`) |
-| `--refresh N` | `5` | Refresh interval in seconds |
-| `--csv FILENAME` | — | Append captured samples to a CSV file |
+| `--password PASS` | — | VMS password (prompted securely if omitted; `VAST_PASSWORD` env var accepted) |
+| `--sample-average WIN` | — | Rolling average window (`10m`, `1h`, `4h`, …) |
+| `--refresh N` | `5` | Dashboard refresh interval in seconds |
+| `--csv FILENAME` | — | Append captured samples to CSV |
 | `--no-color` | — | Disable ANSI color output |
 | `--discover-metrics` | — | Enumerate metrics and objects, then exit |
-| `--log-api-calls` | — | Log VMS REST API traffic to `/tmp/vast-opstat-api-*.log` |
+| `--log-api-calls` | — | Log VMS REST traffic to `/tmp/vast-opstat-api-*.log` |
+| `-V` / `--tool-version` | — | Print tool version and exit |
 
-### Remote clusters via SSH tunnel (Teleport / zero-trust)
+### Cluster-wide vs volume-scoped monitoring (NVMe-oTCP only)
 
-When VMS is reachable only through a forwarded local port (common with Teleport,
-bastion hops, or zero-trust access), point `--vms` at the tunnel endpoint and pass
-the forwarded port with `--vms-port`:
+| Mode | Flags | Monitor scope | Behavior |
+|------|-------|---------------|----------|
+| **Cluster-wide** | `--block --nvme-over-tcp` (no volume flags) | `object_type=cluster` | Aggregates all block volumes; reclaim, fabric, and admin ops included |
+| **Multi-volume** | `--volumes vol1,vol2` or `--volume vol1` | `object_type=volume` for READ/WRITE | Data-path IOPS/latency scoped to named volumes; reclaim/fabric/admin remain cluster supplement monitors |
+
+Volume names are resolved at startup via `GET /api/volumes/`. Invalid names produce a
+clear error before monitors are created.
+
+NFS protocols always operate at **cluster scope**; there is no volume filter flag for NFS.
+
+### Remote clusters via SSH tunnel
 
 ```bash
 # Terminal 1 — forward local 8443 to remote VMS HTTPS (443)
 ssh -L 8443:var203.selab.vastdata.com:443 user@jump-host
 
-# Terminal 2 — opstat via the tunnel
-./vast-opstat.py --nfs --version=3.0 --vms localhost --vms-port 8443 --user admin
+# Terminal 2 — any protocol through the tunnel
+./vast-opstat.py --block --nvme-over-tcp --vms localhost --vms-port 8443 --user admin
 ```
-
-NVMe-oTCP-only scoping flags:
-
-| Option | Description |
-|--------|-------------|
-| `--volume NAME` | Limit block stats to one volume |
-| `--volumes a,b,c` | Comma-separated volume names |
 
 ### API call logging
 
-Pass `--log-api-calls` to record every VMS HTTPS request and response to a file under
-`/tmp`. The log path is printed on startup:
+Pass `--log-api-calls` to record every VMS HTTPS request and response under `/tmp`.
+The log path is printed on startup. Authorization headers and passwords are never
+written to the log.
 
-```
-API call logging enabled: /tmp/vast-opstat-api-nvme-tcp-var203.selab.vastdata.com-443-12345.log
-```
+---
 
-Each line includes the HTTP method, full URL, elapsed time, status code, and a
-truncated response body. Authorization headers and passwords are never written to
-the log. Useful for debugging monitor creation, metric availability, and tunnel
-connectivity issues.
+## Features by Protocol
+
+### NFS v3
+
+- Four-panel TUI: health, insights, data I/O, metadata RPC table
+- VMS rate metrics with tenant cumulative delta engine for scoped drill-down
+- Interactive drill-down: cNode (`c`), view path (`v`), tenant (`t`); exit with `x`
+- Batch monitor ranking for view/tenant (top 8 by ops/s)
+
+See **[NFSv3_README.md](NFSv3_README.md)**.
+
+### NFS v4.1
+
+- Three-panel TUI: Data Operations, Stateful Overhead (VMS proxies), Session Workload
+- Native NFS4Common instantaneous rates (`__rate`, `rd_iops`) — no counter-delta engine
+- Hybrid NfsMetrics fallback when NFS4Common counters read zero
+- cNode / view / tenant drill-down (`c` / `v` / `t`)
+
+See **[NFSv41_README.md](NFSv41_README.md)**.
+
+### NVMe-oTCP (block)
+
+- Cluster-wide or multi-volume scoping (`--volume` / `--volumes`)
+- Dual-monitor loop: `BlockMetrics`/`VolumeMetrics` + `ProtoMetrics` (BlockCommon)
+- Counter-delta IOPS engine with elapsed-time state tracking
+- Drill-down: cNode (`c`), VIP (`v`), host initiator (`h`); return with `p`
+
+See **[NVMe_TCP_README.md](NVMe_TCP_README.md)**.
 
 ---
 
@@ -172,6 +161,8 @@ NFS v3 monitoring logic is based on the original work of **Jeff Mohler (J-Mo)** 
 From the repository root:
 
 ```bash
-pip install pytest pytest-mock   # one-time, for development
+python3 -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install pytest pytest-mock
 pytest tests/test_vast_opstat.py -v
 ```

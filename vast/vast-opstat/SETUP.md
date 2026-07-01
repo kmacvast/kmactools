@@ -4,6 +4,9 @@ Step-by-step instructions for running **vast-opstat** on a client machine with n
 Python experience. vast-opstat is a terminal dashboard that queries your VAST VMS for
 live NFS or NVMe-oTCP performance statistics.
 
+**Start here if you are new:** this guide covers macOS, Linux, and Windows before you
+read the protocol-specific references in [README.md](README.md).
+
 ---
 
 ## What You Need
@@ -15,8 +18,8 @@ live NFS or NVMe-oTCP performance statistics.
 | **Credentials** | VMS username and password (typically `admin`) |
 | **Git** | Optional but recommended for cloning the repository |
 
-No third-party Python packages are required to run vast-opstat — it uses the standard
-library only. See [requirements.txt](requirements.txt).
+No third-party Python packages are required to **run** vast-opstat — it uses the
+standard library only. See [requirements.txt](requirements.txt).
 
 ---
 
@@ -34,8 +37,6 @@ library only. See [requirements.txt](requirements.txt).
 python3 --version
 ```
 
-You should see `Python 3.8` or higher.
-
 **Option B — Homebrew**
 
 ```bash
@@ -43,60 +44,79 @@ brew install python
 python3 --version
 ```
 
+Optional: add Homebrew Python to your shell profile if `python3` is not found:
+
+```bash
+echo 'export PATH="/opt/homebrew/bin:$PATH"' >> ~/.zshrc   # Apple Silicon
+# or
+echo 'export PATH="/usr/local/bin:$PATH"' >> ~/.zshrc      # Intel Mac
+source ~/.zshrc
+```
+
+### Linux (Ubuntu lab / jump host)
+
+```bash
+sudo apt update && sudo apt install -y python3 python3-venv python3-pip
+python3 --version
+```
+
 ### Windows
 
 1. Download Python from [python.org/downloads](https://www.python.org/downloads/).
 2. Run the installer.
-3. **Important:** Check **"Add python.exe to PATH"** at the bottom of the first screen.
-4. Click **Install Now**.
-5. Open **PowerShell** or **Command Prompt** and verify:
+3. **Important:** Check **"Add python.exe to PATH"** on the first installer screen.
+4. Open **PowerShell** or **Command Prompt** and verify:
 
 ```powershell
 python --version
 ```
 
-You should see `Python 3.8` or higher.
+If `python` is not found, reopen the terminal or sign out/in after installation.
 
 ---
 
 ## 2. Get the Code
-
-If you already have the repository, skip to the next section.
 
 ```bash
 git clone <your-repo-url> kmactools
 cd kmactools/vast/vast-opstat
 ```
 
-If you received a zip archive, extract it and open a terminal in the
-`vast/vast-opstat` folder.
+If you received a zip archive, extract it and open a terminal in
+`kmactools/vast/vast-opstat`.
+
+**Path reference:**
+
+| Platform | Project directory |
+|----------|-------------------|
+| macOS / Linux | `kmactools/vast/vast-opstat` |
+| Windows | `kmactools\vast\vast-opstat` |
 
 ---
 
 ## 3. Create a Virtual Environment
 
-A virtual environment keeps vast-opstat isolated from other Python projects on your
-machine. Run these commands from the `vast/vast-opstat` directory.
+A virtual environment keeps vast-opstat isolated from other Python projects.
 
 ### macOS / Linux
 
 ```bash
-cd vast/vast-opstat
+cd kmactools/vast/vast-opstat
 python3 -m venv .venv
 source .venv/bin/activate
 ```
 
-Your prompt should now show `(.venv)` at the beginning.
+Your prompt should show `(.venv)`.
 
 ### Windows (PowerShell)
 
 ```powershell
-cd vast\vast-opstat
+cd kmactools\vast\vast-opstat
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 ```
 
-If PowerShell blocks the script, run once (as Administrator):
+If PowerShell blocks the script, run once (as Administrator or CurrentUser):
 
 ```powershell
 Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
@@ -107,52 +127,70 @@ Then activate again.
 ### Windows (Command Prompt)
 
 ```cmd
-cd vast\vast-opstat
+cd kmactools\vast\vast-opstat
 python -m venv .venv
 .venv\Scripts\activate.bat
 ```
 
+To deactivate any platform: `deactivate`
+
 ---
 
 ## 4. Install Dependencies
+
+With the virtual environment **activated**:
 
 ```bash
 pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-For vast-opstat runtime use, this step confirms your environment is ready. The
-requirements file documents that no external packages are needed; `pip` will simply
-finish with no packages installed.
+For vast-opstat **runtime**, this confirms the environment is ready (no external runtime
+packages are required). For **development tests**, also install:
+
+```bash
+pip install pytest pytest-mock
+```
 
 ---
 
 ## 5. Run vast-opstat
 
-Make sure your virtual environment is **activated** (`(.venv)` visible in the prompt).
+Replace `var203.selab.vastdata.com` with your VMS hostname. Omit `--password` to be
+prompted securely, or set `VAST_PASSWORD` in the environment.
 
-### NVMe-oTCP block monitoring (cluster-wide)
+### NFS v3 (macOS / Linux)
+
+```bash
+./vast-opstat.py --nfs --version=3.0 \
+  --vms var203.selab.vastdata.com --user admin
+```
+
+### NFS v4.1 (macOS / Linux)
+
+```bash
+./vast-opstat.py --nfs --version=4.1 \
+  --vms var203.selab.vastdata.com --user admin
+```
+
+### NVMe-oTCP block — cluster-wide
 
 **macOS / Linux:**
 
 ```bash
 ./vast-opstat.py --block --nvme-over-tcp \
-  --vms var203.selab.vastdata.com \
-  --user admin --password YOUR_PASSWORD
+  --vms var203.selab.vastdata.com --user admin
 ```
 
-**Windows:**
+**Windows (use `python` instead of `./`):**
 
 ```powershell
 python vast-opstat.py --block --nvme-over-tcp `
   --vms var203.selab.vastdata.com `
-  --user admin --password YOUR_PASSWORD
+  --user admin
 ```
 
-Replace `var203.selab.vastdata.com` with your VMS hostname or IP. If you omit
-`--password`, the tool prompts you securely.
-
-### NVMe-oTCP with volume scoping
+### NVMe-oTCP — multi-volume scoping
 
 ```bash
 ./vast-opstat.py --block --nvme-over-tcp \
@@ -161,36 +199,33 @@ Replace `var203.selab.vastdata.com` with your VMS hostname or IP. If you omit
   --user admin
 ```
 
-### NFS v3 monitoring
+Single-volume alias:
 
 ```bash
-./vast-opstat.py --nfs --version=3.0 \
-  --vms var203.selab.vastdata.com \
-  --user admin
+./vast-opstat.py --block --nvme-over-tcp \
+  --vms var203.selab.vastdata.com --volume my-vol --user admin
 ```
 
 ### Remote cluster via SSH tunnel (Teleport / zero-trust)
-
-When the VMS is on a remote cluster behind Teleport, a bastion, or other zero-trust
-access, open an SSH port forward first, then point opstat at the local end of the
-tunnel:
 
 ```bash
 # Terminal 1 — forward local port 8443 to remote VMS HTTPS (443)
 ssh -L 8443:var203.selab.vastdata.com:443 user@jump-host
 
-# Terminal 2 — connect through the tunnel
-./vast-opstat.py --nfs --version=3.0 \
-  --vms localhost --vms-port 8443 --user admin
+# Terminal 2 — any protocol through the tunnel
+./vast-opstat.py --nfs --version=3.0 --vms localhost --vms-port 8443 --user admin
+./vast-opstat.py --block --nvme-over-tcp --vms localhost --vms-port 8443 --user admin
 ```
 
-Use the same `--vms localhost --vms-port <LOCAL_PORT>` pattern for NVMe-oTCP block
-monitoring. Default port is `443` when `--vms-port` is omitted.
+Default port is `443` when `--vms-port` is omitted.
 
 ### Discover available metrics (no live dashboard)
 
 ```bash
 ./vast-opstat.py --block --nvme-over-tcp \
+  --vms var203.selab.vastdata.com --discover-metrics
+
+./vast-opstat.py --nfs --version=4.1 \
   --vms var203.selab.vastdata.com --discover-metrics
 ```
 
@@ -201,32 +236,50 @@ monitoring. Default port is `443` when `--vms-port` is omitted.
   --vms var203.selab.vastdata.com --log-api-calls --discover-metrics
 ```
 
-Log file location is printed on startup under `/tmp/vast-opstat-api-*.log`.
+Log file path is printed on startup: `/tmp/vast-opstat-api-*.log` (macOS/Linux).
+On Windows, `/tmp` resolves via the system temp directory.
 
 ---
 
 ## 6. Using the Dashboard
 
-Once running, the terminal shows live statistics. Key controls for NVMe-oTCP:
+Once running, the terminal shows live statistics.
+
+### NVMe-oTCP keys
 
 | Key | Action |
 |-----|--------|
 | `h` | Host / initiator drill-down |
-| `v` | VIP path drill-down |
+| `v` | **VIP** path drill-down (not NFS View) |
 | `c` | cNode path drill-down |
 | `p` | Return to main view |
 | `r` | Reset session stats |
 | `q` | Quit |
 
-Full NVMe-oTCP documentation: [NVMe_TCP_README.md](NVMe_TCP_README.md)
+Full reference: [NVMe_TCP_README.md](NVMe_TCP_README.md)
+
+### NFS v3 / v4.1 keys
+
+| Key | Action |
+|-----|--------|
+| `c` | cNode drill-down |
+| `v` | View drill-down |
+| `t` | Tenant drill-down |
+| `x` | Exit drill-down |
+| `q` | Quit |
+
+References: [NFSv3_README.md](NFSv3_README.md), [NFSv41_README.md](NFSv41_README.md)
 
 ---
 
 ## 7. Running Tests (Optional)
 
-From the **repository root** (not only `vast-opstat`):
+From the **repository root** (`kmactools/`), not only `vast-opstat/`:
 
 ```bash
+cd kmactools
+python3 -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install pytest pytest-mock
 pytest tests/test_vast_opstat.py -v
 ```
@@ -240,14 +293,17 @@ pytest tests/test_vast_opstat.py -v
 | `python3: command not found` (Mac/Linux) | Install Python or use `python` instead of `python3` |
 | `python: command not found` (Windows) | Re-run installer with **Add to PATH** checked |
 | `Permission denied` running `./vast-opstat.py` | Run `python vast-opstat.py ...` instead |
+| PowerShell cannot run activate script | `Set-ExecutionPolicy RemoteSigned -Scope CurrentUser` |
 | SSL / certificate warnings | Expected in lab environments; opstat disables cert verification for internal VMS |
-| Blank or warming-up stats | Wait one refresh cycle (~5 s) for counter delta baselines |
-| Volume not found | Verify name with `GET /api/volumes/` or `--discover-metrics` |
+| Blank or warming-up stats (block) | Wait one refresh cycle (~5 s) for counter delta baselines |
+| Volume not found | Verify name with `--discover-metrics` or `GET /api/volumes/` |
+| Wrong drill key on block (`v`) | On block, `v` = VIP; NFS View drill is NFS-only |
 
 ---
 
 ## Next Steps
 
 - [README.md](README.md) — protocol matrix and shared CLI options
-- [NVMe_TCP_README.md](NVMe_TCP_README.md) — block monitoring deep dive
 - [NFSv3_README.md](NFSv3_README.md) — NFS v3 monitoring reference
+- [NFSv41_README.md](NFSv41_README.md) — NFS v4.1 proxy architecture
+- [NVMe_TCP_README.md](NVMe_TCP_README.md) — block monitoring deep dive

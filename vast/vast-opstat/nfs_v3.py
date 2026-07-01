@@ -10,7 +10,7 @@
 #              interactive sorting, drill-down by cNode/view/tenant,
 #              CSV export, and runtime historical statistics.
 #
-# Version:     1.1.0
+# Version:     0.1.1
 # Date:        2026-06-17
 # Author:      JMo
 # Revised:     KMac
@@ -79,7 +79,7 @@ _NFS_DRILL_BW = 9
 _NFS_DRILL_RPC = 12
 _NFS_DRILL_TOP_PCT = 6
 
-VERSION = "1.1.0"
+VERSION = "0.1.1"
 
 DEFAULT_PORT = 443
 DEFAULT_USER = "admin"
@@ -118,26 +118,56 @@ IO_LABELS   = frozenset({"READ", "WRITE"})
 META_LABELS = frozenset(label for _, label in OPS) - IO_LABELS
 
 # Drill-down configuration — object_type values are the VAST API monitor parameter names.
-# API endpoints and field names are based on common VAST VMS API conventions.
+# cnode scopes use NfsMetrics; view/tenant scopes use ViewMetrics/TenantMetrics
+# (NfsMetrics query returns HTTP 400 for view/tenant on current VMS builds).
+_VIEW_READ_IOPS = "ViewMetrics,read_iops__rate"
+_VIEW_WRITE_IOPS = "ViewMetrics,write_iops__rate"
+_VIEW_READ_MD = "ViewMetrics,read_md_iops__rate"
+_VIEW_WRITE_MD = "ViewMetrics,write_md_iops__rate"
+_VIEW_READ_LAT = "ViewMetrics,read_latency__avg"
+_VIEW_WRITE_LAT = "ViewMetrics,write_latency__avg"
+_VIEW_READ_BW = "ViewMetrics,read_bw__rate"
+_VIEW_WRITE_BW = "ViewMetrics,write_bw__rate"
+
+_TENANT_READ_IOPS = "TenantMetrics,read_iops__sum"
+_TENANT_WRITE_IOPS = "TenantMetrics,write_iops__sum"
+_TENANT_READ_MD = "TenantMetrics,read_md_iops__sum"
+_TENANT_WRITE_MD = "TenantMetrics,write_md_iops__sum"
+_TENANT_READ_BW = "TenantMetrics,read_bw__sum"
+_TENANT_WRITE_BW = "TenantMetrics,write_bw__sum"
+_TENANT_READ_LAT = "TenantMetrics,read_latency__sum"
+_TENANT_WRITE_LAT = "TenantMetrics,write_latency__sum"
+_TENANT_READ_CNT = "TenantMetrics,read_iops__num_samples"
+_TENANT_WRITE_CNT = "TenantMetrics,write_iops__num_samples"
+_TENANT_READ_MD_CNT = "TenantMetrics,read_md_iops__num_samples"
+_TENANT_WRITE_MD_CNT = "TenantMetrics,write_md_iops__num_samples"
+
 _DRILL_CFG = {
     "cnode":  {
+        "label": "CNODE",
         "object_type": "cnode",
         "endpoint":    "/cnodes/",
         "name_fields": ("name", "hostname", "mgmt_ip"),
+        "no_aggregation": False,
     },
     "view":   {
+        "label": "VIEW",
         "object_type": "view",
         "endpoint":    "/views/",
         "name_fields": ("path", "title", "name"),
+        "no_aggregation": True,
     },
     "tenant": {
+        "label": "TENANT",
         "object_type": "tenant",
         "endpoint":    "/tenants/",
         "name_fields": ("name",),
+        "no_aggregation": False,
     },
 }
 
-_MAX_DRILL_OBJECTS = 8      # cap to keep API call count reasonable
+_MAX_DRILL_OBJECTS = 8      # rows displayed / permanent monitors after ranking
+_DRILL_PROBE_LIMIT = 32     # view/tenant candidates probed to find top activity
 
 
 # ---------------------------------------------------------------------------
@@ -175,9 +205,10 @@ PREV_ROWS   = []       # rows from previous refresh cycle — used for delta dis
 
 DRILL_MODE     = None  # None | "cnode" | "view" | "tenant"
 DRILL_OBJECTS  = []    # [{"id": ..., "name": ...}, ...]
-DRILL_MONITORS = []    # [(rpc_monitor_id, bw_monitor_id, object_name), ...]
+DRILL_MONITORS = []    # [(monitor_id, object_name), ...]
 LAST_DRILL_ROWS = []   # [{"name": ..., "total_ops": ..., "latency_us": ..., ...}]
 DRILL_ERROR    = None  # set when drill-down fails; cleared on success
+DRILL_STATUS   = None  # transient "Switching to …" message during drill setup
 
 RUN_STARTED_AT = None
 
@@ -208,7 +239,7 @@ def init_config(args):
     global RPC_MONITOR_ID, BW_MONITOR_ID, CLUSTER_ID, CLUSTER_NAME, SORT_MODE
     global ORIGINAL_TERMINAL_SETTINGS, KEYBOARD_ENABLED
     global LAST_ROWS, LAST_SAMPLE, PREV_ROWS
-    global DRILL_MODE, DRILL_OBJECTS, DRILL_MONITORS, LAST_DRILL_ROWS, DRILL_ERROR
+    global DRILL_MODE, DRILL_OBJECTS, DRILL_MONITORS, LAST_DRILL_ROWS, DRILL_ERROR, DRILL_STATUS
 
     ARGS = args
 
@@ -270,6 +301,7 @@ def init_config(args):
     DRILL_MONITORS = []
     LAST_DRILL_ROWS = []
     DRILL_ERROR = None
+    DRILL_STATUS = None
 
 CSV_HEADER = [
     "local_time", "runtime", "vms", "port", "cluster", "cluster_id",
@@ -546,26 +578,51 @@ def build_bw_prop_list():
     return [NFS_READ_BW_FQN, NFS_WRITE_BW_FQN]
 
 
-def _create_monitor_raw(name_suffix, prop_list, object_type, object_ids):
+def build_drill_prop_list(mode):
+    """Scope-aware monitor props — NfsMetrics only work for cluster/cnode scopes."""
+    if mode == "view":
+        return [
+            _VIEW_READ_IOPS, _VIEW_WRITE_IOPS,
+            _VIEW_READ_MD, _VIEW_WRITE_MD,
+            _VIEW_READ_LAT, _VIEW_WRITE_LAT,
+            _VIEW_READ_BW, _VIEW_WRITE_BW,
+        ]
+    if mode == "tenant":
+        return [
+            _TENANT_READ_IOPS, _TENANT_WRITE_IOPS,
+            _TENANT_READ_MD, _TENANT_WRITE_MD,
+            _TENANT_READ_BW, _TENANT_WRITE_BW,
+            _TENANT_READ_LAT, _TENANT_WRITE_LAT,
+            _TENANT_READ_CNT, _TENANT_WRITE_CNT,
+            _TENANT_READ_MD_CNT, _TENANT_WRITE_MD_CNT,
+        ]
+    return build_rpc_prop_list() + build_bw_prop_list()
+
+
+def _create_monitor_raw(name_suffix, prop_list, object_type, object_ids, *, no_aggregation=False):
     """Core monitor creation — object_type and object_ids are caller-supplied."""
     base_payload = {
-        "name":              f"adhoc_vast-opstat_{name_suffix}_{int(time.time())}",
-        "object_type":       object_type,
-        "object_ids":        object_ids,
-        "time_frame":        API_TIME_FRAME,
-        "aggregation":       "avg",
-        "query_aggregation": "avg",
-        "prop_list":         prop_list,
+        "name":        f"adhoc_vast-opstat_{name_suffix}_{int(time.time())}",
+        "object_type": object_type,
+        "object_ids":  object_ids,
+        "time_frame":  API_TIME_FRAME,
+        "prop_list":   prop_list,
     }
-    payload = {**base_payload, "granularity": "auto"}
+    if not no_aggregation:
+        base_payload["aggregation"] = "avg"
+        base_payload["query_aggregation"] = "avg"
 
-    try:
-        result = api_request("POST", "/monitors/", payload)
-    except RuntimeError as e:
-        msg = str(e)
-        if "Invalid granularity: auto" not in msg and "no such granularity auto" not in msg:
-            raise
+    if no_aggregation:
         result = api_request("POST", "/monitors/", base_payload)
+    else:
+        payload = {**base_payload, "granularity": "auto"}
+        try:
+            result = api_request("POST", "/monitors/", payload)
+        except RuntimeError as e:
+            msg = str(e)
+            if "Invalid granularity: auto" not in msg and "no such granularity auto" not in msg:
+                raise
+            result = api_request("POST", "/monitors/", base_payload)
 
     monitor_id = result.get("id") if isinstance(result, dict) else None
     if not monitor_id:
@@ -1177,10 +1234,191 @@ def _obj_name(obj, name_fields):
 
 def _cleanup_drill_monitors():
     global DRILL_MONITORS
-    for rpc_id, bw_id, _name in DRILL_MONITORS:
-        delete_monitor(rpc_id)
-        delete_monitor(bw_id)
+    for monitor_id, _name in DRILL_MONITORS:
+        delete_monitor(monitor_id)
     DRILL_MONITORS = []
+
+
+def _parse_sample_ts(sample):
+    if not sample or sample == "-":
+        return None
+    try:
+        return datetime.fromisoformat(str(sample).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _values_from_result(result):
+    prop_list, data, prop_idx = _result_parts(result)
+    if not data:
+        return {}, prop_idx, "-"
+    row = data[0]
+    sample = row[0] if row else "-"
+    values = {}
+    for name, idx in prop_idx.items():
+        if idx < len(row):
+            values[name] = row[idx]
+    return values, prop_idx, sample
+
+
+def _delta_rate_from_samples(result, sum_fqn):
+    """Derive an average rate from cumulative __sum samples in a monitor query."""
+    prop_list, data, prop_idx = _result_parts(result)
+    idx = prop_idx.get(sum_fqn)
+    if idx is None or len(data) < 2:
+        return None
+    newest, oldest = data[0], data[-1]
+    t_new = _parse_sample_ts(newest[0])
+    t_old = _parse_sample_ts(oldest[0])
+    if not t_new or not t_old:
+        return None
+    dt = abs((t_new - t_old).total_seconds())
+    if dt <= 0:
+        return None
+    delta = as_float(newest[idx])
+    old = as_float(oldest[idx])
+    if delta is None or old is None:
+        return None
+    return max(delta - old, 0.0) / dt
+
+
+def _avg_from_sum_count_deltas(result, sum_fqn, count_fqn):
+    prop_list, data, prop_idx = _result_parts(result)
+    idx_s, idx_c = prop_idx.get(sum_fqn), prop_idx.get(count_fqn)
+    if idx_s is None or idx_c is None or len(data) < 2:
+        return None
+    sum_delta = as_float(data[0][idx_s]) - as_float(data[-1][idx_s])
+    cnt_delta = as_float(data[0][idx_c]) - as_float(data[-1][idx_c])
+    if sum_delta is None or cnt_delta is None or cnt_delta <= 0:
+        return None
+    return sum_delta / cnt_delta
+
+
+def _weighted_us(pairs):
+    valid = [(w, v) for w, v in pairs if (w or 0) > 0 and v is not None]
+    weight = sum(w for w, _v in valid)
+    if weight <= 0:
+        return None
+    return sum(w * v for w, v in valid) / weight
+
+
+def _drill_top_op(op_pairs):
+    active = [(label, ops) for label, ops in op_pairs if (ops or 0) > 0]
+    if not active:
+        return "-", None
+    top_label, top_ops = max(active, key=lambda item: item[1])
+    total = sum(ops for _, ops in active)
+    pct = (top_ops / total * 100.0) if total > 0 else None
+    return top_label, pct
+
+
+def _build_cnode_drill_row(result, obj_name):
+    rows, _sample = build_rows_from_results(result, result)
+    total_ops = sum(as_float(r["ops_sec"]) or 0 for r in rows)
+    latency = compute_combined_avg_latency(rows)
+    bw = compute_total_throughput_gbs(rows)
+    active = [r for r in rows if (as_float(r["ops_sec"]) or 0) > 0]
+    top = max(active, key=lambda r: as_float(r["ops_sec"]) or 0, default=None)
+    return {
+        "name": obj_name,
+        "total_ops": total_ops if total_ops > 0 else None,
+        "latency_us": latency,
+        "bw_gbs": bw if bw else None,
+        "top_rpc": top["label"] if top else "-",
+        "top_rpc_pct": as_float(top["pct"]) if top else None,
+    }
+
+
+def _build_view_drill_row(result, obj_name):
+    values, _prop_idx, _sample = _values_from_result(result)
+    read_ops = as_float(values.get(_VIEW_READ_IOPS)) or 0.0
+    write_ops = as_float(values.get(_VIEW_WRITE_IOPS)) or 0.0
+    read_md = as_float(values.get(_VIEW_READ_MD)) or 0.0
+    write_md = as_float(values.get(_VIEW_WRITE_MD)) or 0.0
+    total_ops = read_ops + write_ops + read_md + write_md
+    latency = _weighted_us([
+        (read_ops, as_float(values.get(_VIEW_READ_LAT))),
+        (write_ops, as_float(values.get(_VIEW_WRITE_LAT))),
+    ])
+    read_bw = raw_bw_to_gb_sec(values.get(_VIEW_READ_BW)) or 0.0
+    write_bw = raw_bw_to_gb_sec(values.get(_VIEW_WRITE_BW)) or 0.0
+    top_rpc, top_pct = _drill_top_op([
+        ("READ", read_ops), ("WRITE", write_ops),
+        ("RD MD", read_md), ("WR MD", write_md),
+    ])
+    return {
+        "name": obj_name,
+        "total_ops": total_ops if total_ops > 0 else None,
+        "latency_us": latency,
+        "bw_gbs": (read_bw + write_bw) if (read_bw + write_bw) > 0 else None,
+        "top_rpc": top_rpc,
+        "top_rpc_pct": top_pct,
+    }
+
+
+def _build_tenant_drill_row(result, obj_name):
+    read_ops = _delta_rate_from_samples(result, _TENANT_READ_IOPS) or 0.0
+    write_ops = _delta_rate_from_samples(result, _TENANT_WRITE_IOPS) or 0.0
+    read_md = _delta_rate_from_samples(result, _TENANT_READ_MD) or 0.0
+    write_md = _delta_rate_from_samples(result, _TENANT_WRITE_MD) or 0.0
+    total_ops = read_ops + write_ops + read_md + write_md
+    read_lat = _avg_from_sum_count_deltas(result, _TENANT_READ_LAT, _TENANT_READ_CNT)
+    write_lat = _avg_from_sum_count_deltas(result, _TENANT_WRITE_LAT, _TENANT_WRITE_CNT)
+    latency = _weighted_us([(read_ops, read_lat), (write_ops, write_lat)])
+    read_bw = _delta_rate_from_samples(result, _TENANT_READ_BW)
+    write_bw = _delta_rate_from_samples(result, _TENANT_WRITE_BW)
+    read_bw_gbs = raw_bw_to_gb_sec(read_bw) or 0.0
+    write_bw_gbs = raw_bw_to_gb_sec(write_bw) or 0.0
+    top_rpc, top_pct = _drill_top_op([
+        ("READ", read_ops), ("WRITE", write_ops),
+        ("RD MD", read_md), ("WR MD", write_md),
+    ])
+    return {
+        "name": obj_name,
+        "total_ops": total_ops if total_ops > 0 else None,
+        "latency_us": latency,
+        "bw_gbs": (read_bw_gbs + write_bw_gbs) if (read_bw_gbs + write_bw_gbs) > 0 else None,
+        "top_rpc": top_rpc,
+        "top_rpc_pct": top_pct,
+    }
+
+
+def _build_drill_row(mode, result, obj_name):
+    if mode == "view":
+        return _build_view_drill_row(result, obj_name)
+    if mode == "tenant":
+        return _build_tenant_drill_row(result, obj_name)
+    return _build_cnode_drill_row(result, obj_name)
+
+
+def _rank_drill_candidates(mode, objects, cfg):
+    """Probe view/tenant objects and return the top-N by current ops/s."""
+    prop_list = build_drill_prop_list(mode)
+    ranked = []
+    probe_ids = []
+    for obj in objects:
+        obj_id = obj["id"]
+        name = _obj_name(obj, cfg["name_fields"])
+        ops = 0.0
+        try:
+            monitor_id = _create_monitor_raw(
+                f"probe_{mode}_{obj_id}",
+                prop_list,
+                cfg["object_type"],
+                [obj_id],
+                no_aggregation=cfg.get("no_aggregation", False),
+            )
+            probe_ids.append(monitor_id)
+            result = api_request("GET", f"/monitors/{monitor_id}/query/")
+            row = _build_drill_row(mode, result, name)
+            ops = as_float(row.get("total_ops")) or 0.0
+        except RuntimeError:
+            pass
+        ranked.append({"id": obj_id, "name": name, "total_ops": ops})
+    for monitor_id in probe_ids:
+        delete_monitor(monitor_id)
+    ranked.sort(key=lambda item: (-item["total_ops"], item["name"].lower()))
+    return [{"id": item["id"], "name": item["name"]} for item in ranked[:_MAX_DRILL_OBJECTS]]
 
 
 def enter_drill_mode(mode):
@@ -1191,7 +1429,6 @@ def enter_drill_mode(mode):
         DRILL_ERROR = f"Unknown drill mode: {mode}"
         return
 
-    # Fetch the list of objects of this type
     try:
         data    = api_request("GET", cfg["endpoint"])
         objects = normalize_list_response(data)
@@ -1203,33 +1440,49 @@ def enter_drill_mode(mode):
         DRILL_ERROR = f"No {mode} objects returned from {cfg['endpoint']}"
         return
 
-    # Keep only objects that have an 'id' field, cap at _MAX_DRILL_OBJECTS
-    valid   = [o for o in objects if "id" in o][:_MAX_DRILL_OBJECTS]
-    names   = [_obj_name(o, cfg["name_fields"]) for o in valid]
-    ids     = [o["id"] for o in valid]
+    all_valid = [o for o in objects if "id" in o]
+    if mode in ("view", "tenant"):
+        probe_pool = all_valid[:_DRILL_PROBE_LIMIT]
+        DRILL_OBJECTS = _rank_drill_candidates(mode, probe_pool, cfg)
+    else:
+        selected = all_valid[:_MAX_DRILL_OBJECTS]
+        DRILL_OBJECTS = [
+            {"id": o["id"], "name": _obj_name(o, cfg["name_fields"])}
+            for o in selected
+        ]
 
-    DRILL_OBJECTS = [{"id": ids[i], "name": names[i]} for i in range(len(ids))]
+    if not DRILL_OBJECTS:
+        DRILL_ERROR = f"No valid {mode} objects available for drill-down"
+        return
 
-    # Create one pair of monitors per object
     _cleanup_drill_monitors()
+    prop_list = build_drill_prop_list(mode)
     new_monitors = []
+    last_error = None
     for obj in DRILL_OBJECTS:
         try:
-            rpc_id = _create_monitor_raw(
-                f"{mode}_{obj['id']}_rpc", build_rpc_prop_list(),
-                cfg["object_type"], [obj["id"]],
+            monitor_id = _create_monitor_raw(
+                f"{mode}_{obj['id']}",
+                prop_list,
+                cfg["object_type"],
+                [obj["id"]],
+                no_aggregation=cfg.get("no_aggregation", False),
             )
-            bw_id = _create_monitor_raw(
-                f"{mode}_{obj['id']}_bw", build_bw_prop_list(),
-                cfg["object_type"], [obj["id"]],
-            )
-            new_monitors.append((rpc_id, bw_id, obj["name"]))
+            new_monitors.append((monitor_id, obj["name"]))
         except RuntimeError as e:
-            # Skip objects whose monitors can't be created
-            pass
+            last_error = str(e)
 
     if not new_monitors:
-        DRILL_ERROR = f"Could not create any {mode} monitors (object_type='{cfg['object_type']}' may not be supported)"
+        hint = ""
+        if mode == "view":
+            hint = " (view monitors require seconds resolution without aggregation)"
+        elif mode == "tenant":
+            hint = " (tenant scope requires TenantMetrics counters)"
+        detail = f": {last_error}" if last_error else ""
+        DRILL_ERROR = (
+            f"Could not create any {mode} monitors (object_type="
+            f"'{cfg['object_type']}' may not be supported){hint}{detail}"
+        )
         DRILL_OBJECTS = []
         return
 
@@ -1240,41 +1493,54 @@ def enter_drill_mode(mode):
 
 
 def exit_drill_mode():
-    global DRILL_MODE, DRILL_OBJECTS, LAST_DRILL_ROWS, DRILL_ERROR
+    global DRILL_MODE, DRILL_OBJECTS, LAST_DRILL_ROWS, DRILL_ERROR, DRILL_STATUS
     _cleanup_drill_monitors()
     DRILL_MODE      = None
     DRILL_OBJECTS   = []
     LAST_DRILL_ROWS = []
     DRILL_ERROR     = None
+    DRILL_STATUS    = None
 
 
 def fetch_drill_query():
-    global LAST_DRILL_ROWS
+    global LAST_DRILL_ROWS, DRILL_ERROR
+    if not DRILL_MODE:
+        return
     drill_rows = []
-    for rpc_id, bw_id, obj_name in DRILL_MONITORS:
+    query_errors = 0
+    for monitor_id, obj_name in DRILL_MONITORS:
         try:
-            rpc_result = api_request("GET", f"/monitors/{rpc_id}/query/")
-            bw_result  = api_request("GET", f"/monitors/{bw_id}/query/")
-            rows, _    = build_rows_from_results(rpc_result, bw_result)
-            if not rows:
-                continue
-            total_ops = sum(as_float(r["ops_sec"]) or 0 for r in rows)
-            latency   = compute_combined_avg_latency(rows)
-            bw        = compute_total_throughput_gbs(rows)
-            # Top RPC by ops
-            active   = [r for r in rows if (as_float(r["ops_sec"]) or 0) > 0]
-            top      = max(active, key=lambda r: as_float(r["ops_sec"]) or 0, default=None)
-            drill_rows.append({
-                "name":         obj_name,
-                "total_ops":    total_ops,
-                "latency_us":   latency,
-                "bw_gbs":       bw,
-                "top_rpc":      top["label"] if top else "-",
-                "top_rpc_pct":  as_float(top["pct"]) if top else None,
-            })
+            result = api_request("GET", f"/monitors/{monitor_id}/query/")
+            drill_rows.append(_build_drill_row(DRILL_MODE, result, obj_name))
         except RuntimeError:
-            pass
-    LAST_DRILL_ROWS = sorted(drill_rows, key=lambda r: r["total_ops"] or 0, reverse=True)
+            query_errors += 1
+    LAST_DRILL_ROWS = sorted(
+        drill_rows,
+        key=lambda r: r["total_ops"] or 0,
+        reverse=True,
+    )
+    if not LAST_DRILL_ROWS and query_errors:
+        DRILL_ERROR = (
+            f"{DRILL_MODE} drill monitors returned no data "
+            f"({query_errors}/{len(DRILL_MONITORS)} queries failed)"
+        )
+
+
+def switch_drill_mode(mode):
+    """Enter drill mode with an immediate standby message for slow monitor setup."""
+    global DRILL_STATUS, SORT_MODE
+    cfg = _DRILL_CFG.get(mode, {})
+    exit_drill_mode()
+    if mode in ("view", "tenant"):
+        SORT_MODE = "ops"
+    DRILL_STATUS = f"Switching to {cfg.get('label', mode.upper())} drill-down, stand by..."
+    render_screen()
+    try:
+        enter_drill_mode(mode)
+        if DRILL_MODE:
+            fetch_drill_query()
+    finally:
+        DRILL_STATUS = None
 
 
 # ---------------------------------------------------------------------------
@@ -1622,6 +1888,12 @@ def _render_metadata_panel(rows, deltas, width):
 
 
 def _render_drill_panel(width):
+    if DRILL_STATUS:
+        print(box_top("DRILL-DOWN", width))
+        print(box_row(c(DRILL_STATUS, _YELLOW), width))
+        print(box_bottom(width))
+        return
+
     if DRILL_ERROR:
         mode_t = DRILL_MODE.upper() + " DRILL-DOWN" if DRILL_MODE else "DRILL-DOWN"
         print(box_top(mode_t, width))
@@ -1711,7 +1983,7 @@ def render_screen():
     print(c(_H * width, _DIM))
 
     # ── Panels ───────────────────────────────────────────────────────────────
-    if DRILL_MODE or DRILL_ERROR:
+    if DRILL_MODE or DRILL_ERROR or DRILL_STATUS:
         _render_drill_panel(width)
     else:
         _render_health_panel(rows, total_ops, combined_latency, total_bw, deltas, width)
@@ -1884,20 +2156,11 @@ def main():
             elif "w" in ch:
                 SORT_MODE = "workload"
             elif "c" in ch:
-                exit_drill_mode()
-                enter_drill_mode("cnode")
-                if DRILL_MODE:
-                    fetch_drill_query()
+                switch_drill_mode("cnode")
             elif "v" in ch:
-                exit_drill_mode()
-                enter_drill_mode("view")
-                if DRILL_MODE:
-                    fetch_drill_query()
+                switch_drill_mode("view")
             elif "t" in ch:
-                exit_drill_mode()
-                enter_drill_mode("tenant")
-                if DRILL_MODE:
-                    fetch_drill_query()
+                switch_drill_mode("tenant")
             elif "x" in ch:
                 exit_drill_mode()
             elif " " in chars:

@@ -19,7 +19,7 @@ echo "======================================================================"
 echo " -> Target Mount: $MOUNT_POINT"
 echo " -> Exercising: Compounding, State Delegations, POSIX Byte-Locks,"
 echo "                Attribute Caching (SETATTR/GETATTR), & Parallel I/O  "
-echo "----------------------------------------------------------------------"
+----------------------------------------------------------------------
 echo " [+] RUNNING FOREVER. Press [Ctrl + C] to cleanly abort everything.   "
 echo "======================================================================"
 
@@ -45,13 +45,12 @@ trap cleanup INT TERM
 echo "[+] Starting NFSv4 Byte-Range Locking loop..."
 touch "$MOUNT_POINT/lock_stress.dat"
 while true; do
-  # Utilizing flock to force the NFSv4.1 client to acquire and release stateful locks
   (
     flock -x 200
     echo "$(date): Lock Acquired By Process $$" >> "$MOUNT_POINT/lock_stress.dat"
   ) 200>"$MOUNT_POINT/lock_stress.dat"
   sleep 0.1
-done &
+done >/dev/null 2>&1 &
 PID_LOCK=$!
 
 # ----------------------------------------------------------------------
@@ -59,8 +58,8 @@ PID_LOCK=$!
 # ----------------------------------------------------------------------
 echo "[+] Starting Metadata & Compounding Stress (OPEN/CLOSE/LOOKUP/REMOVE)..."
 while true; do
-  # Rapidly build deep trees to force COMPOUND RPC structures
-  mkdir -p "$MOUNT_POINT/meta_stress/dir_{1..5}"
+  # Fix: Keep braces outside quotes so Bash expands them properly
+  mkdir -p "$MOUNT_POINT/meta_stress"/dir_{1..5}
   for i in {1..40}; do
     touch "$MOUNT_POINT/meta_stress/dir_$((1 + RANDOM % 5))/file_$i"
   done
@@ -69,7 +68,7 @@ while true; do
   # Destroy and repeat
   rm -rf "$MOUNT_POINT/meta_stress"
   sleep 0.2
-done &
+done >/dev/null 2>&1 &
 PID_META=$!
 
 # ----------------------------------------------------------------------
@@ -79,12 +78,11 @@ echo "[+] Starting NFSv4 Attribute Tuning Loop (GETATTR/SETATTR)..."
 touch "$MOUNT_POINT/attr_stress.txt"
 while true; do
   chmod 777 "$MOUNT_POINT/attr_stress.txt"
-  # Attempt typical ownership updates to trigger ID mapper evaluations
   chown nobody:nogroup "$MOUNT_POINT/attr_stress.txt" 2>/dev/null || chown nobody:nobody "$MOUNT_POINT/attr_stress.txt" 2>/dev/null
   chmod 600 "$MOUNT_POINT/attr_stress.txt"
   stat "$MOUNT_POINT/attr_stress.txt" >/dev/null 2>&1
   sleep 0.1
-done &
+done >/dev/null 2>&1 &
 PID_ATTR=$!
 
 # ----------------------------------------------------------------------

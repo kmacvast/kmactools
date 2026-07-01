@@ -39,6 +39,9 @@ cd vast/vast-opstat
 
 # NFS v3
 ./vast-opstat.py --nfs --version=3.0 --vms <VMS_HOST> --user <USER>
+
+# NFS v4.1
+./vast-opstat.py --nfs --version=4.1 --vms <VMS_HOST> --user <USER>
 ```
 
 ---
@@ -49,7 +52,7 @@ cd vast/vast-opstat
 |----------|-----------|--------|---------------|
 | **NVMe-oTCP** | `--block --nvme-over-tcp` | **Fully Implemented** | **[NVMe_TCP_README.md](NVMe_TCP_README.md)** |
 | NFS v3 | `--nfs --version=3.0` | Implemented | [NFSv3_README.md](NFSv3_README.md) |
-| NFS v4.1 | `--nfs --version=4.1` | Planned | — |
+| NFS v4.1 | `--nfs --version=4.1` | **Implemented** | **[NFSv41_README.md](NFSv41_README.md)** |
 | NFS v4.2 | `--nfs --version=4.2` | Planned | — |
 | SMB | `--smb` | Planned | — |
 
@@ -57,7 +60,7 @@ cd vast/vast-opstat
 
 - `--block` requires `--nvme-over-tcp`.
 - `--volume NAME` or `--volumes a,b,c` scope NVMe-oTCP stats to named volumes (optional).
-- `--version` is **required** with `--nfs` (e.g. `--version=3.0`).
+- `--version` is **required** with `--nfs` (e.g. `--version=3.0` or `--version=4.1`).
 - `--version` is **not** used with `--smb`.
 - Use `-V` / `--tool-version` to print the vast-opstat release version.
 
@@ -76,6 +79,15 @@ cd vast/vast-opstat
 
 See **[NVMe_TCP_README.md](NVMe_TCP_README.md)** for CLI syntax, metric calculations,
 keybinds, and architecture.
+
+### NFS v4.1
+
+- Three-panel TUI: Data Operations, Stateful Metadata & Locking, Session Overhead
+- NFS4Common ProtoMetrics for read/write IOPS, throughput, size, and latency
+- Aggregate metadata/session fallbacks when per-op counters are absent
+- cNode / View / Tenant drill-down (`c` / `v` / `t`)
+
+See **[NFSv41_README.md](NFSv41_README.md)**.
 
 ### NFS v3
 

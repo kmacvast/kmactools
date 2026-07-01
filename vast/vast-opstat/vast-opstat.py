@@ -2,8 +2,8 @@
 ################################################################################
 # Script Name: vast-opstat.py
 # Description: Multi-protocol VAST performance statistics tool. Phase 1 routes
-#              --nfs --version=3.0 to NFS v3; Phase 2 routes --block
-#              --nvme-over-tcp to NVMe-oTCP block statistics.
+#              --nfs --version=3.0 to NFS v3; --nfs --version=4.1 to NFS v4.1;
+#              Phase 2 routes --block --nvme-over-tcp to NVMe-oTCP block statistics.
 #
 # Author: KMac kmac@vastdata.com
 # Version: 1.0.0
@@ -18,6 +18,7 @@ if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
 import nfs_v3
+import nfs_v41
 import nvme_tcp
 
 VERSION = "1.0.0"
@@ -26,8 +27,8 @@ DEFAULT_PORT = 443
 DEFAULT_USER = "admin"
 DEFAULT_REFRESH_SECONDS = 5
 
-SUPPORTED_NFS_VERSIONS = frozenset({"3.0"})
-PLANNED_NFS_VERSIONS = frozenset({"4.1", "4.2"})
+SUPPORTED_NFS_VERSIONS = frozenset({"3.0", "4.1"})
+PLANNED_NFS_VERSIONS = frozenset({"4.2"})
 
 
 def new_argument_parser(description):
@@ -200,6 +201,8 @@ def dispatch(args):
     """Route parsed arguments to the appropriate protocol handler."""
     if args.nfs and args.protocol_version == "3.0":
         return nfs_v3.run(args)
+    if args.nfs and args.protocol_version == "4.1":
+        return nfs_v41.run(args)
     if args.block and args.nvme_over_tcp:
         return nvme_tcp.run(args)
     raise SystemExit("ERROR: No protocol handler matched the supplied flags.")

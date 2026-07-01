@@ -59,6 +59,25 @@ import urllib.request
 from datetime import datetime
 
 import vast_api_log
+from tui_layout import display_width, join_columns, pad_display, format_fixed_number, format_scaled_metric
+
+# NFS table column widths — headers and data rows must share these exactly.
+_NFS_COL_SEP = " "
+_NFS_COL_PROC = 12
+_NFS_COL_OPS = 12
+_NFS_COL_PCT = 7
+_NFS_COL_LAT = 10
+_NFS_COL_BW = 9
+_NFS_COL_IO = 10
+
+# Drill-down table column widths.
+_NFS_DRILL_SEP = " "
+_NFS_DRILL_NAME = 24
+_NFS_DRILL_OPS = 12
+_NFS_DRILL_LAT = 10
+_NFS_DRILL_BW = 9
+_NFS_DRILL_RPC = 12
+_NFS_DRILL_TOP_PCT = 6
 
 VERSION = "1.1.0"
 
@@ -269,14 +288,13 @@ _ANSI_RE = re.compile(r"\033\[[^m]*m")
 
 
 def _vlen(s):
-    """Visual display width of a string — strips ANSI escape codes."""
-    return len(_ANSI_RE.sub("", s))
+    """Visual display width — delegates to shared tui_layout.display_width."""
+    return display_width(s)
 
 
 def _vpad(s, width, align="<"):
     """Pad a possibly-colored string to `width` visual columns."""
-    pad = max(0, width - _vlen(s))
-    return (s + " " * pad) if align == "<" else (" " * pad + s)
+    return pad_display(s, width, align)
 
 
 # Detect UTF-8 terminal for box / block / arrow characters.
@@ -333,8 +351,8 @@ def c(text, code):
 
 def box_top(title, width):
     """Print: ┌─ TITLE ─────────────────────┐"""
-    raw_pre = f"{_TL}{_H} {title} "           # 4 + len(title) chars
-    fill    = max(0, width - len(raw_pre) - 1) # -1 for closing corner
+    raw_pre = f"{_TL}{_H} {title} "
+    fill    = max(0, width - display_width(raw_pre) - 1)
     if _COLOR:
         return (c(f"{_TL}{_H} ", _DIM)
                 + c(title, _BWHITE)
@@ -639,22 +657,17 @@ def as_float(value):
 
 
 def fmt(value, width=12, precision=2):
-    if value is None:
-        return f"{'-':>{width}}"
-    try:
-        return f"{float(value):>{width}.{precision}f}"
-    except Exception:
-        return f"{str(value):>{width}}"
+    return format_fixed_number(value, width, precision)
 
 
 def fmt_blank(width=12):
-    return f"{'':>{width}}"
+    return pad_display("", width, ">")
 
 
 def fmt_size(value, width=12):
     value = as_float(value)
     if value is None:
-        return f"{'':>{width}}"
+        return pad_display("", width, ">")
     if value < 1024:
         text = f"{value:.0f} B"
     elif value < 1024 ** 2:
@@ -663,7 +676,7 @@ def fmt_size(value, width=12):
         text = f"{value / (1024 ** 2):.1f} MiB"
     else:
         text = f"{value / (1024 ** 3):.2f} GiB"
-    return f"{text:>{width}}"
+    return format_scaled_metric(text, width)
 
 
 def fmt_delta(value, precision=2):
@@ -1282,50 +1295,66 @@ def _col_levels(inner_width):
     return show_run, show_bw, show_io
 
 
-def _table_header(show_run, show_bw, show_io):
-    """Column header row for the DATA I/O table."""
+def _nfs_pct_cell(pct):
+    """Format %Work column to fixed width (unit suffix before padding)."""
+    if pct is not None:
+        return pad_display(f"{pct:.1f}%", _NFS_COL_PCT, ">")
+    return pad_display("-", _NFS_COL_PCT, ">")
+
+
+def _table_header_cells(show_run, show_bw, show_io):
+    """Return header cell strings (unjoined) for the DATA I/O table."""
     parts = [
-        c(f"{'Procedure':<12}", _BOLD),
-        c(f"{'Ops/s':>12}",     _BOLD),
-        c(f"{'%Work':>7}",      _BOLD),
-        c(f"{'Avg {_MUS}':>10}".replace("{_MUS}", _MUS), _BOLD),
+        c(pad_display("Procedure", _NFS_COL_PROC, "<"), _BOLD),
+        c(pad_display("Ops/s", _NFS_COL_OPS, ">"), _BOLD),
+        c(pad_display("%Work", _NFS_COL_PCT, ">"), _BOLD),
+        c(pad_display(f"Avg {_MUS}", _NFS_COL_LAT, ">"), _BOLD),
     ]
     if show_run:
         parts += [
-            c(f"{'Min {_MUS}':>10}".replace("{_MUS}", _MUS), _BOLD),
-            c(f"{'Max {_MUS}':>10}".replace("{_MUS}", _MUS), _BOLD),
-            c(f"{'Mean {_MUS}':>10}".replace("{_MUS}", _MUS), _BOLD),
+            c(pad_display(f"Min {_MUS}", _NFS_COL_LAT, ">"), _BOLD),
+            c(pad_display(f"Max {_MUS}", _NFS_COL_LAT, ">"), _BOLD),
+            c(pad_display(f"Mean {_MUS}", _NFS_COL_LAT, ">"), _BOLD),
         ]
     if show_bw:
         parts += [
-            c(f"{'Avg GB/s':>9}", _BOLD),
-            c(f"{'Min GB/s':>9}", _BOLD),
-            c(f"{'Max GB/s':>9}", _BOLD),
+            c(pad_display("Avg GB/s", _NFS_COL_BW, ">"), _BOLD),
+            c(pad_display("Min GB/s", _NFS_COL_BW, ">"), _BOLD),
+            c(pad_display("Max GB/s", _NFS_COL_BW, ">"), _BOLD),
         ]
     if show_io:
-        parts.append(c(f"{'I/O Size':>10}", _BOLD))
-    return " ".join(parts)
+        parts.append(c(pad_display("I/O Size", _NFS_COL_IO, ">"), _BOLD))
+    return parts
+
+
+def _table_header(show_run, show_bw, show_io):
+    """Column header row for the DATA I/O table."""
+    return join_columns(_table_header_cells(show_run, show_bw, show_io), _NFS_COL_SEP)
 
 
 def _meta_table_header(show_run):
     """Column header row for the METADATA table (no BW/IO columns)."""
+    return join_columns(_meta_table_header_cells(show_run), _NFS_COL_SEP)
+
+
+def _meta_table_header_cells(show_run):
     parts = [
-        c(f"{'Procedure':<12}", _BOLD),
-        c(f"{'Ops/s':>12}",     _BOLD),
-        c(f"{'%Work':>7}",      _BOLD),
-        c(f"{'Avg {_MUS}':>10}".replace("{_MUS}", _MUS), _BOLD),
+        c(pad_display("Procedure", _NFS_COL_PROC, "<"), _BOLD),
+        c(pad_display("Ops/s", _NFS_COL_OPS, ">"), _BOLD),
+        c(pad_display("%Work", _NFS_COL_PCT, ">"), _BOLD),
+        c(pad_display(f"Avg {_MUS}", _NFS_COL_LAT, ">"), _BOLD),
     ]
     if show_run:
         parts += [
-            c(f"{'Min {_MUS}':>10}".replace("{_MUS}", _MUS), _BOLD),
-            c(f"{'Max {_MUS}':>10}".replace("{_MUS}", _MUS), _BOLD),
-            c(f"{'Mean {_MUS}':>10}".replace("{_MUS}", _MUS), _BOLD),
+            c(pad_display(f"Min {_MUS}", _NFS_COL_LAT, ">"), _BOLD),
+            c(pad_display(f"Max {_MUS}", _NFS_COL_LAT, ">"), _BOLD),
+            c(pad_display(f"Mean {_MUS}", _NFS_COL_LAT, ">"), _BOLD),
         ]
-    return " ".join(parts)
+    return parts
 
 
-def _rpc_row_content(r, show_run=True, show_bw=True, show_io=True):
-    """Build the inner content string for one RPC row (no border)."""
+def _rpc_row_cells(r, show_run=True, show_bw=True, show_io=True):
+    """Return data cell strings (unjoined) for one RPC row."""
     label  = r["label"]
     ops    = as_float(r["ops_sec"])
     pct    = as_float(r["pct"])
@@ -1333,58 +1362,59 @@ def _rpc_row_content(r, show_run=True, show_bw=True, show_io=True):
     bw     = as_float(r.get("bw_gbs"))
 
     if label == "READ":
-        label_s = c(f"{label:<12}", _BCYAN)
+        label_s = c(pad_display(label, _NFS_COL_PROC, "<"), _BCYAN)
     elif label == "WRITE":
-        label_s = c(f"{label:<12}", _BYELLOW)
+        label_s = c(pad_display(label, _NFS_COL_PROC, "<"), _BYELLOW)
     elif ops:
-        label_s = c(f"{label:<12}", _BWHITE)
+        label_s = c(pad_display(label, _NFS_COL_PROC, "<"), _BWHITE)
     else:
-        label_s = c(f"{label:<12}", _DIM)
-
-    pct_str = f"{pct:>6.1f}%" if pct is not None else f"{'  -':>6} "
+        label_s = c(pad_display(label, _NFS_COL_PROC, "<"), _DIM)
 
     parts = [
         label_s,
-        _c_ops(fmt(r["ops_sec"], 12, 2), ops),
-        _c_pct(pct_str, pct),
-        _c_latency(fmt(r["avg_us"], 10, 2), avg_us),
+        _c_ops(fmt(r["ops_sec"], _NFS_COL_OPS, 2), ops),
+        _c_pct(_nfs_pct_cell(pct), pct),
+        _c_latency(fmt(r["avg_us"], _NFS_COL_LAT, 2), avg_us),
     ]
     if show_run:
         parts += [
-            c(fmt(r["run_min_us"],  10, 2), _DIM),
-            c(fmt(r["run_max_us"],  10, 2), _DIM),
-            c(fmt(r["run_mean_us"], 10, 2), _DIM),
+            c(fmt(r["run_min_us"],  _NFS_COL_LAT, 2), _DIM),
+            c(fmt(r["run_max_us"],  _NFS_COL_LAT, 2), _DIM),
+            c(fmt(r["run_mean_us"], _NFS_COL_LAT, 2), _DIM),
         ]
     if show_bw:
         parts += [
-            _c_bw(fmt(r.get("bw_gbs"),     9, 3), bw, label),
-            c(fmt(r.get("bw_min_gbs"),      9, 3), _DIM),
-            c(fmt(r.get("bw_max_gbs"),      9, 3), _DIM),
+            _c_bw(fmt(r.get("bw_gbs"),     _NFS_COL_BW, 3), bw, label),
+            c(fmt(r.get("bw_min_gbs"),      _NFS_COL_BW, 3), _DIM),
+            c(fmt(r.get("bw_max_gbs"),      _NFS_COL_BW, 3), _DIM),
         ]
     if show_io:
         io_color = _CYAN if label == "READ" else _YELLOW if label == "WRITE" else _DIM
-        parts.append(c(fmt_size(r.get("avg_io_bytes"), 10), io_color))
+        parts.append(c(fmt_size(r.get("avg_io_bytes"), _NFS_COL_IO), io_color))
+    return parts
 
-    return " ".join(parts)
+
+def _rpc_row_content(r, show_run=True, show_bw=True, show_io=True):
+    """Build the inner content string for one RPC row (no border)."""
+    return join_columns(_rpc_row_cells(r, show_run, show_bw, show_io), _NFS_COL_SEP)
 
 
 def _subtotal_row_content(label_text, ops, pct, lat, bw, show_run, show_bw, show_io):
     """Build a subtotal row (DATA TOTAL / META TOTAL)."""
-    pct_str = f"{pct:>6.1f}%" if pct is not None else f"{'  -':>6} "
     parts   = [
-        c(f"{label_text:<12}", _BOLD),
-        c(fmt(ops, 12, 2), _BOLD),
-        c(pct_str, _BOLD),
-        _c_latency(fmt(lat, 10, 2), lat),
+        c(pad_display(label_text, _NFS_COL_PROC, "<"), _BOLD),
+        c(fmt(ops, _NFS_COL_OPS, 2), _BOLD),
+        c(_nfs_pct_cell(pct), _BOLD),
+        _c_latency(fmt(lat, _NFS_COL_LAT, 2), lat),
     ]
     if show_run:
-        parts += [c(fmt(None, 10), _DIM)] * 3
+        parts += [c(fmt(None, _NFS_COL_LAT), _DIM)] * 3
     if show_bw:
-        bw_s = c(fmt(bw, 9, 3), _CYAN) if bw is not None else c(fmt(None, 9), _DIM)
-        parts += [bw_s, c(fmt(None, 9), _DIM), c(fmt(None, 9), _DIM)]
+        bw_s = c(fmt(bw, _NFS_COL_BW, 3), _CYAN) if bw is not None else c(fmt(None, _NFS_COL_BW), _DIM)
+        parts += [bw_s, c(fmt(None, _NFS_COL_BW), _DIM), c(fmt(None, _NFS_COL_BW), _DIM)]
     if show_io:
-        parts.append(c(fmt(None, 10), _DIM))
-    return " ".join(parts)
+        parts.append(c(fmt(None, _NFS_COL_IO), _DIM))
+    return join_columns(parts, _NFS_COL_SEP)
 
 
 # ---------------------------------------------------------------------------
@@ -1608,24 +1638,29 @@ def _render_drill_panel(width):
         print(box_bottom(width))
         return
 
-    hdr = (c(f"{'Name':<24}", _BOLD) + " "
-           + c(f"{'Ops/s':>12}",        _BOLD) + " "
-           + c(f"{'Avg {_MUS}':>10}".replace("{_MUS}", _MUS), _BOLD) + " "
-           + c(f"{'GB/s':>9}",          _BOLD) + " "
-           + c(f"{'Top RPC':>12}",      _BOLD) + " "
-           + c(f"{'Top%':>6}",          _BOLD))
+    hdr = join_columns([
+        c(pad_display("Name", _NFS_DRILL_NAME, "<"), _BOLD),
+        c(pad_display("Ops/s", _NFS_DRILL_OPS, ">"), _BOLD),
+        c(pad_display(f"Avg {_MUS}", _NFS_DRILL_LAT, ">"), _BOLD),
+        c(pad_display("GB/s", _NFS_DRILL_BW, ">"), _BOLD),
+        c(pad_display("Top RPC", _NFS_DRILL_RPC, ">"), _BOLD),
+        c(pad_display("Top%", _NFS_DRILL_TOP_PCT, ">"), _BOLD),
+    ], _NFS_DRILL_SEP)
     print(box_row(hdr, width))
     print(box_sep(width))
 
     for dr in LAST_DRILL_ROWS:
-        pct_str = f"{(dr['top_rpc_pct'] or 0):>5.1f}%"
-        row     = (f"{dr['name']:<24}"
-                   + " " + _c_ops(fmt(dr["total_ops"], 12, 2), dr["total_ops"])
-                   + " " + _c_latency(fmt(dr["latency_us"], 10, 2), dr["latency_us"])
-                   + " " + (c(fmt(dr["bw_gbs"], 9, 3), _CYAN) if dr["bw_gbs"]
-                              else c(fmt(None, 9), _DIM))
-                   + " " + c(f"{dr['top_rpc']:>12}", _BWHITE)
-                   + " " + _c_pct(pct_str, dr["top_rpc_pct"]))
+        pct_val = dr.get("top_rpc_pct")
+        pct_str = pad_display(f"{(pct_val or 0):.1f}%", _NFS_DRILL_TOP_PCT, ">")
+        row = join_columns([
+            pad_display(dr["name"], _NFS_DRILL_NAME, "<"),
+            _c_ops(fmt(dr["total_ops"], _NFS_DRILL_OPS, 2), dr["total_ops"]),
+            _c_latency(fmt(dr["latency_us"], _NFS_DRILL_LAT, 2), dr["latency_us"]),
+            c(fmt(dr["bw_gbs"], _NFS_DRILL_BW, 3), _CYAN) if dr["bw_gbs"]
+            else c(fmt(None, _NFS_DRILL_BW), _DIM),
+            c(pad_display(dr["top_rpc"], _NFS_DRILL_RPC, ">"), _BWHITE),
+            _c_pct(pct_str, pct_val),
+        ], _NFS_DRILL_SEP)
         print(box_row(row, width))
 
     print(box_sep(width))

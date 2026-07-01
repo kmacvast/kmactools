@@ -18,6 +18,7 @@ import pytest
 _OPSTAT_DIR = os.path.join(os.path.dirname(__file__), "..", "vast", "vast-opstat")
 _OPSTAT_SCRIPT = os.path.join(_OPSTAT_DIR, "vast-opstat.py")
 _NFS_V3_SCRIPT = os.path.join(_OPSTAT_DIR, "nfs_v3.py")
+_NFS_V41_SCRIPT = os.path.join(_OPSTAT_DIR, "nfs_v41.py")
 _NVME_TCP_SCRIPT = os.path.join(_OPSTAT_DIR, "nvme_tcp.py")
 _VAST_API_LOG_SCRIPT = os.path.join(_OPSTAT_DIR, "vast_api_log.py")
 
@@ -32,6 +33,7 @@ def _load_module(name, path):
 
 opstat = _load_module("vast_opstat", _OPSTAT_SCRIPT)
 nfs_v3 = _load_module("vast_opstat_nfs_v3", _NFS_V3_SCRIPT)
+nfs_v41 = _load_module("vast_opstat_nfs_v41", _NFS_V41_SCRIPT)
 nvme_tcp = _load_module("vast_opstat_nvme_tcp", _NVME_TCP_SCRIPT)
 vast_api_log = _load_module("vast_opstat_api_log", _VAST_API_LOG_SCRIPT)
 
@@ -84,8 +86,13 @@ class TestCliParsing:
 
     def test_planned_nfs_version_exits(self):
         with pytest.raises(SystemExit) as exc:
-            opstat.parse_args(["--nfs", "--version=4.1", *BASE_ARGS])
+            opstat.parse_args(["--nfs", "--version=4.2", *BASE_ARGS])
         assert "not implemented yet" in str(exc.value)
+
+    def test_nfs_v41_flags_parse_and_validate(self):
+        args = opstat.parse_args(["--nfs", "--version=4.1", *BASE_ARGS])
+        assert args.nfs is True
+        assert args.protocol_version == "4.1"
 
     def test_block_without_nvme_over_tcp_exits(self):
         with pytest.raises(SystemExit) as exc:
@@ -336,10 +343,104 @@ class TestNfsDrillEndpoints:
         assert nfs_v3.DRILL_ERROR is None
 
 
+class TestNfsV41Metrics:
+    def test_data_monitor_props_use_nfs4_common(self):
+        props = nfs_v41.build_data_monitor_props()
+        assert all(p.startswith("ProtoMetrics,proto_name=NFS4Common,") for p in props)
+        assert nfs_v41._data_fqn("rd_iops") in props
+        assert nfs_v41._data_fqn("write_latency__avg") in props
+
+    def test_drill_endpoints_are_not_api_prefixed(self):
+        for mode, cfg in nfs_v41._DRILL_CFG.items():
+            assert cfg["endpoint"].startswith("/")
+            assert not cfg["endpoint"].startswith("/api/"), mode
+
+    def test_build_rows_from_nfs4_common_sample(self):
+        data_result = {
+            "prop_list": [
+                "timestamp",
+                nfs_v41._data_fqn("rd_iops"),
+                nfs_v41._data_fqn("wr_iops"),
+                nfs_v41._data_fqn("rd_bw"),
+                nfs_v41._data_fqn("wr_bw"),
+                nfs_v41._data_fqn("read_latency__avg"),
+                nfs_v41._data_fqn("write_latency__avg"),
+                nfs_v41._data_fqn("read_size__avg"),
+                nfs_v41._data_fqn("write_size__avg"),
+            ],
+            "data": [["2026-07-01T00:00:00Z", 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]],
+        }
+        supplement_result = {
+            "prop_list": [
+                "timestamp",
+                nfs_v41._nfs_fqn("read", "rate"),
+                nfs_v41._nfs_fqn("read", "avg"),
+                nfs_v41._nfs_fqn("write", "rate"),
+                nfs_v41._nfs_fqn("write", "avg"),
+                nfs_v41._nfs_fqn("lookup", "rate"),
+            ],
+            "data": [["2026-07-01T00:00:00Z", 100.0, 250.0, 50.0, 500.0, 12.0]],
+        }
+        bw_result = {
+            "prop_list": ["timestamp", f"{nfs_v41._NFS_COMMON},rd_bw", f"{nfs_v41._NFS_COMMON},wr_bw"],
+            "data": [["2026-07-01T00:00:00Z", 1_000_000_000.0, 500_000_000.0]],
+        }
+        meta_result = {
+            "prop_list": ["timestamp", nfs_v41._data_fqn("md_iops"), nfs_v41._data_fqn("latency")],
+            "data": [["2026-07-01T00:00:00Z", 0.0, 0.0]],
+        }
+        snapshot, sample = nfs_v41.build_rows_from_results(
+            data_result, supplement_result, bw_result, meta_result,
+        )
+        assert sample == "2026-07-01T00:00:00Z"
+        read_row = next(r for r in snapshot["data"] if r["key"] == "read")
+        assert read_row["ops_sec"] == pytest.approx(100.0)
+        assert read_row["avg_us"] == pytest.approx(250.0)
+        assert read_row["bw_mbs"] == pytest.approx(1000.0)
+        assert nfs_v41.METRICS_SOURCE == "NfsMetrics supplement"
+        assert snapshot["meta"]["md_iops"] == pytest.approx(12.0)
+        lookup_row = next(r for r in snapshot["stateful"] if r["key"] == "lookup")
+        assert lookup_row["ops_sec"] == pytest.approx(12.0)
+        md_row = next(r for r in snapshot["session"] if r["key"] == "md_workload")
+        assert md_row["ops_sec"] == pytest.approx(12.0)
+        total_row = next(r for r in snapshot["session"] if r["key"] == "cluster_total")
+        assert total_row["ops_sec"] == pytest.approx(162.0)
+
+    def test_build_rows_native_stateful_ops(self, monkeypatch):
+        monkeypatch.setattr(nfs_v41, "_NATIVE_STATEFUL_OPS", frozenset({"open"}))
+        monkeypatch.setattr(nfs_v41, "_NATIVE_SESSION_OPS", frozenset())
+        monkeypatch.setattr(nfs_v41, "_STATEFUL_METRICS_UNAVAILABLE", False)
+        monkeypatch.setattr(nfs_v41, "_SESSION_METRICS_UNAVAILABLE", True)
+
+        stateful_result = {
+            "prop_list": [
+                "timestamp",
+                nfs_v41._nfs_fqn("open", "rate"),
+                nfs_v41._nfs_fqn("open", "avg"),
+            ],
+            "data": [["2026-07-01T00:00:00Z", 5.0, 100.0]],
+        }
+        snapshot, _ = nfs_v41.build_rows_from_results(
+            data_result={"prop_list": ["timestamp"], "data": [["2026-07-01T00:00:00Z"]]},
+            supplement_result={"prop_list": ["timestamp"], "data": [["2026-07-01T00:00:00Z"]]},
+            stateful_result=stateful_result,
+        )
+        open_row = next(r for r in snapshot["stateful"] if r["key"] == "open")
+        assert open_row["ops_sec"] == pytest.approx(5.0)
+        close_row = next(r for r in snapshot["stateful"] if r["key"] == "close")
+        assert close_row["ops_sec"] is None
+
+
 class TestDispatch:
     def test_dispatch_routes_to_nfs_v3(self):
         args = opstat.parse_args(["--nfs", "--version=3.0", *BASE_ARGS])
         with patch.object(opstat.nfs_v3, "run", return_value=0) as run_mock:
+            assert opstat.dispatch(args) == 0
+        run_mock.assert_called_once_with(args)
+
+    def test_dispatch_routes_to_nfs_v41(self):
+        args = opstat.parse_args(["--nfs", "--version=4.1", *BASE_ARGS])
+        with patch.object(opstat.nfs_v41, "run", return_value=0) as run_mock:
             assert opstat.dispatch(args) == 0
         run_mock.assert_called_once_with(args)
 

@@ -1,7 +1,7 @@
 # vast-opstat — SMB Protocol Implementation Plan
 
 **Branch:** `feat/vast-opstat-smb`  
-**Status:** Phase 0 approved — discovery script ready; awaiting live VMS run  
+**Status:** Phase 4 complete — drill-down `c`/`v`/`t`; Phase 5 docs/tests/merge next  
 **Tool version target:** 0.1.2 (SMB release)  
 **Author:** KMac kmac@vastdata.com
 
@@ -94,8 +94,8 @@ python3 smb_phase0_discover.py --vms <HOST> --user admin
 # writes SMB_PHASE0_RESULTS.md
 ```
 
-Results template: [SMB_PHASE0_RESULTS.md](SMB_PHASE0_RESULTS.md)  
-**Live run:** Pending — requires `~/.vastconf` or explicit creds on lab host (var203).
+Results: [SMB_PHASE0_RESULTS.md](SMB_PHASE0_RESULTS.md)  
+**Live run:** ✅ var203 2026-07-06 — see results for metric binding decisions.
 
 ### 0.1 Live VMS discovery (var203 or customer lab)
 
@@ -131,23 +131,25 @@ SMB commands to map (priority order for troubleshooting):
 
 ### 0.2 Discovery deliverables
 
-- [ ] `discover-metrics` output captured to log
-- [ ] Table: exported vs unexported commands (like NFS v4.1 OPEN/CLOSE gap)
-- [ ] `object_type` matrix: cluster, view, tenant, cnode, vip, client/smbclient (Phase 0 script)
-- [ ] Monitor mixing rules documented (ProtoMetrics vs SmbMetrics in same monitor?)
-- [ ] View monitor aggregation constraints (NFS v3 lesson: views may reject aggregation)
+- [x] `discover-metrics` output captured (var203)
+- [x] Table: **all `SmbMetrics` per-command unexported** (HTTP 400 `property_error`)
+- [x] `object_type` matrix: cluster/view/tenant/cnode OK; **all client endpoints 404**
+- [x] Monitor mixing: SMBCommon-only monitors work; do not include SmbMetrics props
+- [x] View monitor: `view_no_aggregation` OK
 
-### 0.3 Proxy panel decision
+### 0.3 Proxy panel decision (var203 validated)
 
-If native counters are missing (expected for some session/oplock metrics), define **VMS proxy rows** exactly as NFS v4.1 does — never fabricate data.
+Per-command `SmbMetrics` is **not exported** on var203. Use **SMBCommon aggregate rows** (not fabricated command rates):
 
-| If unexported | Proxy candidate |
-|---------------|-----------------|
-| OPLOCK_BREAK / LEASE_BREAK | IOCTL or LOCK rates |
-| SESSION_SETUP | TREE_CONNECT + NEGOTIATE rates |
-| CHANGE_NOTIFY | QUERY_DIRECTORY correlation |
+| Panel row | SMBCommon source (confirmed) |
+|-----------|-------------------------------|
+| READ | `rd_iops`, `rd_bw`, `read_latency__avg`, `read_size__avg` |
+| WRITE | `wr_iops`, `wr_bw`, `write_latency__avg`, `write_size__avg` |
+| METADATA | `md_iops`, `rd_md_iops`, `wr_md_iops` |
+| SESSION/LOCK | `NfsMetrics,nfs3_smb_interop_*` when > 0; else dimmed placeholder |
+| Health headline | `iops`, `bw`, aggregate latency |
 
-**Gate rule:** Phase 1 starts after live `SMB_PHASE0_RESULTS.md` is populated on var203.
+**Gate rule:** ✅ Phase 0 complete — Phase 2 proceeds with SMBCommon-only binding per [SMB_PHASE0_RESULTS.md](SMB_PHASE0_RESULTS.md).
 
 ---
 
@@ -266,16 +268,18 @@ Design principle: **top = health verdict, middle = where to look, bottom = comma
 
 ---
 
-## Phase 3 — Command Tables & Classification
+## Phase 3 — Aggregate Panels & Classification (revised post-Phase 0)
+
+**Note:** Per-command `SmbMetrics` table **cancelled** on var203 — panels show SMBCommon aggregate rows with explicit proxy labeling.
 
 **Deliverables:**
-- [ ] DATA PATH panel (READ/WRITE)
-- [ ] METADATA & NAMESPACE panel (CREATE, CLOSE, QUERY_*, SET_INFO)
-- [ ] SESSION & LOCKING panel (or VMS PROXY sub-panel if gaps)
-- [ ] Sort keys: `r` name, `o` ops, `l` latency, `w` workload %
-- [ ] Hybrid fallback if `SMBCommon` reads zero (mirror NFS v4.1 supplement)
+- [ ] DATA PATH panel (READ/WRITE from `rd_*` / `wr_*`)
+- [ ] METADATA panel (`md_iops`, `rd_md_iops`, `wr_md_iops`)
+- [ ] SESSION & LOCKING: interop lease-break proxy or dimmed placeholder
+- [ ] Sort keys: `r` name, `o` ops, `l` latency, `w` workload % (2–5 rows, not 15)
+- [ ] Classifier uses `md_iops/iops` ratio (no per-command top contributor until VMS exports SmbMetrics)
 
-**Approval checkpoint:** ☐ Command table matches discovery inventory
+**Approval checkpoint:** ☐ Aggregate panels match SMBCommon monitor on live SMB workload
 
 ---
 
@@ -338,7 +342,7 @@ Design principle: **top = health verdict, middle = where to look, bottom = comma
 
 | Risk | Mitigation |
 |------|------------|
-| SmbMetrics not exported per-command | Proxy panel + SMBCommon aggregates; document gaps in discover-metrics |
+| SmbMetrics not exported per-command | ✅ Confirmed var203 — SMBCommon aggregate panels only; label as VMS PROXY |
 | View monitors reject aggregation | `no_aggregation=True` for view scope (NFS v3 fix) |
 | Tenant scope needs delta engine | Reuse `_delta_rate_from_samples` from nfs_v3 |
 | ProtoMetrics + SmbMetrics cannot mix | Separate monitors, client-side merge (NVMe pattern) |

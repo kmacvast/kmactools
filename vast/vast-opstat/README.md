@@ -144,11 +144,12 @@ See **[NVMe_TCP_README.md](NVMe_TCP_README.md)**.
 
 ### SMB
 
-- Five-panel TUI: health, insights, data path, metadata aggregates, session placeholder
+- Three-panel TUI: health & workload, performance insights, SMB2 opcode workflow
+- Opcode panel shows **only active opcodes**; metadata as `METADATA (total)` aggregate
 - `ProtoMetrics,proto_name=SMBCommon` instantaneous rates (no counter-delta on cluster)
 - View/tenant drill uses `ViewMetrics` / `TenantMetrics`; cNode uses SMBCommon
 - Batch ranking across all views (top 8 by ops/s)
-- `--client` / `--clients` flags parse; scoping deferred (Phase 4b)
+- `--clients` IP scoping for topn insights and session context APIs
 
 See **[SMB_README.md](SMB_README.md)**.
 

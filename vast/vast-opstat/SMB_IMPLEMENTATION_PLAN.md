@@ -190,26 +190,15 @@ Design principle: **top = health verdict, middle = where to look, bottom = comma
 │  Top Δ Mover:     CLOSE (+180 ops/s)                                    │
 └─────────────────────────────────────────────────────────────────────────┘
 
-┌─ DATA PATH ─────────────────────────────────────────────────────────────┐
-│  Command   Ops/s      Throughput   Avg Size   Latency                   │
-│  READ      2,840      1.62 GB/s    592 KB     620 µs                    │
-│  WRITE     1,020      0.48 GB/s    472 KB     1.1 ms                    │
-└─────────────────────────────────────────────────────────────────────────┘
-
-┌─ METADATA & NAMESPACE ──────────────────────────────────────────────────┐
-│  CREATE          1,240 ops/s    3.8 ms                                    │
-│  CLOSE           1,180 ops/s    1.2 ms                                    │
-│  QUERY_DIRECTORY   890 ops/s    4.2 ms   ← Explorer pain                 │
-│  QUERY_INFO        420 ops/s    2.1 ms                                    │
-│  SET_INFO          180 ops/s    1.8 ms                                    │
-└─────────────────────────────────────────────────────────────────────────┘
-
-┌─ SESSION & LOCKING ─────────────────────────────────────────────────────┐
-│  SESSION_SETUP      45 ops/s    12 ms   (or VMS PROXY panel)             │
-│  TREE_CONNECT       38 ops/s     8 ms                                    │
-│  LOCK               22 ops/s     0.9 ms                                  │
-│  IOCTL              15 ops/s     2.4 ms   (lease/offload proxy)          │
-│  CHANGE_NOTIFY       8 ops/s     1.1 ms                                  │
+┌─ SMB2 OPCODE WORKFLOW ──────────────────────────────────────────────────┐
+│  SMB2 Opcode        Ops/s    Throughput   Avg Size   Latency   Source   │
+│  Data path                                                                │
+│  SMB2_READ          2,840    1.62 GB/s    592 KB     620 µs    MEASURED  │
+│  SMB2_WRITE         1,020    0.48 GB/s    472 KB     1.1 ms    MEASURED  │
+│  Metadata                                                                 │
+│  METADATA (total)   7,200    —            —          —         AGGREGATE  │
+│      read-md 4,100/s  ·  write-md 3,100/s                                 │
+│  (empty opcodes omitted — only live data shown each refresh)              │
 └─────────────────────────────────────────────────────────────────────────┘
 
  Footer: c=cNode  v=View/Share  t=Tenant  x=exit drill  Space=refresh  q=quit
@@ -218,10 +207,8 @@ Design principle: **top = health verdict, middle = where to look, bottom = comma
 ### Why this block order
 
 1. **Health first** — immediate answer: idle, healthy, degraded, metadata-dominated.
-2. **Insights second** — narrows investigation before reading 15 command rows.
-3. **Data path third** — separates "slow reads/writes" from metadata (most SMB tickets blame wrong layer).
-4. **Metadata fourth** — SMB-specific root cause for Windows/macOS UX pain.
-5. **Session & locking last** — connection storms and lease issues are less common but high severity.
+2. **Insights second** — narrows investigation before opcode detail.
+3. **Opcode workflow third** — unified data + metadata + session evidence; only active opcodes.
 
 ### Workload classifier (SMB-specific rules)
 
@@ -270,16 +257,16 @@ Design principle: **top = health verdict, middle = where to look, bottom = comma
 
 ## Phase 3 — Aggregate Panels & Classification (revised post-Phase 0)
 
-**Note:** Per-command `SmbMetrics` table **cancelled** on var203 — panels show SMBCommon aggregate rows with explicit proxy labeling.
+**Note:** Per-command `SmbMetrics` table **cancelled** on var203 — opcode panel uses SMBCommon aggregates with explicit source labeling.
 
 **Deliverables:**
-- [x] DATA PATH panel (READ/WRITE from `rd_*` / `wr_*`)
-- [x] METADATA panel (`md_iops`, `rd_md_iops`, `wr_md_iops`)
-- [x] SESSION & LOCKING: interop lease-break proxy or dimmed placeholder
-- [x] Sort keys: `r` name, `o` ops, `l` latency, `w` workload % (2–5 rows, not 15)
+- [x] SMB2 OPCODE WORKFLOW panel (replaces separate DATA / METADATA / SESSION panels)
+- [x] Only opcodes with live data shown each refresh (no empty dash rows)
+- [x] `METADATA (total)` aggregate row + compact read-md / write-md sub-line
+- [x] READ/WRITE measured from `rd_*` / `wr_*`; session/lock proxies from REST when available
 - [x] Classifier uses `md_iops/iops` ratio (no per-command top contributor until VMS exports SmbMetrics)
 
-**Approval checkpoint:** ☑ Aggregate panels match SMBCommon monitor on live SMB workload
+**Approval checkpoint:** ☑ Opcode panel validated on live SMB workload (var203)
 
 ---
 
@@ -301,7 +288,7 @@ Design principle: **top = health verdict, middle = where to look, bottom = comma
 - [x] `--csv` export
 - [x] `--log-api-calls` verified
 - [x] `tests/test_vast_opstat.py` — `TestSmbModule`, drill, dispatch
-- [x] `SMB_README.md` + screenshot `images/smb_tui.png` *(capture during live session)*
+- [x] `SMB_README.md` + screenshot `images/smb_tui.png`
 - [x] Update root `README.md`, `SETUP.md`, `images/README.md`
 - [x] Version bump to **0.1.2** across all protocol modules
 - [ ] Merge `feat/vast-opstat-smb` → `main`
@@ -358,7 +345,7 @@ Design principle: **top = health verdict, middle = where to look, bottom = comma
 - SMB over QUIC / RDMA transport specifics
 - SMB multichannel per-channel breakdown (unless VIP drill suffices)
 
-**Planned for v1.x (Phase 4b):** `--client` / `--clients` IP scoping (see above)
+**Planned for v1.x (Phase 4b):** ~~`--client` / `--clients` IP scoping~~ **Done in v0.1.2**
 
 ---
 
@@ -366,12 +353,12 @@ Design principle: **top = health verdict, middle = where to look, bottom = comma
 
 | Phase | Approver | Date | Notes |
 |-------|----------|------|-------|
-| 0 — Discovery & layout | KMac | 2026-07-06 | 5 panels, c/v/t/x, client IP in design |
+| 0 — Discovery & layout | KMac | 2026-07-06 | 3 panels + opcode workflow, c/v/t/x, `--clients` |
 | 1 — Skeleton | KMac | 2026-07-06 | `smb.py`, CLI dispatch, Phase 0 wrapper |
 | 2 — Health panel | KMac | 2026-07-06 | SMBCommon cluster monitor |
 | 3 — Command tables | KMac | 2026-07-06 | Aggregate proxy panels (no SmbMetrics) |
 | 4 — Drill-down | KMac | 2026-07-06 | c/v/t batch rank+display |
-| 4b — Client IP scoping | | | `--clients` flag — blocked (VMS API 404) |
+| 4b — Client IP scoping | KMac | 2026-07-06 | `--clients` topn + session APIs |
 | 5 — Merge to main | | | Pending pytest + approval |
 
 **Phase 1–5 code complete on `feat/vast-opstat-smb` (v0.1.2).**

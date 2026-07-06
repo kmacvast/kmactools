@@ -298,6 +298,11 @@ References: [NFSv3_README.md](NFSv3_README.md), [NFSv41_README.md](NFSv41_README
 | `Space` | Force refresh |
 | `q` | Quit |
 
+**Panels:** SMB HEALTH & WORKLOAD · PERFORMANCE INSIGHTS · SMB2 OPCODE WORKFLOW
+(only opcodes with live data; metadata shown as `METADATA (total)` aggregate).
+
+**Client scoping:** `--clients 10.1.1.5,10.1.1.6` filters topn insights and session APIs.
+
 Reference: [SMB_README.md](SMB_README.md)
 
 ---

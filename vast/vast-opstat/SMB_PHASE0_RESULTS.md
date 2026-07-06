@@ -122,27 +122,35 @@ rd_bw, wr_bw, bw, iops
 read_latency__avg, write_latency__avg  (or __rate where avg zero)
 ```
 
-### DATA PATH panel (2 rows — not 15 commands)
+### DATA PATH rows (opcode panel — Data path category)
 
 | Display row | Source |
 |-------------|--------|
-| READ | `rd_iops`, `rd_bw`, `read_latency__avg`, `read_size__avg` |
-| WRITE | `wr_iops`, `wr_bw`, `write_latency__avg`, `write_size__avg` |
+| SMB2_READ | `rd_iops`, `rd_bw`, `read_latency__avg`, `read_size__avg` |
+| SMB2_WRITE | `wr_iops`, `wr_bw`, `write_latency__avg`, `write_size__avg` |
 
-### METADATA & NAMESPACE panel (aggregate proxy)
+Shown only when the corresponding rate > 0.
+
+### METADATA row (opcode panel — Metadata category)
 
 | Display row | Source |
 |-------------|--------|
-| METADATA (total) | `md_iops`, weighted latency proxy |
-| RD METADATA | `rd_md_iops` |
-| WR METADATA | `wr_md_iops` |
+| METADATA (total) | `md_iops` aggregate |
+| Sub-line | `read-md` ← `rd_md_iops`, `write-md` ← `wr_md_iops` |
 
-Label footer: `per-command SmbMetrics not exported — SMBCommon aggregates`.
+Per-opcode metadata rows (`SMB2_CREATE`, `SMB2_QUERY_INFO`, …) are **not** shown when
+VMS does not export `SmbMetrics` — empty dash rows are omitted.
 
-### SESSION & LOCKING panel
+### SESSION / LOCKING / NOTIFY (opcode panel — when data exists)
 
-Native SESSION_SETUP / TREE_CONNECT / LOCK / IOCTL counters **not available**.  
-Show **VMS PROXY** sub-panel with interop lease-break counters if `nfs3_smb_interop_*` > 0; otherwise dimmed placeholder until a future VMS build exports session metrics.
+| Display row | Source |
+|-------------|--------|
+| SMB2_LOCK | Open handles with locks (`GET /openfilehandles/?protocol=SMB`) |
+| SMB2_SESSION_SETUP / TREE_CONNECT / NEGOTIATE | Client connection count proxy |
+| SMB2_CHANGE_NOTIFY | `notify_counter` rate |
+| Interop lease-break | `NfsMetrics,nfs3_smb_interop_*` |
+
+Native per-command SESSION_SETUP / LOCK counters **not available** on var203.
 
 ### Workload classifier (aggregate-based)
 
@@ -161,6 +169,6 @@ Show **VMS PROXY** sub-panel with interop lease-break counters if `nfs3_smb_inte
 - [x] Metrics catalog SMB entries captured (57)
 - [x] SmbMetrics per-command export table — **unexported**
 - [x] ProtoMetrics SMBCommon confirmed
-- [x] Client REST endpoint — **none on var203**
+- [x] Client REST endpoints — `list_smb_client_connections`, `openfilehandles`, `monitoredhosts`, `monitors/topn`
 - [x] View/tenant/cnode monitor scope validated
 - [x] Proxy panel gaps documented

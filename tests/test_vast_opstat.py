@@ -740,13 +740,52 @@ class TestSmbModule:
         labels = [r["label"] for r in rows]
         assert "SMB2_READ" in labels
         assert "SMB2_WRITE" in labels
-        assert "SMB2_QUERY_INFO" in labels
-        assert "SMB2_SESSION_SETUP" in labels
+        assert "METADATA (total)" in labels
+        assert "SMB2_QUERY_INFO" not in labels
+        assert "SMB2_SESSION_SETUP" not in labels
         read_row = next(r for r in rows if r["label"] == "SMB2_READ")
         assert read_row["source"] == "MEASURED"
         assert read_row["ops_sec"] == pytest.approx(1000.0)
-        md_row = next(r for r in rows if r["label"] == "SMB2_QUERY_DIRECTORY")
-        assert md_row["source"] in ("MD_BUCKET", "MD_HINT")
+        md_row = next(r for r in rows if r["label"] == "METADATA (total)")
+        assert md_row["source"] == "AGGREGATE"
+        assert md_row["ops_sec"] == pytest.approx(2000.0)
+        assert md_row["_md_rd"] == pytest.approx(1200.0)
+        assert md_row["_md_wr"] == pytest.approx(800.0)
+
+    def test_build_opcode_workflow_rows_omits_zero_data_opcodes(self):
+        data = [
+            {"key": "write", "label": "WRITE", "ops_sec": 296.0, "avg_us": 448.0,
+             "bw_mbs": 0.076, "avg_io_bytes": 256.0, "pct": 100.0},
+        ]
+        meta = {"md_iops": 3577.0, "rd_md_iops": 2327.0, "wr_md_iops": 1250.0}
+        rows = smb.build_opcode_workflow_rows(data, [], [], meta, None)
+        labels = [r["label"] for r in rows]
+        assert labels == ["SMB2_WRITE", "METADATA (total)"]
+
+    def test_opcode_has_data_filters_empty_rows(self):
+        rows = [
+            {"label": "SMB2_READ", "ops_sec": 0, "avg_us": 0, "bw_mbs": 0},
+            {"label": "SMB2_WRITE", "ops_sec": 10.0, "avg_us": 0, "bw_mbs": 0},
+        ]
+        visible = smb._visible_opcode_rows(rows)
+        assert len(visible) == 1
+        assert visible[0]["label"] == "SMB2_WRITE"
+
+    def test_split_opcode_rows_authoritative_vs_derived(self):
+        rows = [
+            {"label": "SMB2_READ", "source": "MEASURED", "ops_sec": 100.0},
+            {"label": "SMB2_WRITE", "source": "MEASURED", "ops_sec": 50.0},
+            {"label": "METADATA (total)", "source": "AGGREGATE", "ops_sec": 500.0},
+            {"label": "SMB2_CHANGE_NOTIFY", "source": "PROXY", "ops_sec": 3.0},
+            {"label": "SMB2_LOCK", "source": "HANDLES", "ops_sec": 2.0},
+        ]
+        auth, derived = smb._split_opcode_rows(rows)
+        assert [r["label"] for r in auth] == [
+            "SMB2_READ", "SMB2_WRITE", "METADATA (total)",
+        ]
+        assert [r["label"] for r in derived] == ["SMB2_CHANGE_NOTIFY", "SMB2_LOCK"]
+        assert smb._opcode_tier("SMBMETRICS") == "authoritative"
+        assert smb._opcode_tier("SESSIONS") == "derived"
 
     def test_infer_likely_active_opcodes_metadata_heavy(self):
         meta = {"md_iops": 800.0}

@@ -108,6 +108,12 @@ SMB2_OPCODES = (
 
 _OPCODE_COL = {"label": 22, "iops": 11, "throughput": 11, "size": 9, "latency": 11, "source": 10}
 
+# Opcode workflow panel tiers — authoritative VMS counters vs system-inferred context.
+_OPCODE_SECTION_AUTHORITATIVE = "Based on Authoritative Metrics"
+_OPCODE_SECTION_DERIVED = "Inferred from System Context"
+_AUTHORITATIVE_SOURCES = frozenset({"MEASURED", "SMBMETRICS", "AGGREGATE"})
+_DERIVED_SOURCES = frozenset({"PROXY", "HANDLES", "SESSIONS", "INFERRED", "INTEROP"})
+
 OBJECT_ENDPOINTS = (
     "/cnodes/", "/views/", "/tenants/", "/vips/", "/hosts/",
     "/monitoredhosts/", "/monitoredusers/", "/monitoredviews/",
@@ -1018,8 +1024,70 @@ def infer_likely_active_opcodes(meta, data_rows):
     return hints
 
 
+def _opcode_has_data(row):
+    """Return True when an opcode row has measurable activity this refresh."""
+    if (as_float(row.get("ops_sec")) or 0) > 0:
+        return True
+    if (as_float(row.get("avg_us")) or 0) > 0:
+        return True
+    if (as_float(row.get("bw_mbs")) or 0) > 0:
+        return True
+    return False
+
+
+def _visible_opcode_rows(rows):
+    """Drop opcodes with no data for the current refresh cycle."""
+    return [row for row in rows if _opcode_has_data(row)]
+
+
+def _opcode_tier(source):
+    """Return workflow section tier for an opcode row source label."""
+    if source in _AUTHORITATIVE_SOURCES:
+        return "authoritative"
+    return "derived"
+
+
+def _split_opcode_rows(rows):
+    """Partition opcode rows into authoritative vs system-inferred sections."""
+    auth, derived = [], []
+    for row in rows:
+        (auth if _opcode_tier(row.get("source")) == "authoritative" else derived).append(row)
+    return auth, derived
+
+
+def _interop_rows_from_session(session_rows):
+    """Map interop monitor rows into derived-section opcode-shaped rows."""
+    out = []
+    for row in session_rows:
+        if (as_float(row.get("ops_sec")) or 0) <= 0:
+            continue
+        out.append({
+            "label": row.get("label", "?"),
+            "category": "interop",
+            "cmd": row.get("key", "interop"),
+            "ops_sec": row.get("ops_sec"),
+            "avg_us": None,
+            "bw_mbs": None,
+            "avg_io_bytes": None,
+            "source": "INTEROP",
+            "hint": False,
+        })
+    return out
+
+
+def _opcode_category_banner(category):
+    return {
+        "data": "Data path",
+        "metadata": "Metadata",
+        "lock": "Locking",
+        "session": "Session / tree",
+        "notify": "Notify",
+        "interop": "NFS/SMB interop",
+    }.get(category, category.replace("_", " ").title())
+
+
 def build_opcode_workflow_rows(data_rows, metadata_rows, session_rows, meta, smb_cmd_result):
-    """Build SMB2 opcode table — measured, proxy bucket, or session snapshots."""
+    """Build SMB2 opcode table — only rows with live data are returned."""
     if smb_cmd_result and SMB_PER_COMMAND_EXPORTED:
         native = _build_opcode_rows_from_smbmetrics(smb_cmd_result)
         total = sum(as_float(r["ops_sec"]) or 0 for r in native)
@@ -1027,9 +1095,9 @@ def build_opcode_workflow_rows(data_rows, metadata_rows, session_rows, meta, smb
             for row in native:
                 ops = as_float(row["ops_sec"]) or 0
                 row["pct"] = (ops / total * 100) if total > 0 else None
-            return native
+            return _visible_opcode_rows(native)
+        return []
 
-    hints = infer_likely_active_opcodes(meta, data_rows)
     data_by_key = {r["key"]: r for r in data_rows}
     md_total = as_float(meta.get("md_iops"))
     rd_md = as_float(meta.get("rd_md_iops"))
@@ -1041,62 +1109,82 @@ def build_opcode_workflow_rows(data_rows, metadata_rows, session_rows, meta, smb
 
     rows = []
     for label, category, cmd in SMB2_OPCODES:
-        row = {
-            "label": label,
-            "category": category,
-            "cmd": cmd,
-            "ops_sec": None,
-            "avg_us": None,
-            "bw_mbs": None,
-            "avg_io_bytes": None,
-            "source": "N/A",
-            "hint": label in hints,
-        }
         if category == "data" and cmd in data_by_key:
             src = data_by_key[cmd]
-            row.update({
+            if (as_float(src.get("ops_sec")) or 0) <= 0:
+                continue
+            rows.append({
+                "label": label,
+                "category": category,
+                "cmd": cmd,
                 "ops_sec": src.get("ops_sec"),
                 "avg_us": src.get("avg_us"),
                 "bw_mbs": src.get("bw_mbs"),
                 "avg_io_bytes": src.get("avg_io_bytes"),
                 "source": "MEASURED",
+                "hint": False,
             })
-        elif category == "metadata":
-            row["source"] = "MD_BUCKET"
-            if cmd in ("query_info", "query_directory", "create", "close") and rd_md:
-                row["ops_sec"] = None
-            if label in hints:
-                row["source"] = "MD_HINT"
         elif category == "notify":
             notify_rate = as_float(meta.get("notify_rate"))
             if notify_rate and notify_rate > 0:
-                row.update({"ops_sec": notify_rate, "source": "PROXY"})
+                rows.append({
+                    "label": label,
+                    "category": category,
+                    "cmd": cmd,
+                    "ops_sec": notify_rate,
+                    "avg_us": None,
+                    "bw_mbs": None,
+                    "avg_io_bytes": None,
+                    "source": "PROXY",
+                    "hint": False,
+                })
         elif category == "lock" and lock_count > 0:
-            row.update({"ops_sec": float(lock_count), "source": "HANDLES"})
+            rows.append({
+                "label": label,
+                "category": category,
+                "cmd": cmd,
+                "ops_sec": float(lock_count),
+                "avg_us": None,
+                "bw_mbs": None,
+                "avg_io_bytes": None,
+                "source": "HANDLES",
+                "hint": False,
+            })
         elif category == "session" and conn_count > 0 and cmd in (
             "session_setup", "tree_connect", "negotiate",
         ):
-            row.update({"ops_sec": float(conn_count), "source": "SESSIONS"})
-        rows.append(row)
+            rows.append({
+                "label": label,
+                "category": category,
+                "cmd": cmd,
+                "ops_sec": float(conn_count),
+                "avg_us": None,
+                "bw_mbs": None,
+                "avg_io_bytes": None,
+                "source": "SESSIONS",
+                "hint": False,
+            })
 
-    for row in rows:
-        if row["source"] == "MD_BUCKET" and md_total and md_total > 0:
-            row["_md_bucket_total"] = md_total
-            row["_md_rd"] = rd_md
-            row["_md_wr"] = wr_md
+    if md_total and md_total > 0:
+        rows.append({
+            "label": "METADATA (total)",
+            "category": "metadata",
+            "cmd": "metadata_total",
+            "ops_sec": md_total,
+            "avg_us": None,
+            "bw_mbs": None,
+            "avg_io_bytes": None,
+            "source": "AGGREGATE",
+            "hint": False,
+            "_md_rd": rd_md,
+            "_md_wr": wr_md,
+        })
 
-    active_ops = sum(as_float(r["ops_sec"]) or 0 for r in rows if r["source"] in ("MEASURED", "PROXY", "HANDLES", "SESSIONS"))
-    md_weight = md_total or 0
-    denom = active_ops + md_weight
+    active_ops = sum(as_float(r["ops_sec"]) or 0 for r in rows)
     for row in rows:
         ops = as_float(row.get("ops_sec")) or 0
-        if row["source"] in ("MEASURED", "PROXY", "HANDLES", "SESSIONS") and denom > 0:
-            row["pct"] = ops / denom * 100
-        elif row["source"] in ("MD_BUCKET", "MD_HINT") and md_weight > 0 and denom > 0:
-            row["pct"] = None
-        else:
-            row["pct"] = None
-    return rows
+        row["pct"] = (ops / active_ops * 100) if active_ops > 0 else None
+    return _visible_opcode_rows(rows)
 
 
 def smb_workload_mix(meta, data_rows):
@@ -1491,10 +1579,14 @@ def _opcode_source_cell(source, hint):
         return c(pad_display("MEASURED", _OPCODE_COL["source"], ">"), _BGREEN)
     if source == "SMBMETRICS":
         return c(pad_display("SMBMETRICS", _OPCODE_COL["source"], ">"), _BGREEN)
-    if source in ("PROXY", "HANDLES", "SESSIONS"):
+    if source in ("PROXY", "HANDLES", "SESSIONS", "INTEROP"):
         return c(pad_display(source[:8], _OPCODE_COL["source"], ">"), _YELLOW)
+    if source == "INFERRED":
+        return c(pad_display("INFERRED", _OPCODE_COL["source"], ">"), _BYELLOW)
     if source == "MD_HINT":
         return c(pad_display("MD_HINT", _OPCODE_COL["source"], ">"), _BYELLOW)
+    if source == "AGGREGATE":
+        return c(pad_display("AGGREGATE", _OPCODE_COL["source"], ">"), _CYAN)
     if source == "MD_BUCKET":
         return c(pad_display("MD_BUCKET", _OPCODE_COL["source"], ">"), _DIM)
     return c(pad_display("N/A", _OPCODE_COL["source"], ">"), _DIM)
@@ -1523,67 +1615,91 @@ def _opcode_row_cells(row):
     ], _COL_SEP)
 
 
+def _render_md_split_note(row, width):
+    """Compact read-md / write-md split under the metadata aggregate row."""
+    rd_md = as_float(row.get("_md_rd"))
+    wr_md = as_float(row.get("_md_wr"))
+    if not rd_md and not wr_md:
+        return
+    parts = []
+    if rd_md:
+        parts.append(f"read-md {format_iops(rd_md)}/s")
+    if wr_md:
+        parts.append(f"write-md {format_iops(wr_md)}/s")
+    line = "    " + "  ·  ".join(parts)
+    print(box_row(c(line, _DIM), width))
+
+
+def _render_opcode_section_header(title, width, *, color=_BOLD):
+    print(box_row(c(f"▸ {title}", color), width))
+
+
+def _render_opcode_table_rows(rows, width):
+    """Render opcode rows with category sub-headers."""
+    last_category = None
+    for row in rows:
+        cat = row.get("category")
+        if cat != last_category:
+            print(box_row(c(_opcode_category_banner(cat), _BCYAN), width))
+            last_category = cat
+        print(box_row(_opcode_row_cells(row), width))
+        if row.get("source") == "AGGREGATE":
+            _render_md_split_note(row, width)
+
+
+def _render_derived_opcode_hints(meta, data_rows, width):
+    """Show classifier guesses for metadata opcodes not split by VMS."""
+    if SMB_PER_COMMAND_EXPORTED:
+        return
+    hints = infer_likely_active_opcodes(meta, data_rows)
+    if not hints:
+        return
+    hint_text = ", ".join(sorted(hints)[:6])
+    print(box_row(c("Likely active opcodes (workload classifier)", _BCYAN), width))
+    print(box_row(c(f"  {hint_text}", _DIM), width))
+
+
 def _render_opcode_workflow_panel(snapshot, width):
-    rows = snapshot.get("opcodes") or []
-    meta = snapshot.get("meta") or {}
+    rows = _visible_opcode_rows(snapshot.get("opcodes") or [])
     session_rows = snapshot.get("session") or []
-    md_total = as_float(meta.get("md_iops"))
+    meta = snapshot.get("meta") or {}
+    data_rows = snapshot.get("data") or []
+    derived_rows = _interop_rows_from_session(session_rows)
+    auth_rows, inferred_rows = _split_opcode_rows(rows)
+    derived_rows = inferred_rows + derived_rows
 
     titles = [
         ("SMB2 Opcode", "label", "<"), ("Ops/s", "iops", ">"), ("Throughput", "throughput", ">"),
         ("Avg Size", "size", ">"), ("Latency", "latency", ">"), ("Source", "source", ">"),
     ]
     print(box_top(OPCODE_PANEL_TITLE, width))
+    if not auth_rows and not derived_rows:
+        print(box_row(c("No active SMB opcodes this refresh", _DIM), width))
+        print(box_bottom(width))
+        return
+
     hdr_cells = []
     for title, key, align in titles:
         hdr_cells.append(c(pad_display(title, _OPCODE_COL[key], align), _BOLD))
     print(box_row(join_columns(hdr_cells, _COL_SEP), width))
     print(box_sep(width))
 
-    last_category = None
-    for row in rows:
-        cat = row.get("category")
-        if cat != last_category:
-            banner = {
-                "data": "DATA PATH (SMBCommon rd/wr)",
-                "metadata": "METADATA / NAMESPACE",
-                "lock": "LOCKING",
-                "session": "SESSION / TREE",
-                "notify": "NOTIFY",
-            }.get(cat, cat.upper())
-            print(box_row(c(f"── {banner} ", _DIM) + c("─" * 20, _DIM), width))
-            if cat == "metadata" and md_total and md_total > 0:
-                rd_md = as_float(meta.get("rd_md_iops"))
-                wr_md = as_float(meta.get("wr_md_iops"))
-                note = (
-                    f"md_iops {format_iops(md_total)}/s aggregate — opcodes not split by VMS"
-                )
-                if rd_md or wr_md:
-                    note += f"  (rd_md {format_iops(rd_md)}  wr_md {format_iops(wr_md)})"
-                print(box_row(c(note, _YELLOW), width))
-            last_category = cat
-        print(box_row(_opcode_row_cells(row), width))
+    if auth_rows:
+        _render_opcode_section_header(_OPCODE_SECTION_AUTHORITATIVE, width, color=_BOLD + _BGREEN)
+        _render_opcode_table_rows(auth_rows, width)
 
-    hints = infer_likely_active_opcodes(meta, snapshot.get("data") or [])
-    if hints and not SMB_PER_COMMAND_EXPORTED:
-        hint_text = ", ".join(sorted(hints)[:5])
-        print(box_row(c(f"Likely active metadata/session opcodes: {hint_text}", _DIM), width))
-
-    if session_rows:
-        for row in session_rows[:3]:
-            print(box_row(
-                c(f"Interop {row['label']:<14}", _DIM)
-                + c(f" {format_iops(row.get('ops_sec'))}/s", _YELLOW),
-                width,
-            ))
+    if derived_rows or (not SMB_PER_COMMAND_EXPORTED and infer_likely_active_opcodes(meta, data_rows)):
+        if auth_rows:
+            print(box_sep(width))
+        _render_opcode_section_header(_OPCODE_SECTION_DERIVED, width, color=_BOLD + _BYELLOW)
+        if derived_rows:
+            _render_opcode_table_rows(derived_rows, width)
+        _render_derived_opcode_hints(meta, data_rows, width)
 
     if SMB_PER_COMMAND_EXPORTED:
-        footer = "SmbMetrics per-opcode export active on this VMS build"
+        footer = "Per-opcode SmbMetrics active — authoritative section only"
     else:
-        footer = (
-            "Per-opcode SmbMetrics not exported — READ/WRITE measured; "
-            "metadata opcodes share md_iops bucket"
-        )
+        footer = "Authoritative: SMBCommon counters · Derived: REST snapshots, proxies, classifier"
     print(box_row(c(footer, _DIM), width))
     print(box_bottom(width))
 

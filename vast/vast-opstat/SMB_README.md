@@ -1,17 +1,15 @@
 # vast-opstat — SMB
 
 Live SMB performance telemetry from VAST VMS. Maps **ProtoMetrics SMBCommon**
-instantaneous rates to a five-panel TUI tuned for metadata-heavy Windows/macOS
-workloads. Per-command `SmbMetrics` is not exported on current VMS builds — aggregate
-proxy rows are labeled explicitly.
+instantaneous rates to a three-panel TUI tuned for metadata-heavy Windows/macOS
+workloads. Per-command `SmbMetrics` is not exported on current VMS builds — metadata
+appears as a single **METADATA (total)** aggregate row with an optional read-md /
+write-md split sub-line.
 
 ![SMB TUI Dashboard](images/smb_tui.png)
 
-> Screenshot pending: capture during live `--smb` session with
-> `scripts/Invoke-SmbOpstatLoad.ps1` (see [images/README.md](images/README.md)).
-
-**Implementation:** [smb.py](smb.py) · **Setup:** [SETUP.md](SETUP.md) ·
-**Discovery:** [SMB_PHASE0_RESULTS.md](SMB_PHASE0_RESULTS.md)
+**Version:** 0.1.2 · **Implementation:** [smb.py](smb.py) · **Setup:** [SETUP.md](SETUP.md) ·
+**Opcodes:** [SMB_OPCODES.md](SMB_OPCODES.md) · **Discovery:** [SMB_PHASE0_RESULTS.md](SMB_PHASE0_RESULTS.md)
 
 ---
 
@@ -32,8 +30,6 @@ Shared CLI flags (`--vms-port`, `--refresh`, `--sample-average`, `--csv`, `--no-
 
 ### Generate SMB load (Windows client)
 
-Use the continuous load script in the repo:
-
 ```powershell
 .\scripts\Invoke-SmbOpstatLoad.ps1 -NasShare '\\172.200.203.6\opstattest'
 ```
@@ -51,9 +47,13 @@ Primary cluster monitor props (Phase 0 validated on var203):
 | `md_iops`, `rd_md_iops`, `wr_md_iops` | Metadata workload |
 | `read_latency__avg` / `write_latency__avg` | Data-path latency |
 | `read_size__avg` / `write_size__avg` | Avg I/O size proxies |
+| `write_latency__rate` / `wr_latency` | Write latency fallbacks when avg is zero |
+| `notify_counter` | CHANGE_NOTIFY proxy rate |
+| `NfsMetrics,nfs3_smb_interop_*` | NFS/SMB interop lease-break counters |
 
 **Not exported:** `SmbMetrics,smb_{cmd}_latency__*` (HTTP 400 `property_error`).
-Session/locking panel shows a placeholder until a future VMS build exports those counters.
+On startup opstat probes `SmbMetrics`; when a future VMS build enables per-command export,
+the opcode panel switches to native rates automatically.
 
 ### Workload mix bars
 
@@ -63,13 +63,59 @@ data-path only and must not be used alone for mix math.
 
 ---
 
-## Dashboard Panels
+## Dashboard Panels (v0.1.2)
 
-1. **SMB HEALTH & WORKLOAD** — status badge, ops/lat/BW, mix bars (metadata / read / write)
-2. **PERFORMANCE INSIGHTS** — top contributor, highest latency, data consumer, metadata load
-3. **DATA PATH** — READ / WRITE rows (throughput, size, latency)
-4. **METADATA & NAMESPACE** — SMBCommon md aggregates (proxy label in footer)
-5. **SESSION & LOCKING** — placeholder (per-command counters unexported)
+1. **SMB HEALTH & WORKLOAD** — status badge, ops/lat/BW, mix bars (metadata / read / write), delta arrows
+2. **PERFORMANCE INSIGHTS** — top opcode, highest latency, data consumer, metadata load, top client/share, top Δ
+3. **SMB2 OPCODE WORKFLOW** — only opcodes with live data this refresh (see below)
+
+---
+
+## SMB2 Opcode Workflow Panel
+
+Full opcode reference and calculation details: **[SMB_OPCODES.md](SMB_OPCODES.md)**.
+
+The panel is split into two sections:
+
+| Section | Contents |
+|---------|----------|
+| **Based on Authoritative Metrics** | `SMB2_READ`, `SMB2_WRITE`, `METADATA (total)` — direct `SMBCommon` counters (or native `SmbMetrics` when exported) |
+| **Inferred from System Context** | Notify proxy, lock/handle snapshots, session connection proxies, NFS/SMB interop counters, workload-classifier opcode hints |
+
+The opcode table shows **only active opcodes** for the current refresh. Empty rows
+(`SMB2_CREATE`, `SMB2_QUERY_INFO`, etc.) are omitted rather than displayed with dashes.
+
+### Category layout
+
+**Based on Authoritative Metrics**
+
+| Category | When shown |
+|----------|------------|
+| **Data path** | `SMB2_READ` and/or `SMB2_WRITE` when `rd_iops` / `wr_iops` > 0 |
+| **Metadata** | `METADATA (total)` when `md_iops` > 0; sub-line shows `read-md` / `write-md` split |
+
+**Inferred from System Context**
+
+| Category | When shown |
+|----------|------------|
+| **Notify** | `SMB2_CHANGE_NOTIFY` when `notify_counter` rate > 0 |
+| **Locking** | `SMB2_LOCK` when open handles report locks |
+| **Session / tree** | Negotiate / session / tree-connect proxies when client connections exist |
+| **NFS/SMB interop** | `NfsMetrics,nfs3_smb_interop_*` lease-break counters when elevated |
+| **Classifier hints** | Likely metadata opcodes when workload is metadata-heavy (no per-opcode rate) |
+
+### Source labels
+
+| Source | Meaning |
+|--------|---------|
+| `MEASURED` | Direct from `SMBCommon` (`SMB2_READ`, `SMB2_WRITE`) |
+| `AGGREGATE` | Metadata total from `md_iops` (per-opcode split not exported by VMS) |
+| `SMBMETRICS` | Native per-opcode export (when VMS exposes `SmbMetrics`) |
+| `HANDLES` / `SESSIONS` | Snapshot from open-handle / client-connection APIs |
+| `PROXY` | `CHANGE_NOTIFY` via `notify_counter` |
+| `INTEROP` | NFS/SMB interop counters in derived section |
+
+Footer: `Authoritative: SMBCommon counters · Derived: REST snapshots, proxies, classifier`
 
 ---
 
@@ -87,7 +133,8 @@ data-path only and must not be used alone for mix math.
 View/tenant ranking scans **all** views/tenants in batches of 32, ranks globally by
 ops/s, and displays the top 8 — required when the cluster has 100+ views.
 
-View monitors use `no_aggregation=True` (seconds resolution).
+View monitors use `no_aggregation=True` (seconds resolution). Tenant drill includes
+metadata latency props and QoS property deltas.
 
 ---
 
@@ -100,29 +147,6 @@ View monitors use `no_aggregation=True` (seconds resolution).
 Filters **Performance Insights** (`GET /monitors/topn/` client dimension) and probes
 `GET /clusters/list_smb_client_connections/?client_ip=` for live session snapshots.
 Monitored client IPs are also listed at `GET /monitoredhosts/`.
-
----
-
-## SMB2 Opcode Workflow Panel
-
-Maps common **SMB2 opcodes** to VMS telemetry with explicit source labeling:
-
-| Source | Meaning |
-|--------|---------|
-| `MEASURED` | Direct from `SMBCommon` (`SMB2_READ`, `SMB2_WRITE`) |
-| `SMBMETRICS` | Native per-opcode export (when VMS exposes `SmbMetrics`) |
-| `MD_BUCKET` | Opcode not split — shares aggregate `md_iops` |
-| `MD_HINT` | Classifier suspects this opcode is active in the md bucket |
-| `HANDLES` / `SESSIONS` | Snapshot from open-handle / client-connection APIs |
-| `PROXY` | `CHANGE_NOTIFY` via `notify_counter` |
-
-Opcodes shown: `SMB2_READ`, `SMB2_WRITE`, `SMB2_CREATE`, `SMB2_CLOSE`, `SMB2_FLUSH`,
-`SMB2_QUERY_INFO`, `SMB2_QUERY_DIRECTORY`, `SMB2_SET_INFO`, `SMB2_LOCK`,
-`SMB2_NEGOTIATE`, `SMB2_SESSION_SETUP`, `SMB2_LOGOFF`, `SMB2_TREE_CONNECT`,
-`SMB2_TREE_DISCONNECT`, `SMB2_CHANGE_NOTIFY`.
-
-On startup opstat probes `SmbMetrics` export; when a future VMS build enables it,
-all opcode rows switch to native per-command rates automatically.
 
 ---
 
@@ -143,6 +167,9 @@ throughput, and I/O size columns.
 # Rolling average window
 ./vast-opstat.py --smb --vms var203.selab.vastdata.com --sample-average 10m
 
+# Client-scoped insights
+./vast-opstat.py --smb --clients 172.200.14.253 --vms var203.selab.vastdata.com
+
 # API debug log + CSV
 ./vast-opstat.py --smb --vms <HOST> --csv smb.csv --log-api-calls
 
@@ -155,5 +182,7 @@ ssh -L 8443:var203.selab.vastdata.com:443 user@jump-host
 
 ## Related Docs
 
+- [SMB_OPCODES.md](SMB_OPCODES.md) — SMB2 opcode catalog and calculation reference
 - [SMB_IMPLEMENTATION_PLAN.md](SMB_IMPLEMENTATION_PLAN.md) — phased design record
+- [SMB_PHASE0_RESULTS.md](SMB_PHASE0_RESULTS.md) — var203 metric catalog and API probes
 - [scripts/Invoke-SmbOpstatLoad.ps1](../../scripts/Invoke-SmbOpstatLoad.ps1) — Windows SMB load generator

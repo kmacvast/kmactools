@@ -10,10 +10,9 @@
 | NFS v3 (legacy link) | `vast-opstat_NFSv3.png` |
 | NFS v4.1 (legacy link) | `vast-opstat_NFSv41.png` |
 | NVMe-oTCP (legacy link) | `vast-opstat_NVMe-oTCP.png` |
-| SMB (planned) | `vast-opstat_SMB.png` |
+| SMB (legacy link) | `vast-opstat_SMB.png` |
 
-Capture `smb_tui.png` during a live `vast-opstat.py --smb` session with
-`scripts/Invoke-SmbOpstatLoad.ps1` running against the target share.
+`smb_tui.png` captured from var203 metadata-heavy workload (v0.1.2 opcode panel).
 
 Canonical protocol pages use `nfs_*_tui.png` / `nvme_tcp_tui.png`. Legacy
 `vast-opstat_*.png` filenames are retained for backward compatibility.

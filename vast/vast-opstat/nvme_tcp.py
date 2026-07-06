@@ -12,27 +12,27 @@
 
 import base64
 import csv
-import json
+import io
 import getpass
 import os
 import re
 import select
 import shutil
-import signal
 import ssl
 import sys
 import termios
 import time
 import tty
-import urllib.error
-import urllib.request
 from datetime import datetime
-
-import io
 
 import vast_api_log
 import vast_common
-from tui_layout import display_width, join_columns, pad_display, format_fixed_number, format_scaled_metric, truncate_display
+from tui_layout import (
+    display_width, join_columns, pad_display, format_fixed_number,
+    format_scaled_metric, truncate_display, c, set_color,
+    _RST, _BOLD, _DIM, _GREEN, _YELLOW, _CYAN,
+    _BRED, _BGREEN, _BYELLOW, _BBLUE, _BMAGENTA, _BCYAN, _BWHITE,
+)
 
 # Table column widths — headers and data rows share these exactly.
 _COL_SEP = "  "
@@ -193,24 +193,6 @@ else:
     _BLK, _SHD = "#", "."
     _ARR_UP, _ARR_DN, _ARR_EQ, _DOT, _MUS = "+", "-", "~", "o", "us"
 
-_RST = "\033[0m"
-_BOLD = "\033[1m"
-_DIM = "\033[2m"
-_RED = "\033[31m"
-_GREEN = "\033[32m"
-_YELLOW = "\033[33m"
-_CYAN = "\033[36m"
-_MAGENTA = "\033[35m"
-_BLUE = "\033[34m"
-_BRED = "\033[1;31m"
-_BGREEN = "\033[1;32m"
-_BYELLOW = "\033[1;33m"
-_BCYAN = "\033[1;36m"
-_BMAGENTA = "\033[1;35m"
-_BBLUE = "\033[1;34m"
-_BWHITE = "\033[1;37m"
-
-
 def _fresh_run_stats():
     return {
         label: {"min_us": None, "max_us": None, "weighted_sum_us": 0.0, "weight": 0.0, "seen_sample_ids": set()}
@@ -253,12 +235,14 @@ def init_config(args):
         "Content-Type": "application/json",
         "User-Agent": f"vast-opstat/nvme-tcp/{VERSION}",
     }
+    vast_common.configure_connection(BASE_URL, HEADERS, SSL_CTX)
     log_path = vast_api_log.configure(
         getattr(args, "log_api_calls", False), "nvme-tcp", VMS, PORT,
     )
     if log_path:
         print(f"API call logging enabled: {log_path}", file=sys.stderr, flush=True)
     _COLOR = sys.stdout.isatty() and not args.no_color
+    set_color(_COLOR)
     RUN_STARTED_AT = datetime.now()
     RUN_STATS = _fresh_run_stats()
     OPS_MONITOR_IDS = []
@@ -677,10 +661,6 @@ def _vlen(s):
     return display_width(s)
 
 
-def c(text, code):
-    return f"{code}{text}{_RST}" if _COLOR else text
-
-
 def box_top(title, width):
     raw_pre = f"{_TL}{_H} {title} "
     fill = max(0, width - display_width(raw_pre) - 1)
@@ -873,74 +853,23 @@ def _list_avg(values):
 
 
 def api_request(method, path, payload=None):
-    url = f"{BASE_URL}{path}"
-    data = json.dumps(payload).encode() if payload is not None else None
-    req = urllib.request.Request(url, data=data, headers=HEADERS, method=method)
-    started = time.monotonic()
-    try:
-        with urllib.request.urlopen(req, context=SSL_CTX, timeout=30) as resp:
-            body = resp.read().decode()
-            elapsed_ms = (time.monotonic() - started) * 1000
-            vast_api_log.log_call(method, url, payload, resp.status, body, None, elapsed_ms)
-            return json.loads(body) if body else None
-    except urllib.error.HTTPError as e:
-        body = e.read().decode(errors="replace")
-        elapsed_ms = (time.monotonic() - started) * 1000
-        err = f"HTTP {e.code}: {body}"
-        vast_api_log.log_call(method, url, payload, e.code, body, err, elapsed_ms)
-        raise RuntimeError(f"{method} {url} failed: {err}")
-    except Exception as e:
-        elapsed_ms = (time.monotonic() - started) * 1000
-        vast_api_log.log_call(method, url, payload, None, None, e, elapsed_ms)
-        raise RuntimeError(f"{method} {url} failed: {e}")
+    return vast_common.request(method, path, payload)
 
 
 def normalize_list_response(obj):
-    if isinstance(obj, list):
-        return obj
-    if isinstance(obj, dict) and isinstance(obj.get("results"), list):
-        return obj["results"]
-    return []
+    return vast_common.normalize_list_response(obj)
 
 
 def get_current_cluster():
-    data = api_request("GET", "/clusters/")
-    clusters = normalize_list_response(data)
-    if not clusters:
-        raise RuntimeError(f"No clusters returned from /api/clusters/: {data}")
-    cluster = vast_common.select_local_cluster(clusters)
-    cluster_id = cluster.get("id")
-    cluster_name = (
-        cluster.get("name") or cluster.get("cluster_name")
-        or cluster.get("mgmt_name") or cluster.get("guid") or "unknown"
-    )
-    if cluster_id is None:
-        raise RuntimeError(f"Cluster record did not include id: {cluster}")
-    return cluster_id, cluster_name
+    return vast_common.get_current_cluster(api_request)
 
 
 def _create_monitor_raw(name_suffix, prop_list, object_type, object_ids):
-    base_payload = {
-        "name": f"adhoc_vast-opstat_{name_suffix}_{int(time.time())}",
-        "object_type": object_type,
-        "object_ids": object_ids,
-        "time_frame": API_TIME_FRAME,
-        "aggregation": "avg",
-        "query_aggregation": "avg",
-        "prop_list": prop_list,
-    }
-    payload = {**base_payload, "granularity": "auto"}
-    try:
-        result = api_request("POST", "/monitors/", payload)
-    except RuntimeError as e:
-        msg = str(e)
-        if "Invalid granularity: auto" not in msg and "no such granularity auto" not in msg:
-            raise
-        result = api_request("POST", "/monitors/", base_payload)
-    monitor_id = result.get("id") if isinstance(result, dict) else None
-    if not monitor_id:
-        raise RuntimeError(f"Monitor create did not return id for {name_suffix}: {result}")
-    return vast_common.register_monitor(monitor_id)
+    name = f"adhoc_vast-opstat_{name_suffix}_{int(time.time())}"
+    return vast_common.create_monitor_raw(
+        api_request, name, prop_list, object_type, object_ids,
+        time_frame=API_TIME_FRAME,
+    )
 
 
 def create_ops_monitors(name_prefix, object_type, object_ids, ops_rows=None):
@@ -988,17 +917,7 @@ def create_monitor(name_suffix, prop_list):
 
 
 def delete_monitor(monitor_id):
-    if monitor_id is None:
-        return
-    try:
-        api_request("DELETE", f"/monitors/{monitor_id}/")
-    except RuntimeError as e:
-        if "HTTP 404" not in str(e):
-            vast_common.record_failed_delete(monitor_id, str(e)[:80])
-    except Exception as e:
-        vast_common.record_failed_delete(monitor_id, str(e)[:80])
-    finally:
-        vast_common.forget_monitor(monitor_id)
+    vast_common.delete_monitor(api_request, monitor_id)
 
 
 def setup_keyboard():

@@ -7,8 +7,147 @@ each protocol engine: VMS monitor teardown tracking, signal/atexit wiring
 """
 
 import atexit
+import json
 import signal
 import sys
+import time
+import urllib.error
+import urllib.request
+
+import vast_api_log
+
+# ---------------------------------------------------------------------------
+# REST transport
+# ---------------------------------------------------------------------------
+_BASE_URL = None
+_HEADERS = None
+_SSL_CTX = None
+_TIMEOUT = 60
+
+
+def configure_connection(base_url, headers, ssl_ctx, timeout=60):
+    """Store the VMS connection context used by :func:`request`."""
+    global _BASE_URL, _HEADERS, _SSL_CTX, _TIMEOUT
+    _BASE_URL = base_url
+    _HEADERS = headers
+    _SSL_CTX = ssl_ctx
+    _TIMEOUT = timeout
+
+
+def request(method, path, payload=None):
+    """Issue an authenticated VMS REST request; log every call via vast_api_log.
+
+    Raises RuntimeError on any HTTP or transport error (never leaks the raw
+    urllib exception type to callers).
+    """
+    url = f"{_BASE_URL}{path}"
+    data = json.dumps(payload).encode() if payload is not None else None
+    req = urllib.request.Request(url, data=data, headers=_HEADERS, method=method)
+    started = time.monotonic()
+    try:
+        with urllib.request.urlopen(req, context=_SSL_CTX, timeout=_TIMEOUT) as resp:
+            body = resp.read().decode()
+            elapsed_ms = (time.monotonic() - started) * 1000
+            vast_api_log.log_call(method, url, payload, resp.status, body, None, elapsed_ms)
+            return json.loads(body) if body else None
+    except urllib.error.HTTPError as e:
+        body = e.read().decode(errors="replace")
+        elapsed_ms = (time.monotonic() - started) * 1000
+        err = f"HTTP {e.code}: {body}"
+        vast_api_log.log_call(method, url, payload, e.code, body, err, elapsed_ms)
+        raise RuntimeError(f"{method} {url} failed: {err}") from e
+    except Exception as e:
+        elapsed_ms = (time.monotonic() - started) * 1000
+        vast_api_log.log_call(method, url, payload, None, None, e, elapsed_ms)
+        raise RuntimeError(f"{method} {url} failed: {e}") from e
+
+
+def normalize_list_response(data):
+    """Normalize VMS list endpoints (list, or {results|data|objects: [...]}) to a list."""
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for key in ("results", "data", "objects"):
+            if isinstance(data.get(key), list):
+                return data[key]
+    return []
+
+
+def get_current_cluster(request_fn):
+    """Return (cluster_id, cluster_name) for the active/local cluster.
+
+    Read-only. ``request_fn`` is the engine's ``api_request`` so unit tests that
+    patch it continue to intercept the call.
+    """
+    data = request_fn("GET", "/clusters/")
+    clusters = normalize_list_response(data)
+    if not clusters:
+        raise RuntimeError(f"No clusters returned from /clusters/: {data}")
+    cluster = select_local_cluster(clusters)
+    cluster_id = cluster.get("id")
+    cluster_name = (
+        cluster.get("name") or cluster.get("cluster_name")
+        or cluster.get("mgmt_name") or cluster.get("guid") or "unknown"
+    )
+    if cluster_id is None:
+        raise RuntimeError(f"Cluster record did not include id: {cluster}")
+    return cluster_id, cluster_name
+
+
+# ---------------------------------------------------------------------------
+# Monitor scaffolding (create / delete)
+# ---------------------------------------------------------------------------
+def create_monitor_raw(request_fn, name, prop_list, object_type, object_ids,
+                       *, time_frame, no_aggregation=False):
+    """Create one VMS monitor and register it for guaranteed teardown.
+
+    Data-altering (POST /monitors/). When ``no_aggregation`` is False, tries a
+    ``granularity=auto`` payload first and retries without it on clusters that
+    reject that granularity.
+    """
+    base_payload = {
+        "name": name,
+        "object_type": object_type,
+        "object_ids": object_ids,
+        "time_frame": time_frame,
+        "prop_list": prop_list,
+    }
+    if not no_aggregation:
+        base_payload["aggregation"] = "avg"
+        base_payload["query_aggregation"] = "avg"
+
+    if no_aggregation:
+        result = request_fn("POST", "/monitors/", base_payload)
+    else:
+        payload = {**base_payload, "granularity": "auto"}
+        try:
+            result = request_fn("POST", "/monitors/", payload)
+        except RuntimeError as e:
+            msg = str(e)
+            if "Invalid granularity: auto" not in msg and "no such granularity auto" not in msg:
+                raise
+            result = request_fn("POST", "/monitors/", base_payload)
+
+    monitor_id = result.get("id") if isinstance(result, dict) else None
+    if not monitor_id:
+        raise RuntimeError(f"Monitor create did not return id for {name}: {result}")
+    return register_monitor(monitor_id)
+
+
+def delete_monitor(request_fn, monitor_id):
+    """Delete a monitor (Data-altering); track real (non-404) failures for exit."""
+    if monitor_id is None:
+        return
+    try:
+        request_fn("DELETE", f"/monitors/{monitor_id}/")
+    except RuntimeError as e:
+        if "HTTP 404" not in str(e):
+            record_failed_delete(monitor_id, str(e)[:80])
+    except Exception as e:  # pragma: no cover - request() already wraps to RuntimeError
+        record_failed_delete(monitor_id, str(e)[:80])
+    finally:
+        forget_monitor(monitor_id)
+
 
 # ---------------------------------------------------------------------------
 # Monitor lifecycle registry

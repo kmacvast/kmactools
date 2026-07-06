@@ -200,7 +200,7 @@ class TestVastApiLog:
             def __exit__(self, *args):
                 return False
 
-        with patch.object(nfs_v3.urllib.request, "urlopen", return_value=FakeResp()):
+        with patch.object(nfs_v3.vast_common.urllib.request, "urlopen", return_value=FakeResp()):
             result = nfs_v3.api_request("GET", "/clusters/")
 
         assert result == [{"id": 1}]
@@ -1488,6 +1488,16 @@ class TestVastCommon:
         out = capsys.readouterr().out
         assert out == "\033[Hhello\033[J"
         assert "\033[2J" not in out  # no full-screen erase → no flicker
+
+    def test_shared_color_helper_respects_toggle(self):
+        assert smb.set_color.__module__.endswith("tui_layout")  # from tui_layout
+        smb.set_color(True)
+        colored = smb.c("hi", smb._BCYAN)
+        assert colored.startswith(smb._BCYAN) and colored.endswith("\033[0m")
+        smb.set_color(False)
+        assert smb.c("hi", smb._BCYAN) == "hi"
+        # every engine shares one color-enable flag (single source of truth)
+        assert nvme_tcp.c("x", nvme_tcp._BBLUE) == "x"
 
     def test_install_signal_handlers_covers_sighup(self):
         import signal as _signal

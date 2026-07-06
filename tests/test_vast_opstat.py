@@ -20,6 +20,7 @@ _OPSTAT_SCRIPT = os.path.join(_OPSTAT_DIR, "vast-opstat.py")
 _NFS_V3_SCRIPT = os.path.join(_OPSTAT_DIR, "nfs_v3.py")
 _NFS_V41_SCRIPT = os.path.join(_OPSTAT_DIR, "nfs_v41.py")
 _NVME_TCP_SCRIPT = os.path.join(_OPSTAT_DIR, "nvme_tcp.py")
+_SMB_SCRIPT = os.path.join(_OPSTAT_DIR, "smb.py")
 _VAST_API_LOG_SCRIPT = os.path.join(_OPSTAT_DIR, "vast_api_log.py")
 
 
@@ -35,6 +36,7 @@ opstat = _load_module("vast_opstat", _OPSTAT_SCRIPT)
 nfs_v3 = _load_module("vast_opstat_nfs_v3", _NFS_V3_SCRIPT)
 nfs_v41 = _load_module("vast_opstat_nfs_v41", _NFS_V41_SCRIPT)
 nvme_tcp = _load_module("vast_opstat_nvme_tcp", _NVME_TCP_SCRIPT)
+smb = _load_module("vast_opstat_smb", _SMB_SCRIPT)
 vast_api_log = _load_module("vast_opstat_api_log", _VAST_API_LOG_SCRIPT)
 
 BASE_ARGS = [
@@ -62,6 +64,8 @@ def _connection_args(**overrides):
         "smb": False,
         "nvme_over_tcp": False,
         "protocol_version": "3.0",
+        "volumes": None,
+        "clients": None,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -110,10 +114,21 @@ class TestCliParsing:
         )
         assert args.volumes == "vol-a,vol-b"
 
-    def test_smb_not_implemented(self):
+    def test_smb_flags_parse(self):
+        args = opstat.parse_args(["--smb", *BASE_ARGS])
+        assert args.smb is True
+        assert args.nfs is False
+
+    def test_smb_client_flags_parse(self):
+        args = opstat.parse_args(
+            ["--smb", "--clients", "10.1.1.5,10.1.1.6", *BASE_ARGS]
+        )
+        assert args.clients == "10.1.1.5,10.1.1.6"
+
+    def test_clients_without_smb_exits(self):
         with pytest.raises(SystemExit) as exc:
-            opstat.parse_args(["--smb", *BASE_ARGS])
-        assert "SMB statistics are not implemented yet" in str(exc.value)
+            opstat.parse_args(["--nfs", "--version=3.0", "--clients", "10.0.0.1", *BASE_ARGS])
+        assert "--client/--clients is only supported with --smb" in str(exc.value)
 
     def test_tool_version_flag(self, capsys):
         with pytest.raises(SystemExit) as exc:
@@ -670,6 +685,453 @@ class TestDispatch:
         with patch.object(opstat.nvme_tcp, "run", return_value=0) as run_mock:
             assert opstat.dispatch(args) == 0
         run_mock.assert_called_once_with(args)
+
+    def test_dispatch_routes_to_smb(self):
+        args = opstat.parse_args(["--smb", *BASE_ARGS])
+        with patch.object(opstat.smb, "run", return_value=0) as run_mock:
+            assert opstat.dispatch(args) == 0
+        run_mock.assert_called_once_with(args)
+
+
+class TestSmbModule:
+    def test_configure_client_scope_parses_csv(self):
+        args = SimpleNamespace(clients="10.1.1.5, 10.1.1.6")
+        smb.configure_client_scope(args)
+        assert smb.CLIENT_SCOPED is True
+        assert smb.CLIENT_IPS == ["10.1.1.5", "10.1.1.6"]
+
+    def test_configure_client_scope_empty(self):
+        args = SimpleNamespace(clients=None)
+        smb.configure_client_scope(args)
+        assert smb.CLIENT_SCOPED is False
+        assert smb.CLIENT_IPS == []
+
+    def test_maybe_fetch_aux_context_throttles_rest_probes(self, mocker):
+        smb.REFRESH_SECONDS = 5
+        smb._LAST_AUX_FETCH_AT = 0.0
+        topn = mocker.patch.object(smb, "fetch_topn_data")
+        session = mocker.patch.object(smb, "fetch_session_context")
+
+        smb._maybe_fetch_aux_context()
+        assert topn.call_count == 1
+        assert session.call_count == 1
+
+        topn.reset_mock()
+        session.reset_mock()
+        smb._maybe_fetch_aux_context()
+        assert topn.call_count == 0
+        assert session.call_count == 0
+
+        smb._maybe_fetch_aux_context(force=True)
+        assert topn.call_count == 1
+        assert session.call_count == 1
+
+    def test_write_csv_snapshot_appends_rows(self, tmp_path):
+        csv_path = tmp_path / "smb.csv"
+        smb.init_config(_connection_args(
+            smb=True, nfs=False, protocol_version=None, csv=str(csv_path),
+        ))
+        smb.CLUSTER_ID = 1
+        smb.CLUSTER_NAME = "lab"
+        smb.HEADLINE_MONITOR_ID = 99
+        smb.ensure_csv_file()
+        snapshot = {
+            "data": [{"label": "READ", "ops_sec": 10.0, "pct": 50.0, "avg_us": 100.0,
+                      "bw_mbs": 5.0, "avg_io_bytes": 4096.0}],
+            "metadata": [{"label": "METADATA", "ops_sec": 20.0, "pct": 100.0,
+                          "avg_us": None, "bw_mbs": None, "avg_io_bytes": None}],
+        }
+        smb.write_csv_snapshot(snapshot, "2026-07-06T12:00:00Z")
+        lines = csv_path.read_text().strip().splitlines()
+        assert len(lines) == 3
+        assert "READ" in lines[1]
+        assert "METADATA" in lines[2]
+
+    def test_build_opcode_workflow_rows_maps_read_write(self):
+        data = [
+            {"key": "read", "label": "READ", "ops_sec": 1000.0, "avg_us": 500.0,
+             "bw_mbs": 10.0, "avg_io_bytes": 4096.0, "pct": 66.0},
+            {"key": "write", "label": "WRITE", "ops_sec": 500.0, "avg_us": 800.0,
+             "bw_mbs": 2.0, "avg_io_bytes": 2048.0, "pct": 33.0},
+        ]
+        meta = {"md_iops": 2000.0, "rd_md_iops": 1200.0, "wr_md_iops": 800.0,
+                "notify_rate": None, "interop_lease_break_rate": None}
+        rows = smb.build_opcode_workflow_rows(data, [], [], meta, None)
+        labels = [r["label"] for r in rows]
+        assert "SMB2_READ" in labels
+        assert "SMB2_WRITE" in labels
+        assert "METADATA (total)" in labels
+        assert "SMB2_QUERY_INFO" not in labels
+        assert "SMB2_SESSION_SETUP" not in labels
+        read_row = next(r for r in rows if r["label"] == "SMB2_READ")
+        assert read_row["source"] == "MEASURED"
+        assert read_row["ops_sec"] == pytest.approx(1000.0)
+        md_row = next(r for r in rows if r["label"] == "METADATA (total)")
+        assert md_row["source"] == "AGGREGATE"
+        assert md_row["ops_sec"] == pytest.approx(2000.0)
+        assert md_row["_md_rd"] == pytest.approx(1200.0)
+        assert md_row["_md_wr"] == pytest.approx(800.0)
+
+    def test_build_opcode_workflow_rows_omits_zero_data_opcodes(self):
+        data = [
+            {"key": "write", "label": "WRITE", "ops_sec": 296.0, "avg_us": 448.0,
+             "bw_mbs": 0.076, "avg_io_bytes": 256.0, "pct": 100.0},
+        ]
+        meta = {"md_iops": 3577.0, "rd_md_iops": 2327.0, "wr_md_iops": 1250.0}
+        rows = smb.build_opcode_workflow_rows(data, [], [], meta, None)
+        labels = [r["label"] for r in rows]
+        assert labels == ["SMB2_WRITE", "METADATA (total)"]
+
+    def test_opcode_has_data_filters_empty_rows(self):
+        rows = [
+            {"label": "SMB2_READ", "ops_sec": 0, "avg_us": 0, "bw_mbs": 0},
+            {"label": "SMB2_WRITE", "ops_sec": 10.0, "avg_us": 0, "bw_mbs": 0},
+        ]
+        visible = smb._visible_opcode_rows(rows)
+        assert len(visible) == 1
+        assert visible[0]["label"] == "SMB2_WRITE"
+
+    def test_split_opcode_rows_authoritative_vs_derived(self):
+        rows = [
+            {"label": "SMB2_READ", "source": "MEASURED", "ops_sec": 100.0},
+            {"label": "SMB2_WRITE", "source": "MEASURED", "ops_sec": 50.0},
+            {"label": "METADATA (total)", "source": "AGGREGATE", "ops_sec": 500.0},
+            {"label": "SMB2_CHANGE_NOTIFY", "source": "PROXY", "ops_sec": 3.0},
+            {"label": "SMB2_LOCK", "source": "HANDLES", "ops_sec": 2.0},
+        ]
+        auth, derived = smb._split_opcode_rows(rows)
+        assert [r["label"] for r in auth] == [
+            "SMB2_READ", "SMB2_WRITE", "METADATA (total)",
+        ]
+        assert [r["label"] for r in derived] == ["SMB2_CHANGE_NOTIFY", "SMB2_LOCK"]
+        assert smb._opcode_tier("SMBMETRICS") == "authoritative"
+        assert smb._opcode_tier("SESSIONS") == "derived"
+
+    def test_infer_likely_active_opcodes_metadata_heavy(self):
+        meta = {"md_iops": 800.0}
+        data = [{"key": "read", "ops_sec": 100.0}, {"key": "write", "ops_sec": 50.0}]
+        hints = smb.infer_likely_active_opcodes(meta, data)
+        assert "SMB2_QUERY_DIRECTORY" in hints
+
+    def test_smb_command_props_cover_candidates(self):
+        props = smb.smb_command_props()
+        assert "SmbMetrics,smb_read_latency__rate" in props
+        assert "SmbMetrics,smb_oplock_break_latency__avg" in props
+        assert len(props) == len(smb.SMB_CMD_CANDIDATES) * 2
+
+    def test_phase0_metric_binding_constants(self):
+        assert smb.METRICS_SOURCE == "SMBCommon"
+        assert smb.SMB_PER_COMMAND_EXPORTED is False
+
+    def test_drill_endpoints_are_not_api_prefixed(self):
+        for mode, cfg in smb._DRILL_CFG.items():
+            assert cfg["endpoint"].startswith("/")
+            assert not cfg["endpoint"].startswith("/api/"), mode
+
+    def test_build_headline_monitor_props_use_smbcommon(self):
+        props = smb.build_headline_monitor_props()
+        assert all(
+            p.startswith("ProtoMetrics,proto_name=SMBCommon,") or p.startswith("NfsMetrics,")
+            for p in props
+        )
+        assert smb._common_fqn("rd_iops") in props
+        assert smb._common_fqn("md_iops") in props
+        assert smb._common_fqn("write_latency__rate") in props
+        assert smb._common_fqn("wr_latency") in props
+        assert "NfsMetrics,nfs3_smb_interop_triggered_lease_breaks" in props
+
+    def test_write_latency_fallback_uses_rate_when_avg_zero(self):
+        ts = "2026-07-06T12:00:00Z"
+        result = {
+            "prop_list": [
+                "timestamp",
+                smb._common_fqn("rd_iops"), smb._common_fqn("wr_iops"),
+                smb._common_fqn("md_iops"), smb._common_fqn("rd_md_iops"),
+                smb._common_fqn("wr_md_iops"),
+                smb._common_fqn("write_latency__avg"),
+                smb._common_fqn("write_latency__rate"),
+                smb._common_fqn("wr_latency"),
+            ],
+            "data": [[ts, 10.0, 20.0, 5.0, 2.0, 3.0, 0.0, 2500.0, 0.0]],
+        }
+        snapshot, _sample = smb.build_rows_from_results(result)
+        write_row = next(r for r in snapshot["data"] if r["key"] == "write")
+        assert write_row["avg_us"] == pytest.approx(2500.0)
+
+    def test_interop_session_rows_from_multi_sample_monitor(self):
+        result = {
+            "prop_list": [
+                "timestamp",
+                "NfsMetrics,nfs3_smb_interop_triggered_lease_breaks",
+            ],
+            "data": [
+                ["2026-07-06T12:00:10Z", 10.0],
+                ["2026-07-06T12:00:00Z", 0.0],
+            ],
+        }
+        rates = smb._interop_rates_from_result(result)
+        assert rates["nfs3_smb_interop_triggered_lease_breaks"] == pytest.approx(1.0)
+
+    def test_parse_topn_ip_and_client_scope_filter(self):
+        assert smb._parse_topn_ip("172.200.14.253 [default]") == "172.200.14.253"
+        smb.CLIENT_SCOPED = True
+        smb.CLIENT_IPS = ["172.200.14.253"]
+        assert smb._client_matches_scope("172.200.14.253 [default]") is True
+        assert smb._client_matches_scope("10.0.0.1 [default]") is False
+        smb.CLIENT_SCOPED = False
+        smb.CLIENT_IPS = []
+
+    def test_topn_dimension_rows_filters_scoped_clients(self):
+        smb.LAST_TOPN = {
+            "data": {
+                "client": {
+                    "md_iops": [
+                        {"title": "172.200.14.253 [default]", "total": 100.0},
+                        {"title": "10.0.0.1 [default]", "total": 50.0},
+                    ],
+                },
+            },
+        }
+        smb.CLIENT_SCOPED = True
+        smb.CLIENT_IPS = ["172.200.14.253"]
+        rows = smb._topn_dimension_rows("client", "md_iops")
+        assert len(rows) == 1
+        assert rows[0]["total"] == pytest.approx(100.0)
+        smb.CLIENT_SCOPED = False
+        smb.CLIENT_IPS = []
+        smb.LAST_TOPN = None
+
+    def test_build_rows_from_smbcommon_sample(self):
+        ts = "2026-07-06T12:00:00Z"
+        result = {
+            "prop_list": [
+                "timestamp",
+                smb._common_fqn("iops"),
+                smb._common_fqn("rd_iops"),
+                smb._common_fqn("wr_iops"),
+                smb._common_fqn("md_iops"),
+                smb._common_fqn("rd_md_iops"),
+                smb._common_fqn("wr_md_iops"),
+                smb._common_fqn("rd_bw"),
+                smb._common_fqn("wr_bw"),
+                smb._common_fqn("read_latency__avg"),
+                smb._common_fqn("write_latency__avg"),
+                smb._common_fqn("read_size__avg"),
+                smb._common_fqn("write_size__avg"),
+            ],
+            "data": [[
+                ts, 5000.0, 1000.0, 500.0, 3500.0, 2000.0, 1500.0,
+                2_000_000_000.0, 500_000_000.0, 800.0, 1200.0, 65536.0, 4096.0,
+            ]],
+        }
+        snapshot, sample = smb.build_rows_from_results(result)
+        assert sample == ts
+        assert smb.METRICS_SOURCE == "SMBCommon"
+        read_row = next(r for r in snapshot["data"] if r["key"] == "read")
+        assert read_row["ops_sec"] == pytest.approx(1000.0)
+        assert read_row["bw_mbs"] == pytest.approx(2000.0)
+        assert read_row["avg_us"] == pytest.approx(800.0)
+        md_row = next(r for r in snapshot["metadata"] if r["key"] == "md_total")
+        assert md_row["ops_sec"] == pytest.approx(3500.0)
+        assert snapshot["meta"]["total_iops"] == pytest.approx(5000.0)
+
+    def test_classify_smb_workload_metadata_heavy(self):
+        meta = {"total_iops": 1000.0, "md_iops": 700.0}
+        data = [
+            {"key": "read", "ops_sec": 200.0, "avg_io_bytes": 4096.0},
+            {"key": "write", "ops_sec": 100.0, "avg_io_bytes": None},
+        ]
+        result = smb.classify_smb_workload(meta, data)
+        assert "metadata-heavy" in result
+
+    def test_smb_health_label_idle(self):
+        label, _color = smb.smb_health_label(0.0, None)
+        assert label == "IDLE"
+
+    def test_smb_health_label_healthy(self):
+        label, _color = smb.smb_health_label(5000.0, 400.0)
+        assert label == "HEALTHY"
+
+    def test_smb_workload_mix_sums_to_100_when_md_exceeds_iops(self):
+        """SMBCommon,iops is data-only; md_iops must not produce >100% metadata bar."""
+        meta = {"total_iops": 1000.0, "md_iops": 1500.0}
+        data = [
+            {"key": "read", "ops_sec": 200.0},
+            {"key": "write", "ops_sec": 100.0},
+        ]
+        md_pct, read_pct, write_pct = smb.smb_workload_mix(meta, data)
+        assert md_pct == pytest.approx(1500 / 1800 * 100)
+        assert read_pct + write_pct + md_pct == pytest.approx(100.0)
+        assert md_pct < 100
+
+    def test_slice_result_object_id_coercion(self):
+        result = {
+            "prop_list": ["timestamp", "object_id", "metric"],
+            "data": [["t1", "42", 10.0], ["t2", 42, 20.0]],
+        }
+        sliced = smb._slice_result_for_object(result, 42)
+        assert len(sliced["data"]) == 2
+
+    def test_rank_drill_candidates_finds_active_view_beyond_first_chunk(self):
+        smb.init_config(_connection_args(smb=True, nfs=False, protocol_version=None))
+        smb.CLUSTER_ID = 1
+        objects = [{"id": i, "path": f"/v{i}"} for i in range(1, 41)]
+        cfg = smb._DRILL_CFG["view"]
+        calls = []
+        monitor_ids = iter(range(100, 200))
+
+        def fake_query(mode, slice_result, name):
+            ops = 500.0 if name == "/v40" else 0.0
+            return {"name": name, "total_ops": ops, "latency_us": None, "bw_gbs": None,
+                    "top_rpc": "-", "top_rpc_pct": None}
+
+        def fake_api_request(method, path, payload=None):
+            calls.append((method, path))
+            if method == "POST" and path == "/monitors/":
+                return {"id": next(monitor_ids)}
+            if method == "GET" and path.endswith("/query/"):
+                ids = payload if False else payload  # noqa — use POST payload from prior call
+                return {"prop_list": ["timestamp", "object_id"], "data": []}
+            if method == "DELETE":
+                return None
+            raise AssertionError(f"Unexpected: {method} {path}")
+
+        with patch.object(smb, "api_request", side_effect=fake_api_request), \
+             patch.object(smb, "_build_drill_row", side_effect=fake_query):
+            ranked = smb._rank_drill_candidates("view", objects, cfg)
+
+        assert ranked[0]["name"] == "/v40"
+        assert len([c for c in calls if c[0] == "POST"]) == 2  # 40 views → 2 chunks
+
+    def test_build_drill_prop_list_scopes(self):
+        cnode_props = smb.build_drill_prop_list("cnode")
+        view_props = smb.build_drill_prop_list("view")
+        tenant_props = smb.build_drill_prop_list("tenant")
+        assert smb._common_fqn("rd_iops") in cnode_props
+        assert smb._VIEW_READ_IOPS in view_props
+        assert smb._VIEW_READ_MD_LAT in view_props
+        assert smb._VIEW_QOS_FAILURES in view_props
+        assert smb._TENANT_READ_IOPS in tenant_props
+        assert smb._TENANT_READ_MD_LAT_SUM in tenant_props
+
+    def test_build_view_drill_row_from_rates(self):
+        result = {
+            "prop_list": [
+                "timestamp",
+                smb._VIEW_READ_IOPS,
+                smb._VIEW_WRITE_IOPS,
+                smb._VIEW_READ_MD,
+                smb._VIEW_WRITE_MD,
+                smb._VIEW_READ_LAT,
+                smb._VIEW_WRITE_LAT,
+                smb._VIEW_READ_BW,
+                smb._VIEW_WRITE_BW,
+            ],
+            "data": [["2026-07-01T00:00:00Z", 100.0, 50.0, 30.0, 20.0, 500.0, 800.0, 1e9, 5e8]],
+        }
+        row = smb._build_view_drill_row(result, "/share")
+        assert row["name"] == "/share"
+        assert row["total_ops"] == pytest.approx(200.0)
+        assert row["top_rpc"] == "READ"
+
+    def test_view_drill_entry_uses_batch_rank_and_display_monitors(self):
+        smb.init_config(_connection_args(smb=True, nfs=False, protocol_version=None))
+        smb.CLUSTER_ID = 1
+        views = [{"id": i, "path": f"/v{i}"} for i in range(1, 4)]
+        calls = []
+        monitor_seq = iter([900, 901])
+
+        def fake_api_request(method, path, payload=None):
+            calls.append((method, path))
+            if method == "GET" and path == "/views/":
+                return views
+            if method == "POST" and path == "/monitors/":
+                return {"id": next(monitor_seq)}
+            if method == "GET" and path.endswith("/query/"):
+                return {
+                    "prop_list": [
+                        "timestamp",
+                        "object_id",
+                        smb._VIEW_READ_IOPS,
+                        smb._VIEW_WRITE_IOPS,
+                        smb._VIEW_READ_MD,
+                        smb._VIEW_WRITE_MD,
+                    ],
+                    "data": [
+                        ["2026-07-01T00:00:00Z", vid, float(vid), 0.0, 0.0, 0.0]
+                        for vid in (1, 2, 3)
+                    ],
+                }
+            if method == "DELETE":
+                return None
+            raise AssertionError(f"Unexpected API call: {method} {path}")
+
+        with patch.object(smb, "api_request", side_effect=fake_api_request):
+            smb.enter_drill_mode("view")
+
+        post_calls = [c for c in calls if c[0] == "POST"]
+        get_query_calls = [c for c in calls if c[0] == "GET" and c[1].endswith("/query/")]
+        assert len(post_calls) == 2
+        assert len(get_query_calls) == 1
+        assert len(smb.DRILL_MONITORS) == 1
+
+    def test_fetch_drill_query_view_uses_single_batch_get(self):
+        smb.init_config(_connection_args(smb=True, nfs=False, protocol_version=None))
+        smb.DRILL_MODE = "view"
+        smb.DRILL_OBJECTS = [{"id": 1, "name": "/a"}, {"id": 2, "name": "/b"}]
+        smb.DRILL_MONITORS = [(55, None)]
+        calls = []
+
+        def fake_api_request(method, path, payload=None):
+            calls.append((method, path))
+            return {
+                "prop_list": [
+                    "timestamp", "object_id",
+                    smb._VIEW_READ_IOPS, smb._VIEW_WRITE_IOPS,
+                    smb._VIEW_READ_MD, smb._VIEW_WRITE_MD,
+                    smb._VIEW_READ_LAT, smb._VIEW_WRITE_LAT,
+                    smb._VIEW_READ_BW, smb._VIEW_WRITE_BW,
+                ],
+                "data": [
+                    ["2026-07-01T00:00:00Z", 1, 10.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                    ["2026-07-01T00:00:00Z", 2, 5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                ],
+            }
+
+        with patch.object(smb, "api_request", side_effect=fake_api_request):
+            smb.fetch_drill_query()
+
+        assert calls == [("GET", "/monitors/55/query/")]
+        assert len(smb.LAST_DRILL_ROWS) == 2
+
+    def test_build_cnode_drill_row_from_smbcommon(self):
+        ts = "2026-07-06T12:00:00Z"
+        result = {
+            "prop_list": [
+                "timestamp",
+                smb._common_fqn("iops"),
+                smb._common_fqn("rd_iops"),
+                smb._common_fqn("wr_iops"),
+                smb._common_fqn("md_iops"),
+                smb._common_fqn("rd_bw"),
+                smb._common_fqn("wr_bw"),
+                smb._common_fqn("read_latency__avg"),
+                smb._common_fqn("write_latency__avg"),
+            ],
+            "data": [[ts, 300.0, 100.0, 50.0, 150.0, 1e9, 5e8, 400.0, 600.0]],
+        }
+        row = smb._build_cnode_drill_row(result, "cnode-1")
+        assert row["total_ops"] == pytest.approx(300.0)
+        assert row["top_rpc"] in ("READ", "METADATA")
+
+    def test_discover_metrics_exits_on_cluster_failure(self):
+        args = _connection_args(smb=True, nfs=False, protocol_version=None, discover_metrics=True)
+        with patch.object(smb, "init_config"):
+            smb.ARGS = args
+            with patch.object(smb, "get_current_cluster", side_effect=RuntimeError("down")):
+                with pytest.raises(SystemExit) as exc:
+                    smb.discover_metrics()
+                assert exc.value.code == 1
 
 
 class TestNvmeTcpMetrics:

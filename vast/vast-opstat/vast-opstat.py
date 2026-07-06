@@ -3,7 +3,8 @@
 # Script Name: vast-opstat.py
 # Description: Multi-protocol VAST performance statistics tool. Phase 1 routes
 #              --nfs --version=3.0 to NFS v3; --nfs --version=4.1 to NFS v4.1;
-#              Phase 2 routes --block --nvme-over-tcp to NVMe-oTCP block statistics.
+#              Phase 2 routes --block --nvme-over-tcp to NVMe-oTCP block statistics;
+#              --smb routes to SMB statistics (v0.1.2).
 #
 # Author: KMac kmac@vastdata.com
 # Version: 0.1.1
@@ -20,8 +21,9 @@ if _SCRIPT_DIR not in sys.path:
 import nfs_v3
 import nfs_v41
 import nvme_tcp
+import smb
 
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 
 DEFAULT_PORT = 443
 DEFAULT_USER = "admin"
@@ -40,6 +42,11 @@ def new_argument_parser(description):
 
 def validate_protocol_args(args):
     """Validate protocol flag combinations after argparse parsing."""
+    if args.clients and not args.smb:
+        raise SystemExit(
+            "ERROR: --client/--clients is only supported with --smb."
+        )
+
     if args.nfs:
         if not args.protocol_version:
             raise SystemExit(
@@ -65,9 +72,6 @@ def validate_protocol_args(args):
                 "Example: vast-opstat.py --block --nvme-over-tcp --vms <VMS_IP>"
             )
         return
-
-    if args.smb:
-        raise SystemExit("ERROR: SMB statistics are not implemented yet.")
 
 
 def parse_args(argv=None):
@@ -180,6 +184,20 @@ def parse_args(argv=None):
         help="Comma-separated volume names to scope block stats (NVMe-oTCP).",
     )
     parser.add_argument(
+        "--client",
+        dest="clients",
+        default=None,
+        metavar="IP",
+        help="Limit SMB stats to one client IP or hostname. Alias: --clients.",
+    )
+    parser.add_argument(
+        "--clients",
+        dest="clients",
+        default=None,
+        metavar="IPS",
+        help="Comma-separated client IPs/hostnames to scope SMB stats (Phase 4b).",
+    )
+    parser.add_argument(
         "--log-api-calls",
         action="store_true",
         help="Log VMS REST API requests/responses to a file under /tmp.",
@@ -205,6 +223,8 @@ def dispatch(args):
         return nfs_v41.run(args)
     if args.block and args.nvme_over_tcp:
         return nvme_tcp.run(args)
+    if args.smb:
+        return smb.run(args)
     raise SystemExit("ERROR: No protocol handler matched the supplied flags.")
 
 

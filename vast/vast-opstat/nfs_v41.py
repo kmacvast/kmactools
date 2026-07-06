@@ -42,7 +42,7 @@ from datetime import datetime
 import vast_api_log
 from tui_layout import display_width, join_columns, pad_display, format_fixed_number, format_scaled_metric
 
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 
 DEFAULT_PORT = 443
 DEFAULT_USER = "admin"

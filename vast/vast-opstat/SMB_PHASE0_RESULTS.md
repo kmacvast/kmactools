@@ -15,7 +15,7 @@
 | `ProtoMetrics,proto_name=SMB,iops/bw/latency` | ⚠️ Not in query prop_list | Use `SMBCommon,iops/bw/latency` instead |
 | `SmbMetrics,smb_{cmd}_latency__*` | ❌ HTTP 400 `property_error` | **No per-command table** — proxy aggregates only |
 | View-scoped `ViewMetrics` | ✅ `view_no_aggregation` OK | Share drill (`v`) validated |
-| Client REST endpoints | ❌ All 404 | Phase 4b blocked — cluster/view/tenant scope only |
+| Client REST endpoints | ✅ Swagger paths | `list_smb_client_connections`, `openfilehandles`, `monitoredhosts`, `topn` |
 | Drill objects cnode/view/tenant | ✅ | Phase 4 ready |
 
 **Gate:** Phase 0 complete. Phase 2 may proceed with **SMBCommon-only** panels.

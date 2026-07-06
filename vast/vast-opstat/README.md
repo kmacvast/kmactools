@@ -26,15 +26,15 @@ Runtime dependencies: [requirements.txt](requirements.txt) (stdlib only for exec
 | **NFS v3** | `--nfs --version=3.0` | **Fully Implemented** | **[NFSv3_README.md](NFSv3_README.md)** |
 | **NFS v4.1** | `--nfs --version=4.1` | **Fully Implemented** | **[NFSv41_README.md](NFSv41_README.md)** |
 | **NVMe-oTCP (block)** | `--block --nvme-over-tcp` | **Fully Implemented** | **[NVMe_TCP_README.md](NVMe_TCP_README.md)** |
+| **SMB** | `--smb` | **Fully Implemented** | **[SMB_README.md](SMB_README.md)** |
 | NFS v4.2 | `--nfs --version=4.2` | Planned | — |
-| SMB | `--smb` | Planned | — |
 
 ### Flag rules
 
 - `--block` requires `--nvme-over-tcp`.
 - `--version` is **required** with `--nfs` (e.g. `--version=3.0` or `--version=4.1`).
 - `--version` is **not** used with `--block` or `--smb`.
-- Use `-V` / `--tool-version` to print the vast-opstat release version (currently **0.1.1**).
+- Use `-V` / `--tool-version` to print the vast-opstat release version (currently **0.1.2**).
 
 ---
 
@@ -56,6 +56,9 @@ cd vast/vast-opstat
 ./vast-opstat.py --block --nvme-over-tcp --vms <VMS_HOST> \
   --volumes vol1,vol2 --user <USER>
 
+# SMB — cluster-wide (SMBCommon aggregates)
+./vast-opstat.py --smb --vms <VMS_HOST> --user <USER>
+
 # Remote cluster via SSH tunnel (Teleport / zero-trust)
 ./vast-opstat.py --nfs --version=3.0 --vms localhost --vms-port 8443 --user <USER>
 ```
@@ -64,7 +67,7 @@ cd vast/vast-opstat
 
 ## Global Connection & Ingestion Flags
 
-These flags apply to **every implemented protocol** (NFS v3, NFS v4.1, NVMe-oTCP):
+These flags apply to **every implemented protocol** (NFS v3, NFS v4.1, NVMe-oTCP, SMB):
 
 | Option | Default | Description |
 |--------|---------|-------------|
@@ -138,6 +141,16 @@ See **[NFSv41_README.md](NFSv41_README.md)**.
 - Drill-down: cNode (`c`), VIP (`v`), host initiator (`h`); return with `p`
 
 See **[NVMe_TCP_README.md](NVMe_TCP_README.md)**.
+
+### SMB
+
+- Five-panel TUI: health, insights, data path, metadata aggregates, session placeholder
+- `ProtoMetrics,proto_name=SMBCommon` instantaneous rates (no counter-delta on cluster)
+- View/tenant drill uses `ViewMetrics` / `TenantMetrics`; cNode uses SMBCommon
+- Batch ranking across all views (top 8 by ops/s)
+- `--client` / `--clients` flags parse; scoping deferred (Phase 4b)
+
+See **[SMB_README.md](SMB_README.md)**.
 
 ---
 

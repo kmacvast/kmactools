@@ -5,7 +5,7 @@
 # Descr:       SMB performance statistics for vast-opstat. SMBCommon aggregate
 #              panels (Phase 0 var203). Drill-down in Phase 4.
 #
-# Version:     0.1.2-dev
+# Version:     0.1.2
 # Author:      KMac
 #
 # Usage:
@@ -22,6 +22,7 @@
 ################################################################################
 
 import base64
+import csv
 import getpass
 import json
 import os
@@ -35,13 +36,14 @@ import termios
 import time
 import tty
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime
 
 import vast_api_log
 from tui_layout import display_width, format_fixed_number, format_scaled_metric, join_columns, pad_display
 
-VERSION = "0.1.2-dev"
+VERSION = "0.1.2"
 
 DEFAULT_PORT = 443
 DEFAULT_USER = "admin"
@@ -56,19 +58,71 @@ _PROTO_SMB_COMMON = "ProtoMetrics,proto_name=SMBCommon"
 METRICS_SOURCE = "SMBCommon"
 SMB_PER_COMMAND_EXPORTED = False
 
-# NFSv3+SMB interop counters (optional panel when > 0)
-_INTEROP_PREFIX = "NfsMetrics,nfs3_smb_interop"
+# NFSv3+SMB interop counters — SESSION panel + workload classifier (var203 exportable).
+_INTEROP_METRICS = (
+    "NfsMetrics,nfs3_smb_interop_ops",
+    "NfsMetrics,nfs3_smb_interop_io_ops",
+    "NfsMetrics,nfs3_smb_interop_triggered_lease_breaks",
+    "NfsMetrics,nfs3_smb_interop_lease_break_retries",
+    "NfsMetrics,nfs3_smb_interop_handles_closed",
+    "NfsMetrics,nfs3_smb_interop_nvhash_updates",
+    "NfsMetrics,nfs3_smb_interop_nvhash_add_or_updates",
+    "NfsMetrics,nfs3_smb_interop_ram_cache_scrubbed_entries",
+)
+_INTEROP_LABELS = {
+    "nfs3_smb_interop_triggered_lease_breaks": "LEASE BREAKS",
+    "nfs3_smb_interop_lease_break_retries": "LEASE RETRIES",
+    "nfs3_smb_interop_handles_closed": "HANDLES CLOSED",
+    "nfs3_smb_interop_ops": "INTEROP OPS",
+    "nfs3_smb_interop_io_ops": "INTEROP IO",
+    "nfs3_smb_interop_nvhash_updates": "NVHASH UPD",
+    "nfs3_smb_interop_nvhash_add_or_updates": "NVHASH ADD/UPD",
+    "nfs3_smb_interop_ram_cache_scrubbed_entries": "CACHE SCRUB",
+}
 
 SMB_CMD_CANDIDATES = (
     "read", "write", "create", "close", "query_directory", "query_info",
     "set_info", "ioctl", "lock", "change_notify", "session_setup",
-    "tree_connect", "negotiate", "echo", "cancel", "oplock_break",
+    "tree_connect", "tree_disconnect", "negotiate", "logoff", "echo",
+    "cancel", "oplock_break", "flush",
 )
 
+# Primary SMB2 opcodes for workflow panel (order = troubleshooting priority).
+SMB2_OPCODES = (
+    ("SMB2_READ", "data", "read"),
+    ("SMB2_WRITE", "data", "write"),
+    ("SMB2_CREATE", "metadata", "create"),
+    ("SMB2_CLOSE", "metadata", "close"),
+    ("SMB2_FLUSH", "metadata", "flush"),
+    ("SMB2_QUERY_INFO", "metadata", "query_info"),
+    ("SMB2_QUERY_DIRECTORY", "metadata", "query_directory"),
+    ("SMB2_SET_INFO", "metadata", "set_info"),
+    ("SMB2_LOCK", "lock", "lock"),
+    ("SMB2_NEGOTIATE", "session", "negotiate"),
+    ("SMB2_SESSION_SETUP", "session", "session_setup"),
+    ("SMB2_LOGOFF", "session", "logoff"),
+    ("SMB2_TREE_CONNECT", "session", "tree_connect"),
+    ("SMB2_TREE_DISCONNECT", "session", "tree_disconnect"),
+    ("SMB2_CHANGE_NOTIFY", "notify", "change_notify"),
+)
+
+_OPCODE_COL = {"label": 22, "iops": 11, "throughput": 11, "size": 9, "latency": 11, "source": 10}
+
 OBJECT_ENDPOINTS = (
-    "/cnodes/", "/views/", "/tenants/", "/vips/",
-    "/smbclients/", "/smb_clients/", "/clients/", "/client_connections/",
-    "/connected_clients/", "/active_clients/", "/hosts/",
+    "/cnodes/", "/views/", "/tenants/", "/vips/", "/hosts/",
+    "/monitoredhosts/", "/monitoredusers/", "/monitoredviews/",
+)
+
+# Swagger-documented SMB/session probes (Phase 0 revised).
+SWAGGER_PROBE_CALLS = (
+    ("/clusters/list_smb_client_connections/", {"client_ip": "0.0.0.0"}),
+    ("/openfilehandles/", {"protocol": "SMB", "page_size": "1"}),
+    ("/monitors/topn/", {
+        "object_type": "view",
+        "prop_list": "ViewMetrics,read_iops__rate",
+        "time_frame": "10m",
+        "limit": "3",
+    }),
 )
 
 PROTO_PROBE_PROPS = [
@@ -117,6 +171,10 @@ _VIEW_READ_LAT = "ViewMetrics,read_latency__avg"
 _VIEW_WRITE_LAT = "ViewMetrics,write_latency__avg"
 _VIEW_READ_BW = "ViewMetrics,read_bw__rate"
 _VIEW_WRITE_BW = "ViewMetrics,write_bw__rate"
+_VIEW_READ_MD_LAT = "ViewMetrics,read_md_latency__avg"
+_VIEW_WRITE_MD_LAT = "ViewMetrics,write_md_latency__avg"
+_VIEW_QOS_FAILURES = "ViewMetrics,qos_failures"
+_VIEW_QOS_WAIT = "ViewMetrics,qos_wait_for_budget_time__rate"
 
 _TENANT_READ_IOPS = "TenantMetrics,read_iops__sum"
 _TENANT_WRITE_IOPS = "TenantMetrics,write_iops__sum"
@@ -128,6 +186,10 @@ _TENANT_READ_LAT = "TenantMetrics,read_latency__sum"
 _TENANT_WRITE_LAT = "TenantMetrics,write_latency__sum"
 _TENANT_READ_CNT = "TenantMetrics,read_iops__num_samples"
 _TENANT_WRITE_CNT = "TenantMetrics,write_iops__num_samples"
+_TENANT_READ_MD_LAT_SUM = "TenantMetrics,read_md_latency__sum"
+_TENANT_WRITE_MD_LAT_SUM = "TenantMetrics,write_md_latency__sum"
+_TENANT_READ_MD_LAT_CNT = "TenantMetrics,read_md_latency__num_samples"
+_TENANT_WRITE_MD_LAT_CNT = "TenantMetrics,write_md_latency__num_samples"
 
 _MAX_DRILL_OBJECTS = 8
 _DRILL_PROBE_LIMIT = 32
@@ -138,6 +200,7 @@ INSIGHTS_PANEL_TITLE = "PERFORMANCE INSIGHTS"
 DATA_PANEL_TITLE = "DATA PATH"
 METADATA_PANEL_TITLE = "METADATA & NAMESPACE"
 SESSION_PANEL_TITLE = "SESSION & LOCKING"
+OPCODE_PANEL_TITLE = "SMB2 OPCODE WORKFLOW"
 
 DATA_OPS = [("read", "READ"), ("write", "WRITE")]
 METADATA_OPS = [
@@ -188,6 +251,7 @@ SSL_CTX = ssl._create_unverified_context()
 
 CLUSTER_ID = CLUSTER_NAME = None
 HEADLINE_MONITOR_ID = None
+SMB_COMMAND_MONITOR_ID = None
 CLIENT_SCOPED = False
 CLIENT_IPS = []
 LAST_ROWS = {}
@@ -201,6 +265,17 @@ DRILL_MONITORS = []
 LAST_DRILL_ROWS = []
 DRILL_ERROR = None
 DRILL_STATUS = None
+LAST_TOPN = None
+LAST_SESSION_CONTEXT = None
+CSV_FILE = None
+RUN_STARTED_AT = None
+
+CSV_HEADER = [
+    "local_time", "runtime", "vms", "port", "cluster", "cluster_id",
+    "headline_monitor_id", "sample_mode", "api_time_frame", "selected_sample",
+    "metrics_source", "panel", "label", "ops_per_sec", "pct_workload",
+    "avg_latency_us", "throughput_mb_sec", "avg_io_bytes",
+]
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -208,7 +283,7 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 def init_config(args):
     """Initialize module globals from parsed CLI arguments."""
     global ARGS, VMS, PORT, USER, PASSWORD, REFRESH_SECONDS, API_TIME_FRAME
-    global SAMPLE_AVERAGE_MODE, BASE_URL, AUTH, HEADERS
+    global SAMPLE_AVERAGE_MODE, BASE_URL, AUTH, HEADERS, CSV_FILE, RUN_STARTED_AT
 
     ARGS = args
     VMS = args.vms
@@ -237,11 +312,13 @@ def init_config(args):
         print(f"API call logging enabled: {log_path}", file=sys.stderr, flush=True)
     global _COLOR
     _COLOR = sys.stdout.isatty() and not args.no_color
+    CSV_FILE = getattr(args, "csv", None)
+    RUN_STARTED_AT = datetime.now()
     configure_client_scope(args)
 
 
 def configure_client_scope(args):
-    """Parse --client/--clients; no-op monitor scoping until Phase 4b."""
+    """Parse --client/--clients; filters topn insights and session connection probes."""
     global CLIENT_SCOPED, CLIENT_IPS
     raw = getattr(args, "clients", None)
     if not raw:
@@ -306,14 +383,16 @@ def get_current_cluster():
     return cluster_id, cluster_name
 
 
+def smb_metric_fqn(cmd, suffix):
+    """Return SmbMetrics FQN for per-command latency export probes."""
+    return f"SmbMetrics,smb_{cmd}_latency__{suffix}"
+
+
 def smb_command_props():
     """Build candidate SmbMetrics property names for discovery probes."""
     props = []
     for cmd in SMB_CMD_CANDIDATES:
-        props.extend([
-            f"SmbMetrics,smb_{cmd}_latency__rate",
-            f"SmbMetrics,smb_{cmd}_latency__avg",
-        ])
+        props.extend([smb_metric_fqn(cmd, "rate"), smb_metric_fqn(cmd, "avg")])
     return props
 
 
@@ -497,15 +576,18 @@ def workload_bar(pct, bar_width=22, color=_GREEN):
 
 
 def build_headline_monitor_props():
-    """SMBCommon cluster monitor — instantaneous rates (Phase 0 confirmed)."""
+    """SMBCommon cluster monitor + interop/session counters (var203 confirmed)."""
     return [
         _common_fqn("iops"), _common_fqn("bw"),
         _common_fqn("rd_iops"), _common_fqn("wr_iops"),
         _common_fqn("rd_bw"), _common_fqn("wr_bw"),
         _common_fqn("md_iops"), _common_fqn("rd_md_iops"), _common_fqn("wr_md_iops"),
         _common_fqn("read_latency__avg"), _common_fqn("write_latency__avg"),
+        _common_fqn("read_latency__rate"), _common_fqn("write_latency__rate"),
         _common_fqn("read_size__avg"), _common_fqn("write_size__avg"),
-        _common_fqn("rd_latency"),
+        _common_fqn("rd_latency"), _common_fqn("wr_latency"),
+        _common_fqn("notify_counter"),
+        *_INTEROP_METRICS,
     ]
 
 
@@ -517,6 +599,8 @@ def build_drill_prop_list(mode):
             _VIEW_READ_MD, _VIEW_WRITE_MD,
             _VIEW_READ_LAT, _VIEW_WRITE_LAT,
             _VIEW_READ_BW, _VIEW_WRITE_BW,
+            _VIEW_READ_MD_LAT, _VIEW_WRITE_MD_LAT,
+            _VIEW_QOS_FAILURES, _VIEW_QOS_WAIT,
         ]
     if mode == "tenant":
         return [
@@ -525,6 +609,8 @@ def build_drill_prop_list(mode):
             _TENANT_READ_BW, _TENANT_WRITE_BW,
             _TENANT_READ_LAT, _TENANT_WRITE_LAT,
             _TENANT_READ_CNT, _TENANT_WRITE_CNT,
+            _TENANT_READ_MD_LAT_SUM, _TENANT_WRITE_MD_LAT_SUM,
+            _TENANT_READ_MD_LAT_CNT, _TENANT_WRITE_MD_LAT_CNT,
         ]
     return build_headline_monitor_props()
 
@@ -546,6 +632,98 @@ def _is_batch_drill_mode(mode=None):
     return mode in ("view", "tenant")
 
 
+def _normalize_object_id(value):
+    """Coerce VMS object_id values for reliable batch-monitor slicing."""
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return value
+
+
+def _interop_rates_from_result(result):
+    """Derive interop counter rates from multi-sample monitor query."""
+    rates = {}
+    for fqn in _INTEROP_METRICS:
+        short = fqn.split(",", 1)[-1]
+        rate = _delta_rate_from_samples(result, fqn)
+        if rate is not None and rate > 0:
+            rates[short] = rate
+    return rates
+
+
+def _parse_topn_ip(title):
+    """Extract client IP from topn title like '172.200.14.253 [default]'."""
+    if not title:
+        return ""
+    return str(title).split()[0]
+
+
+def _client_matches_scope(title, client_ips=None):
+    """Return True when title IP is in scoped client list (or scope is off)."""
+    ips = client_ips if client_ips is not None else CLIENT_IPS
+    if not CLIENT_SCOPED or not ips:
+        return True
+    return _parse_topn_ip(title) in ips
+
+
+def _topn_dimension_rows(dimension, metric="md_iops", client_ips=None):
+    """Return topn rows for a dimension/metric, optionally filtered by --clients."""
+    if not LAST_TOPN or not isinstance(LAST_TOPN, dict):
+        return []
+    dim = (LAST_TOPN.get("data") or {}).get(dimension) or {}
+    rows = dim.get(metric) or []
+    if CLIENT_SCOPED and client_ips is not None:
+        rows = [row for row in rows if _client_matches_scope(row.get("title"), client_ips)]
+    elif CLIENT_SCOPED:
+        rows = [row for row in rows if _client_matches_scope(row.get("title"))]
+    return rows
+
+
+def fetch_topn_data():
+    """Load /monitors/topn/ ranking (Swagger) for insights and client scoping."""
+    global LAST_TOPN
+    prop = urllib.parse.quote("ViewMetrics,read_iops__rate", safe=",")
+    frame = urllib.parse.quote(API_TIME_FRAME, safe="")
+    path = (
+        f"/monitors/topn/?object_type=view&prop_list={prop}"
+        f"&time_frame={frame}&limit=10"
+    )
+    try:
+        LAST_TOPN = api_request("GET", path)
+    except RuntimeError:
+        LAST_TOPN = None
+
+
+def fetch_session_context():
+    """Snapshot SMB sessions and open handles (Swagger operational APIs)."""
+    global LAST_SESSION_CONTEXT
+    ctx = {"connections": [], "open_handles": [], "errors": []}
+    try:
+        data = api_request("GET", "/openfilehandles/?protocol=SMB&page_size=8")
+        ctx["open_handles"] = normalize_list_response(data)[:8]
+    except RuntimeError as e:
+        ctx["errors"].append(f"open handles: {str(e)[:80]}")
+    for ip in (CLIENT_IPS if CLIENT_SCOPED else [])[:4]:
+        try:
+            qip = urllib.parse.quote(ip, safe="")
+            data = api_request("GET", f"/clusters/list_smb_client_connections/?client_ip={qip}")
+            if isinstance(data, dict):
+                ctx["connections"].extend(data.get("connections") or [])
+        except RuntimeError as e:
+            ctx["errors"].append(f"{ip}: {str(e)[:60]}")
+    LAST_SESSION_CONTEXT = ctx
+
+
+def _component_ops_total(meta, data_rows):
+    """Sum rd + wr + md components — authoritative mix denominator for SMBCommon."""
+    read_ops = next((as_float(r["ops_sec"]) or 0 for r in data_rows if r["key"] == "read"), 0)
+    write_ops = next((as_float(r["ops_sec"]) or 0 for r in data_rows if r["key"] == "write"), 0)
+    md_ops = as_float(meta.get("md_iops")) or 0
+    return read_ops + write_ops + md_ops
+
+
 def _slice_result_for_object(result, object_id):
     if not isinstance(result, dict):
         return result
@@ -553,7 +731,11 @@ def _slice_result_for_object(result, object_id):
     oid_idx = prop_idx.get("object_id")
     if oid_idx is None:
         return result
-    filtered = [row for row in data if len(row) > oid_idx and row[oid_idx] == object_id]
+    want = _normalize_object_id(object_id)
+    filtered = [
+        row for row in data
+        if len(row) > oid_idx and _normalize_object_id(row[oid_idx]) == want
+    ]
     return {"prop_list": prop_list, "data": filtered}
 
 
@@ -588,6 +770,28 @@ def _create_monitor_raw(name_suffix, prop_list, object_type, object_ids, *, no_a
 
 def create_monitor(name_suffix, prop_list):
     return _create_monitor_raw(name_suffix, prop_list, "cluster", [CLUSTER_ID])
+
+
+def try_create_smb_command_monitor():
+    """Probe SmbMetrics per-opcode export; enables native opcode rows when available."""
+    global SMB_PER_COMMAND_EXPORTED, SMB_COMMAND_MONITOR_ID
+    SMB_PER_COMMAND_EXPORTED = False
+    SMB_COMMAND_MONITOR_ID = None
+    monitor_id = None
+    props = smb_command_props()
+    try:
+        monitor_id = _create_monitor_raw(
+            "smb_commands", props, "cluster", [CLUSTER_ID], no_aggregation=False,
+        )
+        result = api_request("GET", f"/monitors/{monitor_id}/query/")
+        returned = set(result.get("prop_list", []))
+        if any(p.startswith("SmbMetrics,") for p in returned):
+            SMB_COMMAND_MONITOR_ID = monitor_id
+            SMB_PER_COMMAND_EXPORTED = True
+            return
+        delete_monitor(monitor_id)
+    except RuntimeError:
+        delete_monitor(monitor_id)
 
 
 def delete_monitor(monitor_id):
@@ -654,29 +858,63 @@ def build_rows_from_results(headline_result):
 
     read_ops = _metric(values, "rd_iops")
     write_ops = _metric(values, "wr_iops")
-    read_lat = _first_positive(_metric(values, "read_latency__avg"), _metric(values, "rd_latency"))
-    write_lat = _metric(values, "write_latency__avg")
+    read_lat = _first_positive(
+        _metric(values, "read_latency__avg"),
+        _metric(values, "read_latency__rate"),
+        _metric(values, "rd_latency"),
+    )
+    write_lat = _first_positive(
+        _metric(values, "write_latency__avg"),
+        _metric(values, "write_latency__rate"),
+        _metric(values, "wr_latency"),
+    )
     read_bw = raw_bw_to_mb_sec(_metric(values, "rd_bw"))
     write_bw = raw_bw_to_mb_sec(_metric(values, "wr_bw"))
     read_size = _metric(values, "read_size__avg")
     write_size = _metric(values, "write_size__avg")
+    notify_rate = _delta_rate_from_samples(headline_result, _common_fqn("notify_counter"))
 
     md_iops = _metric(values, "md_iops")
     rd_md = _metric(values, "rd_md_iops")
     wr_md = _metric(values, "wr_md_iops")
-    total_iops = _first_positive(
-        _metric(values, "iops"),
-        (read_ops or 0) + (write_ops or 0) + (md_iops or 0) or None,
-    )
+    read_val = as_float(read_ops) or 0
+    write_val = as_float(write_ops) or 0
+    md_val = as_float(md_iops) or 0
+    component_total = read_val + write_val + md_val
+    # SMBCommon,iops is often data-path only; component sum includes metadata.
+    total_iops = component_total if component_total > 0 else _metric(values, "iops")
     total_bw_mbs = _first_positive(
         raw_bw_to_mb_sec(_metric(values, "bw")),
         ((read_bw or 0) + (write_bw or 0)) or None,
     )
 
+    interop_rates = _interop_rates_from_result(headline_result)
+    session_rows = []
+    for short, rate in sorted(interop_rates.items(), key=lambda kv: -kv[1]):
+        session_rows.append({
+            "key": short,
+            "label": _INTEROP_LABELS.get(short, short.upper()),
+            "ops_sec": rate,
+            "pct": None,
+            "avg_us": None,
+            "bw_mbs": None,
+            "avg_io_bytes": None,
+        })
+    if notify_rate is not None and notify_rate > 0:
+        session_rows.append({
+            "key": "notify_counter",
+            "label": "CHANGE NOTIFY",
+            "ops_sec": notify_rate,
+            "pct": None,
+            "avg_us": None,
+            "bw_mbs": None,
+            "avg_io_bytes": None,
+        })
+
     active = any(
         (as_float(v) or 0) > 0
         for v in (read_ops, write_ops, md_iops, total_iops)
-    )
+    ) or bool(session_rows)
     METRICS_SOURCE = "SMBCommon" if active else "idle"
 
     def _data_metric(key):
@@ -711,18 +949,159 @@ def build_rows_from_results(headline_result):
         "total_iops": total_iops,
         "total_bw_mbs": total_bw_mbs,
         "latency_us": weighted_latency(data_rows),
+        "interop_lease_break_rate": interop_rates.get("nfs3_smb_interop_triggered_lease_breaks"),
+        "notify_rate": notify_rate,
     }
     return {
         "data": data_rows,
         "metadata": metadata_rows,
-        "session": [],
+        "session": session_rows,
+        "opcodes": [],
         "meta": meta,
     }, sample
 
 
+def _opcode_cmd_map():
+    return {cmd: label for label, _cat, cmd in SMB2_OPCODES}
+
+
+def _build_opcode_rows_from_smbmetrics(result):
+    """Native per-command rows when VMS exports SmbMetrics."""
+    if not result:
+        return []
+    rows = []
+    for label, category, cmd in SMB2_OPCODES:
+        rate_fqn = smb_metric_fqn(cmd, "rate")
+        avg_fqn = smb_metric_fqn(cmd, "avg")
+        ops = _delta_rate_from_samples(result, rate_fqn)
+        if ops is None:
+            values, _s = _latest_row(result)
+            ops = as_float(values.get(rate_fqn))
+        lat = None
+        prop_list, data, prop_idx = _result_parts(result)
+        if avg_fqn in prop_idx and len(data) >= 2:
+            lat = _avg_from_sum_count_deltas(result, avg_fqn, rate_fqn)
+        if lat is None:
+            values, _s = _latest_row(result)
+            lat = as_float(values.get(avg_fqn))
+        rows.append({
+            "label": label,
+            "category": category,
+            "cmd": cmd,
+            "ops_sec": ops if ops and ops > 0 else None,
+            "avg_us": lat,
+            "bw_mbs": None,
+            "avg_io_bytes": None,
+            "source": "SMBMETRICS",
+            "hint": False,
+        })
+    return rows
+
+
+def infer_likely_active_opcodes(meta, data_rows):
+    """Heuristic opcode hints when metadata opcodes share one VMS bucket."""
+    hints = set()
+    md_pct, read_pct, write_pct = smb_workload_mix(meta, data_rows)
+    if md_pct >= 35:
+        hints.update({
+            "SMB2_QUERY_DIRECTORY", "SMB2_QUERY_INFO", "SMB2_CREATE", "SMB2_CLOSE",
+        })
+    if md_pct >= 20 and write_pct > read_pct:
+        hints.update({"SMB2_SET_INFO", "SMB2_CREATE", "SMB2_CLOSE"})
+    if as_float(meta.get("notify_rate")):
+        hints.add("SMB2_CHANGE_NOTIFY")
+    if as_float(meta.get("interop_lease_break_rate")):
+        hints.add("SMB2_LOCK")
+    read_io = next((as_float(r.get("avg_io_bytes")) for r in data_rows if r["key"] == "read"), None)
+    if md_pct >= 50 and read_io and read_io < 32_768:
+        hints.add("SMB2_QUERY_DIRECTORY")
+    return hints
+
+
+def build_opcode_workflow_rows(data_rows, metadata_rows, session_rows, meta, smb_cmd_result):
+    """Build SMB2 opcode table — measured, proxy bucket, or session snapshots."""
+    if smb_cmd_result and SMB_PER_COMMAND_EXPORTED:
+        native = _build_opcode_rows_from_smbmetrics(smb_cmd_result)
+        total = sum(as_float(r["ops_sec"]) or 0 for r in native)
+        if total > 0:
+            for row in native:
+                ops = as_float(row["ops_sec"]) or 0
+                row["pct"] = (ops / total * 100) if total > 0 else None
+            return native
+
+    hints = infer_likely_active_opcodes(meta, data_rows)
+    data_by_key = {r["key"]: r for r in data_rows}
+    md_total = as_float(meta.get("md_iops"))
+    rd_md = as_float(meta.get("rd_md_iops"))
+    wr_md = as_float(meta.get("wr_md_iops"))
+    ctx = LAST_SESSION_CONTEXT or {}
+    handles = ctx.get("open_handles") or []
+    lock_count = sum(1 for h in handles if h.get("has_locks"))
+    conn_count = len(ctx.get("connections") or [])
+
+    rows = []
+    for label, category, cmd in SMB2_OPCODES:
+        row = {
+            "label": label,
+            "category": category,
+            "cmd": cmd,
+            "ops_sec": None,
+            "avg_us": None,
+            "bw_mbs": None,
+            "avg_io_bytes": None,
+            "source": "N/A",
+            "hint": label in hints,
+        }
+        if category == "data" and cmd in data_by_key:
+            src = data_by_key[cmd]
+            row.update({
+                "ops_sec": src.get("ops_sec"),
+                "avg_us": src.get("avg_us"),
+                "bw_mbs": src.get("bw_mbs"),
+                "avg_io_bytes": src.get("avg_io_bytes"),
+                "source": "MEASURED",
+            })
+        elif category == "metadata":
+            row["source"] = "MD_BUCKET"
+            if cmd in ("query_info", "query_directory", "create", "close") and rd_md:
+                row["ops_sec"] = None
+            if label in hints:
+                row["source"] = "MD_HINT"
+        elif category == "notify":
+            notify_rate = as_float(meta.get("notify_rate"))
+            if notify_rate and notify_rate > 0:
+                row.update({"ops_sec": notify_rate, "source": "PROXY"})
+        elif category == "lock" and lock_count > 0:
+            row.update({"ops_sec": float(lock_count), "source": "HANDLES"})
+        elif category == "session" and conn_count > 0 and cmd in (
+            "session_setup", "tree_connect", "negotiate",
+        ):
+            row.update({"ops_sec": float(conn_count), "source": "SESSIONS"})
+        rows.append(row)
+
+    for row in rows:
+        if row["source"] == "MD_BUCKET" and md_total and md_total > 0:
+            row["_md_bucket_total"] = md_total
+            row["_md_rd"] = rd_md
+            row["_md_wr"] = wr_md
+
+    active_ops = sum(as_float(r["ops_sec"]) or 0 for r in rows if r["source"] in ("MEASURED", "PROXY", "HANDLES", "SESSIONS"))
+    md_weight = md_total or 0
+    denom = active_ops + md_weight
+    for row in rows:
+        ops = as_float(row.get("ops_sec")) or 0
+        if row["source"] in ("MEASURED", "PROXY", "HANDLES", "SESSIONS") and denom > 0:
+            row["pct"] = ops / denom * 100
+        elif row["source"] in ("MD_BUCKET", "MD_HINT") and md_weight > 0 and denom > 0:
+            row["pct"] = None
+        else:
+            row["pct"] = None
+    return rows
+
+
 def smb_workload_mix(meta, data_rows):
-    """Return (md_pct, read_pct, write_pct) as percentages of total ops."""
-    total = as_float(meta.get("total_iops")) or 0
+    """Return (md_pct, read_pct, write_pct) — always sum to ~100%."""
+    total = _component_ops_total(meta, data_rows)
     if total <= 0:
         return 0.0, 0.0, 0.0
     md = as_float(meta.get("md_iops")) or 0
@@ -749,6 +1128,8 @@ def classify_smb_workload(meta, data_rows):
     if md_pct >= 60:
         dom = "write" if write_pct > read_pct else "read"
         return f"{size_tag}metadata-heavy {dom} workload"
+    if as_float(meta.get("interop_lease_break_rate")) and meta["interop_lease_break_rate"] > 0.1:
+        return "interop lease-break activity"
     if md_pct >= 40:
         return f"{size_tag}metadata-elevated mixed workload"
     if read_pct > write_pct * 2:
@@ -821,6 +1202,53 @@ def cluster_delta_summary(deltas):
         if "lat" in d:
             lat_deltas.append((label, d["lat"]))
     return ops_delta, bw_delta, lat_deltas
+
+
+def csv_value(value):
+    return "" if value is None else value
+
+
+def ensure_csv_file():
+    if not CSV_FILE:
+        return
+    try:
+        needs_header = os.path.getsize(CSV_FILE) == 0
+    except OSError:
+        needs_header = True
+    if needs_header:
+        with open(CSV_FILE, "w", newline="") as handle:
+            csv.writer(handle).writerow(CSV_HEADER)
+
+
+def write_csv_snapshot(snapshot, selected_sample):
+    """Append one row per panel line for the current refresh cycle."""
+    if not CSV_FILE or not snapshot:
+        return
+    sample_mode = f"sample average {API_TIME_FRAME}" if SAMPLE_AVERAGE_MODE else "latest"
+    runtime = str(datetime.now() - RUN_STARTED_AT).split(".")[0]
+    local_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    base = [
+        local_time, runtime, VMS, PORT, CLUSTER_NAME, CLUSTER_ID,
+        HEADLINE_MONITOR_ID, sample_mode, API_TIME_FRAME, selected_sample,
+        METRICS_SOURCE,
+    ]
+    with open(CSV_FILE, "a", newline="") as handle:
+        writer = csv.writer(handle)
+        for panel, rows in (
+            ("data", snapshot["data"]),
+            ("metadata", snapshot["metadata"]),
+            ("opcode", snapshot.get("opcodes") or []),
+        ):
+            for row in rows:
+                writer.writerow(base + [
+                    panel,
+                    row["label"],
+                    csv_value(row.get("ops_sec")),
+                    csv_value(row.get("pct")),
+                    csv_value(row.get("avg_us")),
+                    csv_value(row.get("bw_mbs")),
+                    csv_value(row.get("avg_io_bytes")),
+                ])
 
 
 def _dash(w):
@@ -937,7 +1365,21 @@ def _render_insights_panel(snapshot, deltas, width):
     print(box_top(INSIGHTS_PANEL_TITLE, width))
 
     top_op = max(active_rows, key=lambda r: as_float(r["ops_sec"]) or 0, default=None)
-    if top_op:
+    opcode_rows = snapshot.get("opcodes") or []
+    measured_opcodes = [
+        r for r in opcode_rows if r.get("source") in ("MEASURED", "SMBMETRICS", "PROXY")
+        and (as_float(r.get("ops_sec")) or 0) > 0
+    ]
+    if measured_opcodes:
+        top_opcode = max(measured_opcodes, key=lambda r: as_float(r["ops_sec"]) or 0)
+        pct_v = as_float(top_opcode.get("pct")) or 0
+        print(box_row(
+            c("Top Opcode       ", _DIM) + c(top_opcode["label"], _BWHITE)
+            + c(f"  {format_iops(top_opcode.get('ops_sec'))} ops/s", _GREEN)
+            + (c(f"  ({pct_v:.1f}%)", _DIM) if pct_v else ""),
+            width,
+        ))
+    elif top_op:
         pct_v = as_float(top_op["pct"]) or 0
         print(box_row(
             c("Top Contributor  ", _DIM) + c(top_op["label"], _BWHITE)
@@ -967,11 +1409,32 @@ def _render_insights_panel(snapshot, deltas, width):
 
     md_ops = as_float(meta.get("md_iops"))
     if md_ops and md_ops > 0:
-        total = as_float(meta.get("total_iops")) or 0
+        total = _component_ops_total(meta, snapshot["data"])
         md_pct = (md_ops / total * 100) if total > 0 else 0
         print(box_row(
             c("Metadata Load    ", _DIM) + c(f"{format_iops(md_ops)} ops/s", _YELLOW)
             + c(f"  ({md_pct:.1f}% of total)", _DIM),
+            width,
+        ))
+
+    top_clients = _topn_dimension_rows("client", "md_iops")
+    if top_clients:
+        row = top_clients[0]
+        title = row.get("title", "?")
+        total_md = as_float(row.get("total")) or 0
+        scope_note = " (scoped)" if CLIENT_SCOPED else ""
+        print(box_row(
+            c("Top Client       ", _DIM) + c(title, _BWHITE)
+            + c(f"  md {format_iops(total_md)} ops/s{scope_note}", _CYAN),
+            width,
+        ))
+
+    top_views = _topn_dimension_rows("view", "md_iops")
+    if top_views:
+        row = top_views[0]
+        print(box_row(
+            c("Top Share        ", _DIM) + c(row.get("title", "?"), _BWHITE)
+            + c(f"  md {format_iops(row.get('total'))} ops/s", _GREEN),
             width,
         ))
 
@@ -1023,11 +1486,159 @@ def _render_metadata_panel(rows, meta, width):
     print(box_bottom(width))
 
 
-def _render_session_panel(width):
+def _opcode_source_cell(source, hint):
+    if source == "MEASURED":
+        return c(pad_display("MEASURED", _OPCODE_COL["source"], ">"), _BGREEN)
+    if source == "SMBMETRICS":
+        return c(pad_display("SMBMETRICS", _OPCODE_COL["source"], ">"), _BGREEN)
+    if source in ("PROXY", "HANDLES", "SESSIONS"):
+        return c(pad_display(source[:8], _OPCODE_COL["source"], ">"), _YELLOW)
+    if source == "MD_HINT":
+        return c(pad_display("MD_HINT", _OPCODE_COL["source"], ">"), _BYELLOW)
+    if source == "MD_BUCKET":
+        return c(pad_display("MD_BUCKET", _OPCODE_COL["source"], ">"), _DIM)
+    return c(pad_display("N/A", _OPCODE_COL["source"], ">"), _DIM)
+
+
+def _opcode_row_cells(row):
+    w = _OPCODE_COL
+    ops = as_float(row.get("ops_sec"))
+    active = ops is not None and ops > 0
+    label = row["label"]
+    label_color = _BCYAN if row.get("source") == "MEASURED" and "READ" in label else (
+        _BYELLOW if row.get("source") == "MEASURED" and "WRITE" in label else
+        _BYELLOW if row.get("hint") else _BWHITE if active else _DIM
+    )
+    lat_text, lat_us = format_latency_us(row.get("avg_us"))
+    lat_color = _BRED if (lat_us or 0) > 10_000 else _YELLOW if (lat_us or 0) > 1_000 else _BGREEN
+    bw_text, _ = format_throughput_mbs(row.get("bw_mbs"))
+    size_text, _ = format_block_size(row.get("avg_io_bytes"))
+    return join_columns([
+        _label_cell(label, w["label"], label_color),
+        _metric_cell(format_iops(ops), w["iops"], _GREEN) if active else _dash(w["iops"]),
+        _metric_cell(bw_text, w["throughput"], _CYAN) if row.get("bw_mbs") else _dash(w["throughput"]),
+        _metric_cell(size_text, w["size"], _CYAN) if row.get("avg_io_bytes") else _dash(w["size"]),
+        _metric_cell(lat_text, w["latency"], lat_color) if lat_us else _dash(w["latency"]),
+        _opcode_source_cell(row.get("source"), row.get("hint")),
+    ], _COL_SEP)
+
+
+def _render_opcode_workflow_panel(snapshot, width):
+    rows = snapshot.get("opcodes") or []
+    meta = snapshot.get("meta") or {}
+    session_rows = snapshot.get("session") or []
+    md_total = as_float(meta.get("md_iops"))
+
+    titles = [
+        ("SMB2 Opcode", "label", "<"), ("Ops/s", "iops", ">"), ("Throughput", "throughput", ">"),
+        ("Avg Size", "size", ">"), ("Latency", "latency", ">"), ("Source", "source", ">"),
+    ]
+    print(box_top(OPCODE_PANEL_TITLE, width))
+    hdr_cells = []
+    for title, key, align in titles:
+        hdr_cells.append(c(pad_display(title, _OPCODE_COL[key], align), _BOLD))
+    print(box_row(join_columns(hdr_cells, _COL_SEP), width))
+    print(box_sep(width))
+
+    last_category = None
+    for row in rows:
+        cat = row.get("category")
+        if cat != last_category:
+            banner = {
+                "data": "DATA PATH (SMBCommon rd/wr)",
+                "metadata": "METADATA / NAMESPACE",
+                "lock": "LOCKING",
+                "session": "SESSION / TREE",
+                "notify": "NOTIFY",
+            }.get(cat, cat.upper())
+            print(box_row(c(f"── {banner} ", _DIM) + c("─" * 20, _DIM), width))
+            if cat == "metadata" and md_total and md_total > 0:
+                rd_md = as_float(meta.get("rd_md_iops"))
+                wr_md = as_float(meta.get("wr_md_iops"))
+                note = (
+                    f"md_iops {format_iops(md_total)}/s aggregate — opcodes not split by VMS"
+                )
+                if rd_md or wr_md:
+                    note += f"  (rd_md {format_iops(rd_md)}  wr_md {format_iops(wr_md)})"
+                print(box_row(c(note, _YELLOW), width))
+            last_category = cat
+        print(box_row(_opcode_row_cells(row), width))
+
+    hints = infer_likely_active_opcodes(meta, snapshot.get("data") or [])
+    if hints and not SMB_PER_COMMAND_EXPORTED:
+        hint_text = ", ".join(sorted(hints)[:5])
+        print(box_row(c(f"Likely active metadata/session opcodes: {hint_text}", _DIM), width))
+
+    if session_rows:
+        for row in session_rows[:3]:
+            print(box_row(
+                c(f"Interop {row['label']:<14}", _DIM)
+                + c(f" {format_iops(row.get('ops_sec'))}/s", _YELLOW),
+                width,
+            ))
+
+    if SMB_PER_COMMAND_EXPORTED:
+        footer = "SmbMetrics per-opcode export active on this VMS build"
+    else:
+        footer = (
+            "Per-opcode SmbMetrics not exported — READ/WRITE measured; "
+            "metadata opcodes share md_iops bucket"
+        )
+    print(box_row(c(footer, _DIM), width))
+    print(box_bottom(width))
+
+
+def _render_session_panel(snapshot, width):
+    session_rows = snapshot.get("session") or []
+    ctx = LAST_SESSION_CONTEXT or {}
+
     print(box_top(SESSION_PANEL_TITLE, width))
-    print(box_row(c("SESSION_SETUP / TREE_CONNECT / LOCK / IOCTL", _DIM), width))
-    print(box_row(c("Per-command counters not exported on this VMS build.", _DIM), width))
-    print(box_row(c("Use metadata + interop lease metrics for SMB session pain signals.", _DIM), width))
+    if session_rows:
+        for row in session_rows[:5]:
+            print(box_row(
+                c(f"{row['label']:<16}", _BWHITE)
+                + c(f" {format_iops(row.get('ops_sec'))} /s", _YELLOW),
+                width,
+            ))
+    else:
+        print(box_row(c("NFSv3+SMB interop counters idle (no lease/session pain)", _DIM), width))
+        print(box_row(c("Per-command SmbMetrics not exported on this VMS build.", _DIM), width))
+
+    handles = ctx.get("open_handles") or []
+    if handles:
+        locked = sum(1 for h in handles if h.get("has_locks"))
+        leased = sum(1 for h in handles if h.get("has_lease"))
+        print(box_row(
+            c("Open SMB handles ", _DIM)
+            + c(f"{len(handles)} sampled", _BWHITE)
+            + c(f"  locks={locked}  leases={leased}", _YELLOW),
+            width,
+        ))
+        for handle in handles[:3]:
+            path = handle.get("open_file_path") or handle.get("path") or "-"
+            client = handle.get("client_ip") or "?"
+            print(box_row(
+                c(f"  {client}", _CYAN) + c(f"  {path[:48]}", _DIM),
+                width,
+            ))
+
+    conns = ctx.get("connections") or []
+    if conns:
+        print(box_row(c(f"SMB client sessions: {len(conns)}", _BGREEN), width))
+        for conn in conns[:3]:
+            if isinstance(conn, dict):
+                line = "  ".join(
+                    f"{k}={conn[k]}" for k in ("client_ip", "username", "server_ip")
+                    if conn.get(k)
+                )
+                if line:
+                    print(box_row(c(line[:width - 6], _DIM), width))
+    elif CLIENT_SCOPED and not ctx.get("errors"):
+        print(box_row(c("No active SMB sessions for scoped client IP(s)", _DIM), width))
+
+    for err in (ctx.get("errors") or [])[:2]:
+        print(box_row(c(f"Session probe: {err}", _DIM), width))
+
     print(box_bottom(width))
 
 
@@ -1148,6 +1759,8 @@ def _build_view_drill_row(result, obj_name):
     latency = _weighted_us([
         (read_ops, as_float(values.get(_VIEW_READ_LAT))),
         (write_ops, as_float(values.get(_VIEW_WRITE_LAT))),
+        (read_md, as_float(values.get(_VIEW_READ_MD_LAT))),
+        (write_md, as_float(values.get(_VIEW_WRITE_MD_LAT))),
     ])
     read_bw = raw_bw_to_gb_sec(values.get(_VIEW_READ_BW)) or 0.0
     write_bw = raw_bw_to_gb_sec(values.get(_VIEW_WRITE_BW)) or 0.0
@@ -1173,7 +1786,16 @@ def _build_tenant_drill_row(result, obj_name):
     total_ops = read_ops + write_ops + read_md + write_md
     read_lat = _avg_from_sum_count_deltas(result, _TENANT_READ_LAT, _TENANT_READ_CNT)
     write_lat = _avg_from_sum_count_deltas(result, _TENANT_WRITE_LAT, _TENANT_WRITE_CNT)
-    latency = _weighted_us([(read_ops, read_lat), (write_ops, write_lat)])
+    read_md_lat = _avg_from_sum_count_deltas(
+        result, _TENANT_READ_MD_LAT_SUM, _TENANT_READ_MD_LAT_CNT,
+    )
+    write_md_lat = _avg_from_sum_count_deltas(
+        result, _TENANT_WRITE_MD_LAT_SUM, _TENANT_WRITE_MD_LAT_CNT,
+    )
+    latency = _weighted_us([
+        (read_ops, read_lat), (write_ops, write_lat),
+        (read_md, read_md_lat), (write_md, write_md_lat),
+    ])
     read_bw_gbs = raw_bw_to_gb_sec(_delta_rate_from_samples(result, _TENANT_READ_BW)) or 0.0
     write_bw_gbs = raw_bw_to_gb_sec(_delta_rate_from_samples(result, _TENANT_WRITE_BW)) or 0.0
     top_rpc, top_pct = _drill_top_op([
@@ -1199,42 +1821,47 @@ def _build_drill_row(mode, result, obj_name):
 
 
 def _rank_drill_candidates(mode, objects, cfg):
-    """Rank view/tenant candidates with one batch monitor + one query."""
+    """Rank view/tenant candidates in chunks — scans all objects, not just the first 32."""
     if not objects:
         return []
 
-    object_ids = [obj["id"] for obj in objects]
     id_to_name = {obj["id"]: _obj_name(obj, cfg["name_fields"]) for obj in objects}
-    ranked = []
-    rank_monitor_id = None
-    try:
-        rank_monitor_id = _create_monitor_raw(
-            f"rank_{mode}",
-            build_drill_rank_prop_list(mode),
-            cfg["object_type"],
-            object_ids,
-            no_aggregation=cfg.get("no_aggregation", False),
-        )
-        result = api_request("GET", f"/monitors/{rank_monitor_id}/query/")
-        for obj_id in object_ids:
-            name = id_to_name[obj_id]
-            slice_result = _slice_result_for_object(result, obj_id)
-            row = _build_drill_row(mode, slice_result, name)
-            ranked.append({
-                "id": obj_id,
-                "name": name,
-                "total_ops": as_float(row.get("total_ops")) or 0.0,
-            })
-    except RuntimeError:
-        ranked = [
-            {"id": obj["id"], "name": id_to_name[obj["id"]], "total_ops": 0.0}
-            for obj in objects
-        ]
-    finally:
-        delete_monitor(rank_monitor_id)
+    all_ranked = []
 
-    ranked.sort(key=lambda item: (-item["total_ops"], item["name"].lower()))
-    return [{"id": item["id"], "name": item["name"]} for item in ranked[:_MAX_DRILL_OBJECTS]]
+    for chunk_start in range(0, len(objects), _DRILL_PROBE_LIMIT):
+        chunk = objects[chunk_start:chunk_start + _DRILL_PROBE_LIMIT]
+        object_ids = [obj["id"] for obj in chunk]
+        rank_monitor_id = None
+        try:
+            rank_monitor_id = _create_monitor_raw(
+                f"rank_{mode}_{chunk_start}",
+                build_drill_rank_prop_list(mode),
+                cfg["object_type"],
+                object_ids,
+                no_aggregation=cfg.get("no_aggregation", False),
+            )
+            result = api_request("GET", f"/monitors/{rank_monitor_id}/query/")
+            for obj_id in object_ids:
+                name = id_to_name[obj_id]
+                slice_result = _slice_result_for_object(result, obj_id)
+                row = _build_drill_row(mode, slice_result, name)
+                all_ranked.append({
+                    "id": obj_id,
+                    "name": name,
+                    "total_ops": as_float(row.get("total_ops")) or 0.0,
+                })
+        except RuntimeError:
+            for obj in chunk:
+                all_ranked.append({
+                    "id": obj["id"],
+                    "name": id_to_name[obj["id"]],
+                    "total_ops": 0.0,
+                })
+        finally:
+            delete_monitor(rank_monitor_id)
+
+    all_ranked.sort(key=lambda item: (-item["total_ops"], item["name"].lower()))
+    return [{"id": item["id"], "name": item["name"]} for item in all_ranked[:_MAX_DRILL_OBJECTS]]
 
 
 def enter_drill_mode(mode):
@@ -1258,8 +1885,7 @@ def enter_drill_mode(mode):
 
     all_valid = [o for o in objects if "id" in o]
     if mode in ("view", "tenant"):
-        probe_pool = all_valid[:_DRILL_PROBE_LIMIT]
-        DRILL_OBJECTS = _rank_drill_candidates(mode, probe_pool, cfg)
+        DRILL_OBJECTS = _rank_drill_candidates(mode, all_valid, cfg)
     else:
         selected = all_valid[:_MAX_DRILL_OBJECTS]
         DRILL_OBJECTS = [
@@ -1439,6 +2065,19 @@ def fetch_monitor_query():
     result = api_request("GET", f"/monitors/{HEADLINE_MONITOR_ID}/query/")
     PREV_ROWS = _all_panel_rows(LAST_ROWS) if LAST_ROWS else {}
     LAST_ROWS, LAST_SAMPLE = build_rows_from_results(result)
+    smb_result = None
+    if SMB_COMMAND_MONITOR_ID:
+        try:
+            smb_result = api_request("GET", f"/monitors/{SMB_COMMAND_MONITOR_ID}/query/")
+        except RuntimeError:
+            smb_result = None
+    LAST_ROWS["opcodes"] = build_opcode_workflow_rows(
+        LAST_ROWS["data"], LAST_ROWS["metadata"], LAST_ROWS["session"],
+        LAST_ROWS["meta"], smb_result,
+    )
+    fetch_topn_data()
+    fetch_session_context()
+    write_csv_snapshot(LAST_ROWS, LAST_SAMPLE)
 
 
 def render_screen():
@@ -1451,9 +2090,11 @@ def render_screen():
     )
     if CLIENT_SCOPED:
         client_note = CLIENT_IPS[0] if len(CLIENT_IPS) == 1 else f"{CLIENT_IPS[0]} (+{len(CLIENT_IPS) - 1})"
-        title += c(f"   | clients {client_note} (Phase 4b)", _BYELLOW)
+        title += c(f"   | clients {client_note}", _BYELLOW)
     if DRILL_MODE:
         title += c(f"   | {DRILL_MODE.upper()} DRILL", _BYELLOW)
+    if CSV_FILE:
+        title += c(f"   csv:{CSV_FILE}", _DIM)
     print(title)
     frame_note = f"sample-average {API_TIME_FRAME}" if SAMPLE_AVERAGE_MODE else f"frame {API_TIME_FRAME}"
     print(c(f"  sample {LAST_SAMPLE}   {frame_note}   source {METRICS_SOURCE}", _DIM))
@@ -1467,11 +2108,7 @@ def render_screen():
         print()
         _render_insights_panel(LAST_ROWS, deltas, width)
         print()
-        _render_data_panel(LAST_ROWS["data"], width)
-        print()
-        _render_metadata_panel(LAST_ROWS["metadata"], LAST_ROWS["meta"], width)
-        print()
-        _render_session_panel(width)
+        _render_opcode_workflow_panel(LAST_ROWS, width)
         print()
     print(box_row(
         c("[q]", _BWHITE) + c(" Quit ", _DIM)
@@ -1520,6 +2157,7 @@ def check_keypress():
 def cleanup():
     restore_terminal()
     delete_monitor(HEADLINE_MONITOR_ID)
+    delete_monitor(SMB_COMMAND_MONITOR_ID)
     _cleanup_drill_monitors()
     vast_api_log.close()
 
@@ -1586,7 +2224,7 @@ def discover_metrics(write_report_path=None):
             sample_keys = list(objects[0].keys())[:8] if objects else []
             print(f"  {endpoint:<22} {len(objects)} object(s)  keys={sample_keys}")
             report_lines.append(f"| `{endpoint}` | OK | {len(objects)} | `{sample_keys}` |")
-            if any(token in endpoint for token in ("client", "smb", "host")) and objects:
+            if any(token in endpoint for token in ("client", "smb", "host", "monitored")) and objects:
                 client_endpoints.append((endpoint, objects[:3]))
         except RuntimeError as e:
             msg = str(e)
@@ -1598,32 +2236,57 @@ def discover_metrics(write_report_path=None):
     for mode, cfg in _DRILL_CFG.items():
         print(f"  {mode:<8} {cfg['object_type']:<8} {cfg['endpoint']}")
 
-    report_lines += ["", "## Client IP scoping (for `--clients` flag design)", ""]
+    report_lines += ["", "## Client IP scoping (Swagger + topn)", ""]
+    report_lines.append(
+        "- Primary client ranking: `GET /monitors/topn/` → `data.client` dimension"
+    )
+    report_lines.append(
+        "- Live sessions: `GET /clusters/list_smb_client_connections/?client_ip=`"
+    )
+    report_lines.append("- Monitored client IPs: `GET /monitoredhosts/`")
     if client_endpoints:
         for endpoint, samples in client_endpoints:
             report_lines.append(f"### `{endpoint}` sample objects")
             for obj in samples:
                 ip_fields = {
                     key: obj[key] for key in obj
-                    if re.search(r"ip|addr|host|client|name|guid", key, re.I)
+                    if re.search(r"ip|addr|host|client|name|guid|title", key, re.I)
                 }
                 report_lines.append(
                     f"- id={obj.get('id')} fields={json.dumps(ip_fields)[:300]}"
                 )
     else:
-        report_lines.append("- No client-specific REST list endpoint confirmed in this run.")
-        report_lines.append("- Phase 4b must re-probe after SMB workload is active.")
+        report_lines.append("- No legacy `/smbclients/` list endpoint on this build.")
+
+    print("\n[ Swagger SMB/session probes ]")
+    report_lines += ["", "## Swagger probes", ""]
+    for endpoint, params in SWAGGER_PROBE_CALLS:
+        query = "&".join(f"{k}={urllib.parse.quote(str(v), safe=',')}" for k, v in params.items())
+        path = f"{endpoint}?{query}" if query else endpoint
+        try:
+            data = api_request("GET", path)
+            if isinstance(data, dict):
+                keys = list(data.keys())[:8]
+                detail = f"keys={keys}"
+                if "data" in data and isinstance(data["data"], dict):
+                    detail += f" dimensions={list(data['data'].keys())[:6]}"
+                if "connections" in data:
+                    detail += f" connections={len(data.get('connections') or [])}"
+            elif isinstance(data, list):
+                detail = f"{len(data)} object(s)"
+            else:
+                detail = str(data)[:80]
+            print(f"  {path:<55} OK {detail}")
+            report_lines.append(f"- `{path}`: OK — {detail}")
+        except RuntimeError as e:
+            print(f"  {path:<55} error: {str(e)[:60]}")
+            report_lines.append(f"- `{path}`: error — `{str(e)[:120]}`")
 
     print("\n[ Monitor probes ]")
     report_lines += ["", "## Monitor probes", ""]
     for label, props in (
-        ("smbcommon_headline", [
-            f"{_PROTO_SMB_COMMON},iops", f"{_PROTO_SMB_COMMON},bw",
-            f"{_PROTO_SMB_COMMON},rd_iops", f"{_PROTO_SMB_COMMON},wr_iops",
-            f"{_PROTO_SMB_COMMON},md_iops", f"{_PROTO_SMB_COMMON},rd_md_iops",
-            f"{_PROTO_SMB_COMMON},wr_md_iops",
-            f"{_PROTO_SMB_COMMON},read_latency__avg", f"{_PROTO_SMB_COMMON},write_latency__avg",
-        ]),
+        ("smbcommon_headline", build_headline_monitor_props()),
+        ("interop_only", list(_INTEROP_METRICS)),
         ("proto_smb_legacy", PROTO_PROBE_PROPS),
         ("smb_cmds_batch1", smb_command_props()[:20]),
         ("smb_cmds_batch2", smb_command_props()[20:40]),
@@ -1643,6 +2306,8 @@ def discover_metrics(write_report_path=None):
     view_props = [
         "ViewMetrics,read_iops__rate", "ViewMetrics,write_iops__rate",
         "ViewMetrics,read_md_iops__rate", "ViewMetrics,write_md_iops__rate",
+        "ViewMetrics,read_md_latency__avg", "ViewMetrics,write_md_latency__avg",
+        "ViewMetrics,qos_failures", "ViewMetrics,qos_wait_for_budget_time__rate",
     ]
     try:
         views = normalize_list_response(api_request("GET", "/views/"))
@@ -1668,8 +2333,8 @@ def discover_metrics(write_report_path=None):
         report_lines.append(f"- **view_no_aggregation:** `{e}`")
 
     if CLIENT_SCOPED:
-        print(f"\n[ Client scope requested (Phase 4b) ]")
-        print(f"  Clients: {', '.join(CLIENT_IPS)} — not yet applied to monitors")
+        print(f"\n[ Client scope active ]")
+        print(f"  Clients: {', '.join(CLIENT_IPS)} — topn + session probes filtered")
 
     if write_report_path:
         out_path = write_report_path
@@ -1696,6 +2361,8 @@ def main():
     setup_keyboard()
     CLUSTER_ID, CLUSTER_NAME = get_current_cluster()
     HEADLINE_MONITOR_ID = create_monitor("headline", build_headline_monitor_props())
+    try_create_smb_command_monitor()
+    ensure_csv_file()
 
     fetch_monitor_query()
     render_screen()

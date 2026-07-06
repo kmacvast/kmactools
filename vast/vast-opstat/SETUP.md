@@ -2,7 +2,7 @@
 
 Step-by-step instructions for running **vast-opstat** on a client machine with no prior
 Python experience. vast-opstat is a terminal dashboard that queries your VAST VMS for
-live NFS or NVMe-oTCP performance statistics.
+live NFS, SMB, or NVMe-oTCP performance statistics.
 
 **Start here if you are new:** this guide covers macOS, Linux, and Windows before you
 read the protocol-specific references in [README.md](README.md).
@@ -206,6 +206,19 @@ Single-volume alias:
   --vms var203.selab.vastdata.com --volume my-vol --user admin
 ```
 
+### SMB (macOS / Linux)
+
+```bash
+./vast-opstat.py --smb \
+  --vms var203.selab.vastdata.com --user admin
+```
+
+**Windows client load generator** (run against the SMB share under test):
+
+```powershell
+.\scripts\Invoke-SmbOpstatLoad.ps1 -NasShare '\\172.200.203.6\opstattest'
+```
+
 ### Remote cluster via SSH tunnel (Teleport / zero-trust)
 
 ```bash
@@ -215,6 +228,7 @@ ssh -L 8443:var203.selab.vastdata.com:443 user@jump-host
 # Terminal 2 — any protocol through the tunnel
 ./vast-opstat.py --nfs --version=3.0 --vms localhost --vms-port 8443 --user admin
 ./vast-opstat.py --block --nvme-over-tcp --vms localhost --vms-port 8443 --user admin
+./vast-opstat.py --smb --vms localhost --vms-port 8443 --user admin
 ```
 
 Default port is `443` when `--vms-port` is omitted.
@@ -226,6 +240,9 @@ Default port is `443` when `--vms-port` is omitted.
   --vms var203.selab.vastdata.com --discover-metrics
 
 ./vast-opstat.py --nfs --version=4.1 \
+  --vms var203.selab.vastdata.com --discover-metrics
+
+./vast-opstat.py --smb \
   --vms var203.selab.vastdata.com --discover-metrics
 ```
 
@@ -270,6 +287,19 @@ Full reference: [NVMe_TCP_README.md](NVMe_TCP_README.md)
 
 References: [NFSv3_README.md](NFSv3_README.md), [NFSv41_README.md](NFSv41_README.md)
 
+### SMB keys
+
+| Key | Action |
+|-----|--------|
+| `c` | cNode drill-down |
+| `v` | View / **share** drill-down (not NVMe VIP) |
+| `t` | Tenant drill-down |
+| `x` | Exit drill-down |
+| `Space` | Force refresh |
+| `q` | Quit |
+
+Reference: [SMB_README.md](SMB_README.md)
+
 ---
 
 ## 7. Running Tests (Optional)
@@ -306,4 +336,5 @@ pytest tests/test_vast_opstat.py -v
 - [README.md](README.md) — protocol matrix and shared CLI options
 - [NFSv3_README.md](NFSv3_README.md) — NFS v3 monitoring reference
 - [NFSv41_README.md](NFSv41_README.md) — NFS v4.1 proxy architecture
+- [SMB_README.md](SMB_README.md) — SMB monitoring reference
 - [NVMe_TCP_README.md](NVMe_TCP_README.md) — block monitoring deep dive

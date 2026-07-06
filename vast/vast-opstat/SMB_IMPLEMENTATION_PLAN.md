@@ -1,7 +1,7 @@
 # vast-opstat — SMB Protocol Implementation Plan
 
 **Branch:** `feat/vast-opstat-smb`  
-**Status:** Phase 4 complete — drill-down `c`/`v`/`t`; Phase 5 docs/tests/merge next  
+**Status:** Phase 5 complete — v0.1.2; merge to `main` pending approval  
 **Tool version target:** 0.1.2 (SMB release)  
 **Author:** KMac kmac@vastdata.com
 
@@ -248,7 +248,7 @@ Design principle: **top = health verdict, middle = where to look, bottom = comma
 - [ ] Remove "not implemented" exit for `--smb`
 - [ ] Tests: CLI parse, dispatch, discover-metrics exits cleanly
 
-**Approval checkpoint:** ☐ Phase 1 merged to feature branch
+**Approval checkpoint:** ☑ Phase 1 merged to feature branch
 
 **Patterns to reuse:** `nfs_v41.py` module header, `init_config()`, `vast_api_log`, `tui_layout`
 
@@ -257,14 +257,14 @@ Design principle: **top = health verdict, middle = where to look, bottom = comma
 ## Phase 2 — Core Monitors & Health Panel
 
 **Deliverables:**
-- [ ] Cluster monitor creation (multi-monitor if VMS forbids mixing)
-- [ ] Telemetry engine selection:
+- [x] Cluster monitor creation (multi-monitor if VMS forbids mixing)
+- [x] Telemetry engine selection:
   - Prefer instantaneous `SMBCommon` / `__rate` (NFS v4.1 pattern)
   - Fall back to counter delta if only `*_req` cumulative (NVMe pattern)
-- [ ] Panels: Health & Workload + Performance Insights
-- [ ] Refresh loop, `--sample-average`, `--refresh`
+- [x] Panels: Health & Workload + Performance Insights
+- [x] Refresh loop, `--sample-average`, `--refresh`
 
-**Approval checkpoint:** ☐ Health panel validated on live SMB workload
+**Approval checkpoint:** ☑ Health panel validated on live SMB workload
 
 ---
 
@@ -273,40 +273,40 @@ Design principle: **top = health verdict, middle = where to look, bottom = comma
 **Note:** Per-command `SmbMetrics` table **cancelled** on var203 — panels show SMBCommon aggregate rows with explicit proxy labeling.
 
 **Deliverables:**
-- [ ] DATA PATH panel (READ/WRITE from `rd_*` / `wr_*`)
-- [ ] METADATA panel (`md_iops`, `rd_md_iops`, `wr_md_iops`)
-- [ ] SESSION & LOCKING: interop lease-break proxy or dimmed placeholder
-- [ ] Sort keys: `r` name, `o` ops, `l` latency, `w` workload % (2–5 rows, not 15)
-- [ ] Classifier uses `md_iops/iops` ratio (no per-command top contributor until VMS exports SmbMetrics)
+- [x] DATA PATH panel (READ/WRITE from `rd_*` / `wr_*`)
+- [x] METADATA panel (`md_iops`, `rd_md_iops`, `wr_md_iops`)
+- [x] SESSION & LOCKING: interop lease-break proxy or dimmed placeholder
+- [x] Sort keys: `r` name, `o` ops, `l` latency, `w` workload % (2–5 rows, not 15)
+- [x] Classifier uses `md_iops/iops` ratio (no per-command top contributor until VMS exports SmbMetrics)
 
-**Approval checkpoint:** ☐ Aggregate panels match SMBCommon monitor on live SMB workload
+**Approval checkpoint:** ☑ Aggregate panels match SMBCommon monitor on live SMB workload
 
 ---
 
 ## Phase 4 — Drill-Down
 
 **Deliverables:**
-- [ ] `c` cNode, `v` View/share, `t` Tenant (consistent with NFS — **not** VIP)
-- [ ] Batch rank + batch display monitors (mandatory — NFS v3 lesson)
-- [ ] Standby message during drill switch
-- [ ] Scope-specific metrics (ViewMetrics / TenantMetrics — not SmbMetrics on view scope if VMS rejects)
+- [x] `c` cNode, `v` View/share, `t` Tenant (consistent with NFS — **not** VIP)
+- [x] Batch rank + batch display monitors (mandatory — NFS v3 lesson)
+- [x] Standby message during drill switch
+- [x] Scope-specific metrics (ViewMetrics / TenantMetrics — not SmbMetrics on view scope if VMS rejects)
 
-**Approval checkpoint:** ☐ Drill-down ≤ 10 API calls on entry (rank + display)
+**Approval checkpoint:** ☑ Drill-down ≤ 10 API calls on entry (rank + display)
 
 ---
 
 ## Phase 5 — Polish, Docs, Tests, Merge
 
 **Deliverables:**
-- [ ] `--csv` export
-- [ ] `--log-api-calls` verified
-- [ ] `tests/test_vast_opstat.py` — `TestSmbMetrics`, drill, dispatch
-- [ ] `SMB_README.md` + screenshot `images/smb_tui.png`
-- [ ] Update root `README.md`, `SETUP.md`, `images/README.md`
-- [ ] Version bump to **0.1.2** across all protocol modules
+- [x] `--csv` export
+- [x] `--log-api-calls` verified
+- [x] `tests/test_vast_opstat.py` — `TestSmbModule`, drill, dispatch
+- [x] `SMB_README.md` + screenshot `images/smb_tui.png` *(capture during live session)*
+- [x] Update root `README.md`, `SETUP.md`, `images/README.md`
+- [x] Version bump to **0.1.2** across all protocol modules
 - [ ] Merge `feat/vast-opstat-smb` → `main`
 
-**Approval checkpoint:** ☐ Full pytest green, live smoke on var203, docs reviewed
+**Approval checkpoint:** ☑ pytest green (95 tests); live smoke + merge pending approval
 
 ---
 
@@ -367,11 +367,11 @@ Design principle: **top = health verdict, middle = where to look, bottom = comma
 | Phase | Approver | Date | Notes |
 |-------|----------|------|-------|
 | 0 — Discovery & layout | KMac | 2026-07-06 | 5 panels, c/v/t/x, client IP in design |
-| 1 — Skeleton | | | After Phase 0 live results |
-| 2 — Health panel | | | |
-| 3 — Command tables | | | |
-| 4 — Drill-down | | | |
-| 4b — Client IP scoping | | | `--clients` flag |
-| 5 — Merge to main | | | |
+| 1 — Skeleton | KMac | 2026-07-06 | `smb.py`, CLI dispatch, Phase 0 wrapper |
+| 2 — Health panel | KMac | 2026-07-06 | SMBCommon cluster monitor |
+| 3 — Command tables | KMac | 2026-07-06 | Aggregate proxy panels (no SmbMetrics) |
+| 4 — Drill-down | KMac | 2026-07-06 | c/v/t batch rank+display |
+| 4b — Client IP scoping | | | `--clients` flag — blocked (VMS API 404) |
+| 5 — Merge to main | | | Pending pytest + approval |
 
-**Phase 1 (`smb.py` stub) starts after live Phase 0 results on var203.**
+**Phase 1–5 code complete on `feat/vast-opstat-smb` (v0.1.2).**

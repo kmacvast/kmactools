@@ -3,7 +3,8 @@
 # Script Name: vast-opstat.py
 # Description: Multi-protocol VAST performance statistics tool. Phase 1 routes
 #              --nfs --version=3.0 to NFS v3; --nfs --version=4.1 to NFS v4.1;
-#              Phase 2 routes --block --nvme-over-tcp to NVMe-oTCP block statistics.
+#              Phase 2 routes --block --nvme-over-tcp to NVMe-oTCP block statistics;
+#              --smb routes to SMB statistics (v0.1.2).
 #
 # Author: KMac kmac@vastdata.com
 # Version: 0.1.1
@@ -22,7 +23,7 @@ import nfs_v41
 import nvme_tcp
 import smb
 
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 
 DEFAULT_PORT = 443
 DEFAULT_USER = "admin"

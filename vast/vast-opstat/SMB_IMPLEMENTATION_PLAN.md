@@ -1,11 +1,21 @@
 # vast-opstat — SMB Protocol Implementation Plan
 
 **Branch:** `feat/vast-opstat-smb`  
-**Status:** Planning — awaiting approval before code  
+**Status:** Phase 0 approved — discovery script ready; awaiting live VMS run  
 **Tool version target:** 0.1.2 (SMB release)  
 **Author:** KMac kmac@vastdata.com
 
 ---
+
+## Approved Design Decisions (2026-07-06)
+
+| Decision | Status |
+|----------|--------|
+| 5-panel layout order (Health → Insights → Data → Metadata → Session) | ✅ Approved |
+| Phase 0 live metric discovery | ✅ Approved |
+| Drill keys `c` / `v` / `t` / `x` | ✅ Approved |
+| Client IP scoping (`--client` / `--clients`) | ✅ Design now; implement Phase 4b |
+
 
 ## Executive Summary
 
@@ -19,7 +29,54 @@ SMB workloads differ fundamentally from NFS and block:
 | Metadata weight | High (RPC table) | Proxy panel | Low | **Dominant in real deployments** |
 | Drill `v` key | View path | View path | **VIP** | **View / share path** |
 
-The SMB module must answer the SE question: *"Is the customer slow on data, metadata, connection setup, or locking — and where (cluster, share, tenant, cNode)?"* within one terminal screen.
+The SMB module must answer the SE question: *"Is the customer slow on data, metadata, connection setup, or locking — and where (cluster, share, tenant, cNode, **or specific client IP**)?"* within one terminal screen.
+
+---
+
+## Client IP Scoping — Design (Phase 4b)
+
+**User story:** SE enters one or more client IPs and sees only SMB activity attributable to those hosts — the most common field-debug workflow after cluster-wide view.
+
+### CLI flags (mirror NVMe `--volumes` pattern)
+
+| Flag | Example | Behavior |
+|------|---------|----------|
+| `--client IP` | `--client 10.20.30.40` | Alias for `--clients` (single host) |
+| `--clients a,b,c` | `--clients 10.1.1.5,10.1.1.6` | Comma-separated client IPs or hostnames |
+
+When active, title bar shows: `Clients: 10.20.30.40 (+2)` instead of `All Clients`.
+
+### Resolution flow (determined in Phase 0 discovery)
+
+```
+--clients IP list
+    ├── GET client endpoint (candidate: /smbclients/, /clients/, …)
+    ├── Match by ip / address / hostname field
+    ├── object_type=? + object_ids=[…]  → scoped monitors
+    └── If no object API: document fallback (cluster view + client column filter if VMS supports)
+```
+
+### UI impact when client-scoped
+
+| Panel | Scoped behavior |
+|-------|-----------------|
+| Health | Totals for selected clients only |
+| Insights | Top command among client traffic |
+| Command tables | Same rows, client-filtered rates |
+| Drill `c`/`v`/`t` | Still available; shows skew **for that client's traffic path** |
+
+### Optional future key: `h` (client host list)
+
+Not in v1 keybind approval. If Phase 0 finds a ranked client list API, add **`h`** drill-down (like NVMe host initiators) in Phase 4b — ranked by ops/s across all connected SMB clients, filterable to `--clients` subset.
+
+### Phase placement
+
+| Phase | Client work |
+|-------|-------------|
+| 0 | Discover client object endpoint + IP field names |
+| 1 | Add argparse stubs for `--client`/`--clients` (no-op until 4b) |
+| 4b | Implement client resolution + scoped monitors |
+| 5 | Document in `SMB_README.md` with examples |
 
 ---
 
@@ -27,7 +84,18 @@ The SMB module must answer the SE question: *"Is the customer slow on data, meta
 
 **Goal:** Confirm what VMS actually exports before locking UI layout.  
 **Operation class:** Read-only (`GET /api/metrics/`, `POST /api/monitors/`, `--discover-metrics`).  
-**Approval checkpoint:** ☐ You sign off on metric inventory + panel wireframe.
+**Approval checkpoint:** ✅ Layout + discovery approved 2026-07-06
+
+**Discovery tooling:**
+
+```bash
+cd vast/vast-opstat
+python3 smb_phase0_discover.py --vms <HOST> --user admin
+# writes SMB_PHASE0_RESULTS.md
+```
+
+Results template: [SMB_PHASE0_RESULTS.md](SMB_PHASE0_RESULTS.md)  
+**Live run:** Pending — requires `~/.vastconf` or explicit creds on lab host (var203).
 
 ### 0.1 Live VMS discovery (var203 or customer lab)
 
@@ -65,7 +133,7 @@ SMB commands to map (priority order for troubleshooting):
 
 - [ ] `discover-metrics` output captured to log
 - [ ] Table: exported vs unexported commands (like NFS v4.1 OPEN/CLOSE gap)
-- [ ] `object_type` matrix: cluster, view, tenant, cnode, vip, smbclient (if exists)
+- [ ] `object_type` matrix: cluster, view, tenant, cnode, vip, client/smbclient (Phase 0 script)
 - [ ] Monitor mixing rules documented (ProtoMetrics vs SmbMetrics in same monitor?)
 - [ ] View monitor aggregation constraints (NFS v3 lesson: views may reject aggregation)
 
@@ -79,7 +147,20 @@ If native counters are missing (expected for some session/oplock metrics), defin
 | SESSION_SETUP | TREE_CONNECT + NEGOTIATE rates |
 | CHANGE_NOTIFY | QUERY_DIRECTORY correlation |
 
-**Gate rule:** Phase 1 does not start until Phase 0 inventory is attached to this doc.
+**Gate rule:** Phase 1 starts after live `SMB_PHASE0_RESULTS.md` is populated on var203.
+
+---
+
+## Phase 4b — Client IP Scoping (post core drill-down)
+
+**Deliverables:**
+- [ ] Resolve `--client` / `--clients` to VMS object IDs (from Phase 0 endpoint)
+- [ ] Scoped monitors for selected client IPs
+- [ ] Title bar + health panel reflect client filter
+- [ ] Optional `h` key: ranked connected SMB clients (if API supports)
+- [ ] Tests: client resolution, invalid IP handling, multi-client merge
+
+**Approval checkpoint:** ☐ Client scoping validated with 2+ simultaneous clients
 
 ---
 
@@ -266,13 +347,14 @@ Design principle: **top = health verdict, middle = where to look, bottom = comma
 
 ---
 
-## Out of Scope (v1)
+## Out of Scope (v1.0)
 
-- Per-client Windows SID drill-down (unless VMS exposes `smbclient` object_type with metrics)
-- SMB multichannel per-channel breakdown (unless VIP/cnode metrics sufficient)
 - macOS client correlation (macscope remains separate tool)
 - Real-time packet capture (vast-sniff territory)
 - SMB over QUIC / RDMA transport specifics
+- SMB multichannel per-channel breakdown (unless VIP drill suffices)
+
+**Planned for v1.x (Phase 4b):** `--client` / `--clients` IP scoping (see above)
 
 ---
 
@@ -280,11 +362,12 @@ Design principle: **top = health verdict, middle = where to look, bottom = comma
 
 | Phase | Approver | Date | Notes |
 |-------|----------|------|-------|
-| 0 — Discovery & layout | | | |
-| 1 — Skeleton | | | |
+| 0 — Discovery & layout | KMac | 2026-07-06 | 5 panels, c/v/t/x, client IP in design |
+| 1 — Skeleton | | | After Phase 0 live results |
 | 2 — Health panel | | | |
 | 3 — Command tables | | | |
 | 4 — Drill-down | | | |
+| 4b — Client IP scoping | | | `--clients` flag |
 | 5 — Merge to main | | | |
 
-**Do not write `smb.py` implementation code until Phase 0 is approved.**
+**Phase 1 (`smb.py` stub) starts after live Phase 0 results on var203.**

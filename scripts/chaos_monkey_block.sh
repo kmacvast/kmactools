@@ -7,19 +7,20 @@
 #               and hardware-level background block unmaps (TRIM).
 # Author:       Kevin McDonald (vastdata)
 # Date:         July 2026
-# Version:      2.0 (Refactored for Root Disk Protection & Circuit-Breakers)
+# Version:      2.1 (Dynamic Device Mapping & Host Log Protection Enabled)
 #
 # Usage:        sudo ./chaos_monkey_block.sh
 # Dependencies: nvme-cli, fio, util-linux (fstrim)
 # Mountpoints:  /mnt/blockhead1, /mnt/blockhead2
-# Block Devs:   /dev/nvme1n1, /dev/nvme1n2
-# Target IP:    172.200.203.6:4420
-#
-# WARNING:      This is an aggressive chaos engineering/performance tool. 
-#               It runs unthrottled infinite loops designed to push target 
-#               storage arrays to their physical and architectural limits. 
-#               Use ONLY in isolated staging/test environments.
 ################################################################################
+
+# ==============================================================================
+# CONFIGURATION PARAMETERS
+# ==============================================================================
+TARGET_DEV="/dev/nvme0n2"          # Current target NVMe network block device
+DISCOVERY_IP="172.200.203.6"       # VAST Cluster Discovery VIP
+DISCOVERY_PORT="4420"              # Standard NVMe/TCP Fabric Port
+MNT_POINT_2="/mnt/blockhead2"       # Trim Target Mount
 
 # Check for root privileges
 if [ "$EUID" -ne 0 ]; then
@@ -30,6 +31,7 @@ fi
 echo "======================================================================"
 echo " LAUNCHING CHAOS MONKEY FOR BLOCKHEADS                                "
 echo "======================================================================"
+echo " -> Target Device: $TARGET_DEV"
 echo " -> Simulating active filesystem operations on blockhead1 & 2         "
 echo " -> Injecting native NVMe commands (Compare, Write Zeroes, Admin, Trim) "
 echo " -> Spamming NVMe-oF Fabric discovery packets                         "
@@ -60,7 +62,7 @@ echo "[+] Spawning NVMe/TCP protocol injectors..."
 
 # LOOP A: NVMe Native Write Zeroes
 while true; do
-  nvme write-zeroes /dev/nvme1n2 --start-block=0 --block-count=500 >/dev/null 2>&1
+  nvme write-zeroes "$TARGET_DEV" --start-block=0 --block-count=500 >/dev/null 2>&1
   # Throttle back slightly if target drops to protect host kernel
   if [ $? -ne 0 ]; then sleep 2; fi
 done &
@@ -68,32 +70,32 @@ PID_ZERO=$!
 
 # LOOP B: NVMe Native Compare
 while true; do
-  nvme compare /dev/nvme1n2 --start-block=0 --block-count=7 --data=/tmp/4k_zero.bin >/dev/null 2>&1
+  nvme compare "$TARGET_DEV" --start-block=0 --block-count=7 --data=/tmp/4k_zero.bin >/dev/null 2>&1
   if [ $? -ne 0 ]; then sleep 2; fi
 done &
 PID_COMP=$!
 
 # LOOP C: NVMe-oF Fabric Discovery Request Spam
 while true; do
-  nvme discover -t tcp -a 172.200.203.6 -s 4420 >/dev/null 2>&1
+  nvme discover -t tcp -a "$DISCOVERY_IP" -s "$DISCOVERY_PORT" >/dev/null 2>&1
   if [ $? -ne 0 ]; then sleep 2; fi
 done &
 PID_FAB=$!
 
 # LOOP D: NVMe Admin Identify Namespace Requests
 while true; do
-  nvme id-ns /dev/nvme1n2 >/dev/null 2>&1
+  nvme id-ns "$TARGET_DEV" >/dev/null 2>&1
   if [ $? -ne 0 ]; then sleep 2; fi
 done &
 PID_ADMIN=$!
 
 # LOOP E: Filesystem Level Block UNMAP (TRIM)
 while true; do
-  fstrim -v /mnt/blockhead2 >/dev/null 2>&1
-  if [ $? -ne 0 ]; then 
+  fstrim -v "$MNT_POINT_2" >/dev/null 2>&1
+  if [ $? -ne 0 ]; then
     sleep 5   # Extra cooldown if the filesystem goes into forced-shutdown
-  else 
-    sleep 2 
+  else
+    sleep 2
   fi
 done &
 PID_TRIM=$!

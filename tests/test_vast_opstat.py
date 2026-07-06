@@ -200,7 +200,7 @@ class TestVastApiLog:
             def __exit__(self, *args):
                 return False
 
-        with patch.object(nfs_v3.urllib.request, "urlopen", return_value=FakeResp()):
+        with patch.object(nfs_v3.vast_common.urllib.request, "urlopen", return_value=FakeResp()):
             result = nfs_v3.api_request("GET", "/clusters/")
 
         assert result == [{"id": 1}]

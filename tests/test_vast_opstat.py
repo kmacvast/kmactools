@@ -706,6 +706,26 @@ class TestSmbModule:
         assert smb.CLIENT_SCOPED is False
         assert smb.CLIENT_IPS == []
 
+    def test_maybe_fetch_aux_context_throttles_rest_probes(self, mocker):
+        smb.REFRESH_SECONDS = 5
+        smb._LAST_AUX_FETCH_AT = 0.0
+        topn = mocker.patch.object(smb, "fetch_topn_data")
+        session = mocker.patch.object(smb, "fetch_session_context")
+
+        smb._maybe_fetch_aux_context()
+        assert topn.call_count == 1
+        assert session.call_count == 1
+
+        topn.reset_mock()
+        session.reset_mock()
+        smb._maybe_fetch_aux_context()
+        assert topn.call_count == 0
+        assert session.call_count == 0
+
+        smb._maybe_fetch_aux_context(force=True)
+        assert topn.call_count == 1
+        assert session.call_count == 1
+
     def test_write_csv_snapshot_appends_rows(self, tmp_path):
         csv_path = tmp_path / "smb.csv"
         smb.init_config(_connection_args(

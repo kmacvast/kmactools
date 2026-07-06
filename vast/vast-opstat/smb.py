@@ -273,6 +273,7 @@ DRILL_ERROR = None
 DRILL_STATUS = None
 LAST_TOPN = None
 LAST_SESSION_CONTEXT = None
+_LAST_AUX_FETCH_AT = 0.0
 CSV_FILE = None
 RUN_STARTED_AT = None
 
@@ -685,6 +686,26 @@ def _topn_dimension_rows(dimension, metric="md_iops", client_ips=None):
     elif CLIENT_SCOPED:
         rows = [row for row in rows if _client_matches_scope(row.get("title"))]
     return rows
+
+
+def _aux_refresh_interval():
+    """Minimum seconds between topn/session REST probes (decoupled from headline poll)."""
+    return max(30, REFRESH_SECONDS * 6)
+
+
+def _maybe_fetch_aux_context(*, force=False):
+    """Refresh topn + session snapshots; throttled to avoid REST on every tick."""
+    global _LAST_AUX_FETCH_AT
+    now = time.time()
+    stale = (
+        _LAST_AUX_FETCH_AT == 0.0
+        or now - _LAST_AUX_FETCH_AT >= _aux_refresh_interval()
+    )
+    if not force and not stale:
+        return
+    fetch_topn_data()
+    fetch_session_context()
+    _LAST_AUX_FETCH_AT = now
 
 
 def fetch_topn_data():
@@ -2176,7 +2197,7 @@ def _render_drill_panel(width):
     print(box_bottom(width))
 
 
-def fetch_monitor_query():
+def fetch_monitor_query(*, force_aux=False):
     global LAST_ROWS, LAST_SAMPLE, PREV_ROWS
     result = api_request("GET", f"/monitors/{HEADLINE_MONITOR_ID}/query/")
     PREV_ROWS = _all_panel_rows(LAST_ROWS) if LAST_ROWS else {}
@@ -2191,8 +2212,7 @@ def fetch_monitor_query():
         LAST_ROWS["data"], LAST_ROWS["metadata"], LAST_ROWS["session"],
         LAST_ROWS["meta"], smb_result,
     )
-    fetch_topn_data()
-    fetch_session_context()
+    _maybe_fetch_aux_context(force=force_aux)
     write_csv_snapshot(LAST_ROWS, LAST_SAMPLE)
 
 
@@ -2501,7 +2521,7 @@ def main():
                 if DRILL_MODE:
                     fetch_drill_query()
                 else:
-                    fetch_monitor_query()
+                    fetch_monitor_query(force_aux=True)
                 next_refresh = time.time() + REFRESH_SECONDS
             render_screen()
             continue

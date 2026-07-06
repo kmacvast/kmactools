@@ -1803,6 +1803,45 @@ def _parse_sample_ts(sample):
         return None
 
 
+def _view_rate_prop_indexes(prop_idx):
+    """Indexes of ViewMetrics rate/latency props used for row selection."""
+    return [
+        prop_idx[p] for p in (
+            _VIEW_READ_IOPS, _VIEW_WRITE_IOPS,
+            _VIEW_READ_MD, _VIEW_WRITE_MD,
+            _VIEW_READ_LAT, _VIEW_WRITE_LAT,
+            _VIEW_READ_BW, _VIEW_WRITE_BW,
+            _VIEW_READ_MD_LAT, _VIEW_WRITE_MD_LAT,
+        )
+        if p in prop_idx
+    ]
+
+
+def _view_values_from_result(result):
+    """Pick the newest ViewMetrics row with non-null rates.
+
+    View monitors with no_aggregation often return duplicate timestamps per
+    object_id: a padding row with null metrics followed by the real sample.
+    """
+    prop_list, data, prop_idx = _result_parts(result)
+    if not data:
+        return {}, prop_idx, "-"
+    rate_idxs = _view_rate_prop_indexes(prop_idx)
+    chosen = None
+    for row in data:
+        if rate_idxs and any(
+            idx < len(row) and row[idx] is not None
+            for idx in rate_idxs
+        ):
+            chosen = row
+            break
+    if chosen is None:
+        chosen = data[0]
+    values = {name: chosen[idx] for name, idx in prop_idx.items() if idx < len(chosen)}
+    sample = chosen[0] if chosen else "-"
+    return values, prop_idx, sample
+
+
 def _values_from_result(result):
     prop_list, data, prop_idx = _result_parts(result)
     if not data:
@@ -1887,7 +1926,7 @@ def _build_cnode_drill_row(result, obj_name):
 
 
 def _build_view_drill_row(result, obj_name):
-    values, _prop_idx, _sample = _values_from_result(result)
+    values, _prop_idx, _sample = _view_values_from_result(result)
     read_ops = as_float(values.get(_VIEW_READ_IOPS)) or 0.0
     write_ops = as_float(values.get(_VIEW_WRITE_IOPS)) or 0.0
     read_md = as_float(values.get(_VIEW_READ_MD)) or 0.0

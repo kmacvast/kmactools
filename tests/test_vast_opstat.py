@@ -1034,6 +1034,24 @@ class TestSmbModule:
         assert row["total_ops"] == pytest.approx(200.0)
         assert row["top_rpc"] == "READ"
 
+    def test_build_view_drill_row_skips_null_padding_row(self):
+        result = {
+            "prop_list": [
+                "timestamp",
+                smb._VIEW_READ_IOPS,
+                smb._VIEW_WRITE_IOPS,
+                smb._VIEW_READ_MD,
+                smb._VIEW_WRITE_MD,
+            ],
+            "data": [
+                ["2026-07-06T20:11:36Z", None, None, None, None],
+                ["2026-07-06T20:11:36Z", 122.52, 462.61, 345.48, 211.98],
+            ],
+        }
+        row = smb._build_view_drill_row(result, "/kmacs/smb/opstat")
+        assert row["total_ops"] == pytest.approx(1142.59)
+        assert row["top_rpc"] == "WRITE"
+
     def test_view_drill_entry_uses_batch_rank_and_display_monitors(self):
         smb.init_config(_connection_args(smb=True, nfs=False, protocol_version=None))
         smb.CLUSTER_ID = 1

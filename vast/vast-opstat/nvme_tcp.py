@@ -6,7 +6,7 @@
 #              VMS BlockMetrics and ProtoMetrics (BlockCommon) counters and
 #              displays live I/O, reclamation, and fabric/admin telemetry.
 #
-# Version:     1.0.0
+# Version:     0.1.1
 # Author:      KMac
 ################################################################################
 
@@ -36,7 +36,7 @@ _COL_SEP = "  "
 _OPS_W = {"proc": 22, "iops": 14, "throughput": 14, "size": 12, "latency": 14}
 _PATH_W = {"name": 36, "iops": 12, "throughput": 14, "latency": 14}
 
-VERSION = "1.0.0"
+VERSION = "0.1.1"
 
 DEFAULT_PORT = 443
 DEFAULT_USER = "admin"

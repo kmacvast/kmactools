@@ -7,7 +7,7 @@
 #              metadata proxy panels when native stateful/session counters are
 #              unexported by the time-series engine.
 #
-# Version:     1.0.0
+# Version:     0.1.1
 # Author:      KMac
 #
 # Usage:
@@ -42,7 +42,7 @@ from datetime import datetime
 import vast_api_log
 from tui_layout import display_width, join_columns, pad_display, format_fixed_number, format_scaled_metric
 
-VERSION = "1.0.0"
+VERSION = "0.1.1"
 
 DEFAULT_PORT = 443
 DEFAULT_USER = "admin"
@@ -887,7 +887,7 @@ def render_screen():
     width = min(shutil.get_terminal_size((120, 40)).columns, 120)
     clear_screen()
     title = (
-        c("  VAST NFS", _BCYAN) + c(" opstat", _BWHITE) + c(" v4.1", _BYELLOW)
+        c("  VAST NFS", _BCYAN) + c(" opstat", _BWHITE) + c(f" v{VERSION}", _DIM)
         + f"   VMS {c(f'{VMS}:{PORT}', _BWHITE)}   cluster {c(CLUSTER_NAME, _BWHITE)}"
         + c(f"   refresh {REFRESH_SECONDS}s", _DIM)
     )

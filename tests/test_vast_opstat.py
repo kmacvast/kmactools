@@ -349,16 +349,19 @@ class TestNfsDrillEndpoints:
         nfs_v3.init_config(_connection_args())
         nfs_v3.CLUSTER_ID = 1
         payloads = []
+        monitor_seq = iter([100, 101])
 
         def fake_api_request(method, path, payload=None):
             if method == "GET" and path == "/views/":
                 return [{"id": 7, "path": "/data"}]
             if method == "GET" and path.startswith("/monitors/") and path.endswith("/query/"):
-                return {"prop_list": ["timestamp", "object_id", nfs_v3._VIEW_READ_IOPS],
-                        "data": [["2026-07-01T00:00:00Z", 7, 1.0]]}
+                return {
+                    "prop_list": ["timestamp", "object_id", nfs_v3._VIEW_READ_IOPS],
+                    "data": [["2026-07-01T00:00:00Z", 7, 1.0]],
+                }
             if method == "POST" and path == "/monitors/":
                 payloads.append(payload)
-                return {"id": 42}
+                return {"id": next(monitor_seq)}
             if method == "DELETE" and path.startswith("/monitors/"):
                 return None
             raise AssertionError(f"Unexpected API call: {method} {path}")
@@ -367,10 +370,101 @@ class TestNfsDrillEndpoints:
             nfs_v3.enter_drill_mode("view")
 
         assert nfs_v3.DRILL_MODE == "view"
-        create_payloads = [p for p in payloads if "aggregation" not in p or p.get("prop_list")]
-        assert create_payloads
-        assert "aggregation" not in create_payloads[0]
-        assert create_payloads[0]["prop_list"][0].startswith("ViewMetrics,")
+        assert len(nfs_v3.DRILL_MONITORS) == 1
+        assert nfs_v3.DRILL_MONITORS[0][1] is None
+        assert all("aggregation" not in p for p in payloads)
+        assert payloads[0]["object_ids"] == [7]
+        assert payloads[1]["object_ids"] == [7]
+        assert payloads[0]["prop_list"] == nfs_v3.build_drill_rank_prop_list("view")
+        assert payloads[1]["prop_list"][0].startswith("ViewMetrics,")
+
+    def test_view_drill_entry_uses_batch_rank_and_display_monitors(self):
+        nfs_v3.init_config(_connection_args())
+        nfs_v3.CLUSTER_ID = 1
+        views = [{"id": i, "path": f"/v{i}"} for i in range(1, 4)]
+        calls = []
+        monitor_seq = iter([900, 901])
+
+        def fake_api_request(method, path, payload=None):
+            calls.append((method, path))
+            if method == "GET" and path == "/views/":
+                return views
+            if method == "POST" and path == "/monitors/":
+                return {"id": next(monitor_seq)}
+            if method == "GET" and path.endswith("/query/"):
+                rows = [
+                    ["2026-07-01T00:00:00Z", vid, 1.0, 0.0, 0.0, 0.0]
+                    for vid in (1, 2, 3)
+                ]
+                return {
+                    "prop_list": [
+                        "timestamp",
+                        "object_id",
+                        nfs_v3._VIEW_READ_IOPS,
+                        nfs_v3._VIEW_WRITE_IOPS,
+                        nfs_v3._VIEW_READ_MD,
+                        nfs_v3._VIEW_WRITE_MD,
+                    ],
+                    "data": rows,
+                }
+            if method == "DELETE":
+                return None
+            raise AssertionError(f"Unexpected API call: {method} {path}")
+
+        with patch.object(nfs_v3, "api_request", side_effect=fake_api_request):
+            nfs_v3.enter_drill_mode("view")
+
+        post_calls = [c for c in calls if c[0] == "POST"]
+        get_query_calls = [c for c in calls if c[0] == "GET" and c[1].endswith("/query/")]
+        assert len(post_calls) == 2
+        assert len(get_query_calls) == 1
+        assert len(nfs_v3.DRILL_MONITORS) == 1
+
+    def test_fetch_drill_query_view_uses_single_batch_get(self):
+        nfs_v3.init_config(_connection_args())
+        nfs_v3.DRILL_MODE = "view"
+        nfs_v3.DRILL_OBJECTS = [
+            {"id": 1, "name": "/a"},
+            {"id": 2, "name": "/b"},
+        ]
+        nfs_v3.DRILL_MONITORS = [(55, None)]
+        calls = []
+
+        def fake_api_request(method, path, payload=None):
+            calls.append((method, path))
+            return {
+                "prop_list": [
+                    "timestamp",
+                    "object_id",
+                    nfs_v3._VIEW_READ_IOPS,
+                    nfs_v3._VIEW_WRITE_IOPS,
+                    nfs_v3._VIEW_READ_LAT,
+                    nfs_v3._VIEW_WRITE_LAT,
+                    nfs_v3._VIEW_READ_BW,
+                    nfs_v3._VIEW_WRITE_BW,
+                ],
+                "data": [
+                    ["2026-07-01T00:00:00Z", 1, 10.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                    ["2026-07-01T00:00:00Z", 2, 5.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                ],
+            }
+
+        with patch.object(nfs_v3, "api_request", side_effect=fake_api_request):
+            nfs_v3.fetch_drill_query()
+
+        assert calls == [("GET", "/monitors/55/query/")]
+        assert len(nfs_v3.LAST_DRILL_ROWS) == 2
+
+    def test_slice_result_for_object_filters_rows(self):
+        result = {
+            "prop_list": ["timestamp", "object_id", "metric"],
+            "data": [
+                ["2026-07-01T00:00:00Z", 1, 10.0],
+                ["2026-07-01T00:00:00Z", 2, 20.0],
+            ],
+        }
+        sliced = nfs_v3._slice_result_for_object(result, 2)
+        assert sliced["data"] == [["2026-07-01T00:00:00Z", 2, 20.0]]
 
     def test_build_drill_prop_list_scopes(self):
         cnode_props = nfs_v3.build_drill_prop_list("cnode")
@@ -408,10 +502,11 @@ class TestNfsDrillEndpoints:
             1: {"total_ops": 0.1},
             2: {"total_ops": 9.5},
         }
-        monitor_ids = iter([101, 102, 201, 202])
+        create_calls = []
 
-        def fake_create(*_args, **_kwargs):
-            return next(monitor_ids)
+        def fake_create(name_suffix, prop_list, object_type, object_ids, **kwargs):
+            create_calls.append((name_suffix, object_ids))
+            return 101
 
         def fake_query(_mode, result, name):
             obj_id = 2 if name == "/hot" else 1
@@ -424,6 +519,8 @@ class TestNfsDrillEndpoints:
             ranked = nfs_v3._rank_drill_candidates("view", objects, cfg)
 
         assert [item["name"] for item in ranked] == ["/hot", "/idle"]
+        assert len(create_calls) == 1
+        assert create_calls[0][1] == [1, 2]
 
     def test_switch_drill_mode_sets_ops_sort_for_view(self):
         nfs_v3.init_config(_connection_args())

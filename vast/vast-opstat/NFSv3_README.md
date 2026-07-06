@@ -3,15 +3,19 @@
 Live NFS v3 RPC performance monitor for VAST VMS clusters.
 
 Displays NFS RPC operation statistics with health summaries, workload
-classification, latency metrics, throughput, I/O sizing, delta tracking, and
-interactive drill-down — in a terminal display that refreshes on an interval.
+classification, latency metrics, throughput, I/O sizing, refresh-delta tracking,
+and interactive drill-down — in a terminal display that refreshes on an interval.
 
-![vast-opstat NFSv3](images/vast-opstat_NFSv3.png)
+![NFS v3 TUI Dashboard](images/nfs_v3_tui.png)
+
+**Implementation:** [nfs_v3.py](nfs_v3.py) · **Setup:** [SETUP.md](SETUP.md)
+
+---
 
 ## Quick Start
 
 ```bash
-./vast-opstat.py --nfs --version=3.0 --vms <VMS_HOST>
+./vast-opstat.py --nfs --version=3.0 --vms <VMS_HOST> --user admin
 ./vast-opstat.py --nfs --version=3.0 --vms <VMS_HOST> --discover-metrics
 ```
 
@@ -20,15 +24,14 @@ environment variable is also accepted.
 
 ### Remote cluster via SSH tunnel
 
-For zero-trust or Teleport environments where VMS is not directly reachable, forward
-a local port and aim opstat at it:
-
 ```bash
 ssh -L 8443:var203.selab.vastdata.com:443 user@jump-host
 ./vast-opstat.py --nfs --version=3.0 --vms localhost --vms-port 8443 --user admin
 ```
 
-## Usage
+---
+
+## CLI Options
 
 ```
 vast-opstat.py --nfs --version=3.0 [options]
@@ -38,16 +41,21 @@ vast-opstat.py --nfs --version=3.0 [options]
 |--------|---------|-------------|
 | `--nfs` | — | Select NFS protocol (required) |
 | `--version=3.0` | — | NFS version (required with `--nfs`) |
-| `--vms HOST` | — | VMS hostname or IP (use `localhost` with an SSH tunnel) |
+| `--vms HOST` | — | VMS hostname or IP |
 | `--vms-port PORT` | `443` | VMS HTTPS port (`--port` legacy alias) |
 | `--user USER` | `admin` | VMS username |
 | `--password PASS` | — | VMS password |
-| `--sample-average WIN` | — | Rolling average window (e.g. `10m`, `1h`, `4h`) |
+| `--sample-average WIN` | — | Rolling average window (`10m`, `1h`, `4h`) |
 | `--refresh N` | `5` | Refresh interval in seconds |
-| `--csv FILENAME` | — | Append captured samples to a CSV file |
-| `--no-color` | — | Disable ANSI color output (for piping/logging) |
+| `--csv FILENAME` | — | Append captured samples to CSV |
+| `--no-color` | — | Disable ANSI color output |
 | `--discover-metrics` | — | Print available metrics and objects, then exit |
 | `--log-api-calls` | — | Log VMS REST API traffic to `/tmp/vast-opstat-api-*.log` |
+| `-V` / `--tool-version` | — | Print vast-opstat version |
+
+Shared connection flags are documented in [README.md](README.md).
+
+---
 
 ## Display Layout
 
@@ -60,6 +68,42 @@ Each refresh cycle renders four panels:
 
 A combined footer shows cluster totals and keyboard shortcut hints.
 
+---
+
+## Telemetry Processing
+
+NFS v3 uses **two cluster monitors** per session (RPC + bandwidth). The module
+normalizes VMS monitor payloads into true real-time telemetry:
+
+### Cluster dashboard (primary path)
+
+- RPC ops/s come from VMS `NfsMetrics,nfs_{op}_latency__rate` series (instantaneous rates).
+- Bandwidth comes from `ProtoMetrics,proto_name=NFSCommon,rd_bw/wr_bw`.
+- Average I/O size is derived as `throughput ÷ IOPS` when both are present.
+
+### Counter delta state engine
+
+Where VMS exposes **cumulative counters** instead of rates — notably **tenant-scoped**
+`TenantMetrics,*__sum` during tenant drill-down — opstat applies an elapsed-time delta
+engine:
+
+```
+rate = (counter_now − counter_prev) / Δt
+```
+
+- `Δt` is wall time between the two newest API timestamps in the monitor series
+  (`_delta_rate_from_samples`).
+- Latency averages use paired `__sum` / `__num_samples` delta ratios where required.
+- Counter resets (negative delta) clamp to zero growth.
+
+### Refresh-cycle deltas
+
+Between successive dashboard refreshes, the **delta row** in the health panel compares
+the current sample snapshot to the previous poll (`compute_deltas`) for ops, bandwidth,
+and latency movement — independent of the cumulative counter engine.
+
+---
+
 ## Keyboard Controls
 
 | Key | Action |
@@ -69,38 +113,43 @@ A combined footer shows cluster totals and keyboard shortcut hints.
 | `o` | Sort by operations/sec (high→low) |
 | `l` | Sort by average latency (high→low) |
 | `w` | Sort by % workload (high→low) |
-| `c` | Enter cNode drill-down |
-| `v` | Enter view/export drill-down |
-| `t` | Enter tenant drill-down |
-| `x` | Exit drill-down, return to cluster view |
+| **`c`** | **Toggle per-cNode performance breakdown** |
+| **`v`** | **Toggle per-NFS View path breakdown** |
+| **`t`** | **Toggle per-Tenant breakdown** |
+| **`x`** | **Return to primary cluster dashboard view** |
 | `q` | Quit |
 
-### Color Coding
+View and tenant drill-down rank up to 32 candidates with a **single batch rank monitor**,
+select the top 8 by ops/s, then maintain one **batch display monitor** for ongoing
+refreshes (one API query per cycle instead of per-object probes).
 
-| Color | Meaning |
-|-------|---------|
-| **Bold cyan** | READ ops, header |
-| **Bold yellow** | WRITE ops |
-| **Bold green** | Healthy latency (<1 ms), positive ops/BW delta |
-| **Yellow** | Moderate latency (1–10 ms), >10% workload |
-| **Bold red** | High latency (>10 ms), >50% workload |
-| **Dim** | Zero/null values, min/max run stats, separators |
-| **Cyan** | Read throughput, data consumer |
+Press `c`, `v`, or `t` again while in drill mode to switch scope. Use `x` to exit all
+drill modes and restore cluster monitors.
 
-### Latency Thresholds
+---
 
-| Status | Threshold |
-|--------|-----------|
-| HEALTHY | < 1,000 µs |
-| MODERATE LATENCY | 1,000–5,000 µs |
-| ELEVATED LATENCY | 5,000–10,000 µs |
-| DEGRADED | 10,000–50,000 µs |
-| CRITICAL | > 50,000 µs |
+## Drill-Down Mode
+
+| Mode | Key | VMS endpoint | `object_type` | Metrics |
+|------|-----|--------------|---------------|---------|
+| cNode | `c` | `/cnodes/` | `cnode` | `NfsMetrics` + `NFSCommon` bandwidth |
+| View | `v` | `/views/` | `view` | `ViewMetrics,*__rate/__avg` (no aggregation) |
+| Tenant | `t` | `/tenants/` | `tenant` | `TenantMetrics,*__sum/__num_samples` (delta-derived rates) |
+
+Flow:
+
+1. Fetch object list from VMS.
+2. For view/tenant: batch-rank candidates by activity, keep top 8.
+3. Create scope-appropriate monitors (batch for view/tenant, per-object for cnode).
+4. Refresh on the normal interval; rows sorted by total ops/s.
+5. Press `x` to tear down drill monitors and return to cluster view.
+
+> View monitors require **seconds resolution without aggregation**. Tenant scope cannot
+> use cluster `NfsMetrics` — tenant counters require the delta engine described above.
+
+---
 
 ## Workload Classification
-
-The monitor automatically classifies the observed workload pattern based on
-the proportion of read, write, and metadata operations, plus average I/O size:
 
 | Classification | Heuristic |
 |----------------|-----------|
@@ -113,30 +162,37 @@ the proportion of read, write, and metadata operations, plus average I/O size:
 | balanced read/write | both I/O types active, I/O ≥ 80% |
 | mixed workload | mixed I/O and metadata |
 
-I/O size qualifiers (`small-file` < 8 KiB, `large-block` ≥ 64 KiB) are
-prepended to the classification when I/O operations are dominant.
+I/O size qualifiers (`small-file` < 8 KiB, `large-block` ≥ 64 KiB) prepend the label
+when I/O operations dominate.
 
-## Drill-Down Mode
+---
 
-Press `c`, `v`, or `t` to break the cluster-aggregate view down by cNode,
-view/export, or tenant. The tool:
+## Color Coding & Latency Thresholds
 
-1. Fetches the list of objects from the VMS API.
-2. Creates one RPC monitor + one bandwidth monitor per object (up to 8 objects).
-3. Refreshes on the normal interval, showing per-object totals sorted by
-   total ops/s.
-4. Press `x` to exit drill-down and destroy the extra monitors.
+| Color | Meaning |
+|-------|---------|
+| **Bold cyan** | READ ops, headers |
+| **Bold yellow** | WRITE ops, drill mode indicator |
+| **Bold green** | Healthy latency (<1 ms), positive deltas |
+| **Yellow** | Moderate latency (1–10 ms), >10% workload |
+| **Bold red** | High latency (>10 ms), >50% workload |
 
-> **Note**: Drill-down requires that the VMS supports per-object NFS monitors
-> (i.e. `object_type=cnode/view/tenant` in the monitors API). If the VMS does
-> not support this, the tool reports the error and remains in cluster view.
+| Status | Threshold |
+|--------|-----------|
+| HEALTHY | < 1,000 µs |
+| MODERATE LATENCY | 1,000–5,000 µs |
+| ELEVATED LATENCY | 5,000–10,000 µs |
+| DEGRADED | 10,000–50,000 µs |
+| CRITICAL | > 50,000 µs |
+
+---
 
 ## CSV Export
 
-With `--csv nfs.csv`, each refresh appends one row per RPC procedure to the
-specified file, including timestamps, cluster identity, all metric values, and
-run-min/max/mean statistics. If the file is new or empty, the header row is
-written automatically.
+With `--csv nfs.csv`, each refresh appends one row per RPC procedure including
+timestamps, cluster identity, metric values, and run statistics.
+
+---
 
 ## Metric Discovery
 
@@ -144,54 +200,49 @@ written automatically.
 ./vast-opstat.py --nfs --version=3.0 --vms <VMS_HOST> --discover-metrics
 ```
 
-This mode:
+Reports cluster identity, object counts (`/cnodes/`, `/views/`, `/tenants/`),
+available NFS metric FQNs, and drill-down availability per object type.
 
-- Connects to the VMS and identifies the cluster.
-- Queries `/api/cnodes/`, `/api/views/`, `/api/tenants/`, `/api/vips/` and
-  reports object counts and sample names.
-- Creates a temporary NFS RPC monitor, queries its `prop_list`, reports all
-  available metric FQNs, then deletes the monitor.
-- Reports drill-down availability for each object type.
-
-Use this to verify connectivity and to identify which metrics the VMS version
-supports before committing to a monitoring session.
+---
 
 ## Monitored RPC Procedures
 
-All 22 standard NFS v3 RPC operations are tracked:
+All 22 standard NFS v3 RPC operations: NULL, GETATTR, SETATTR, LOOKUP, ACCESS,
+READLINK, READ, WRITE, CREATE, MKDIR, SYMLINK, MKNOD, REMOVE, RMDIR, RENAME,
+LINK, READDIR, READDIRPLUS, FSSTAT, FSINFO, PATHCONF, COMMIT.
 
-NULL, GETATTR, SETATTR, LOOKUP, ACCESS, READLINK, READ, WRITE, CREATE, MKDIR,
-SYMLINK, MKNOD, REMOVE, RMDIR, RENAME, LINK, READDIR, READDIRPLUS, FSSTAT,
-FSINFO, PATHCONF, COMMIT
+---
 
 ## API Interaction
 
-The NFS v3 module uses two API monitors per session:
+| Monitor | Metrics | Purpose |
+|---------|---------|---------|
+| RPC | `NfsMetrics,nfs_{op}_latency__rate/__avg` | Per-procedure ops and latency |
+| Bandwidth | `ProtoMetrics,proto_name=NFSCommon,rd_bw/wr_bw` | Read/write throughput |
 
-| Monitor | Metrics | Endpoint |
-|---------|---------|----------|
-| RPC | `NfsMetrics,nfs_{op}_latency__rate` + `__avg` for all 22 procedures | `POST /api/monitors/` then `GET /api/monitors/{id}/query/` |
-| Bandwidth | `ProtoMetrics,proto_name=NFSCommon,rd_bw` + `wr_bw` | Same |
+Monitors use `object_type=cluster` at startup and are deleted on exit (including
+SIGINT/SIGTERM). Drill-down creates temporary scope monitors cleaned up on exit or
+when pressing `x`.
 
-Monitors are created at startup with `object_type=cluster` and deleted on exit
-(including on SIGINT/SIGTERM). Drill-down modes create additional temporary
-monitors per object, also deleted on exit.
+---
 
-### API Assumptions
+## Architecture
 
-- VMS responds at `https://{host}[:{port}]/api/` with HTTP Basic Auth.
-- `POST /api/monitors/` accepts `object_type`, `object_ids`, `time_frame`,
-  `aggregation`, `query_aggregation`, `prop_list`, and optionally `granularity`.
-- `GET /api/monitors/{id}/query/` returns `{"prop_list": [...], "data": [[timestamp, ...], ...]}`.
-- Metric FQNs follow the pattern `NfsMetrics,nfs_{op}_latency__{rate|avg}`.
-- NULL operation uses `NfsMetrics,nfs_null` (no latency suffix).
-- Bandwidth uses `ProtoMetrics,proto_name=NFSCommon,{rd_bw|wr_bw}`.
-- `/api/clusters/` returns a list with at least one entry containing `id` and `name`.
-- Drill-down object endpoints: `/api/cnodes/`, `/api/views/`, `/api/tenants/`.
-- Drill-down `object_type` values: `cnode`, `view`, `tenant`.
+```
+vast-opstat.py  (--nfs --version=3.0)
+    │
+    ▼
+nfs_v3.run()
+    ├── get_current_cluster()
+    ├── create_monitor("rpc") + create_monitor("bw")
+    │
+    └── loop every REFRESH_SECONDS
+            ├── fetch_monitor_query()
+            ├── fetch_drill_query()   (if c/v/t drill active)
+            └── render_screen()
+```
 
-If any of these assumptions differ in a specific VMS version, `--discover-metrics`
-will surface the discrepancy before a monitoring session is started.
+---
 
 ## Examples
 
@@ -202,28 +253,7 @@ will surface the discrepancy before a monitoring session is started.
 # Rolling one-hour average
 ./vast-opstat.py --nfs --version=3.0 --vms var203.selab.vastdata.com --sample-average 1h
 
-# CSV export
-./vast-opstat.py --nfs --version=3.0 --vms var203.selab.vastdata.com --csv nfs_stats.csv
-
-# Metric discovery
-./vast-opstat.py --nfs --version=3.0 --vms var203.selab.vastdata.com --discover-metrics
+# CSV export + API debug log
+./vast-opstat.py --nfs --version=3.0 --vms var203.selab.vastdata.com \
+  --csv nfs_stats.csv --log-api-calls
 ```
-
-## Architecture
-
-```
-vast-opstat.py  (--nfs --version=3.0)
-    │
-    ▼
-nfs_v3.run()
-    ├── get_current_cluster()        → CLUSTER_ID, CLUSTER_NAME
-    ├── create_monitor("rpc", ...)   → RPC_MONITOR_ID
-    ├── create_monitor("bw",  ...)   → BW_MONITOR_ID
-    │
-    └── loop every REFRESH_SECONDS
-            ├── fetch_monitor_query()
-            ├── fetch_drill_query()  (if drill active)
-            └── render_screen()
-```
-
-Implementation: [nfs_v3.py](nfs_v3.py)

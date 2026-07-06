@@ -6,6 +6,39 @@ import unicodedata
 
 _ANSI_RE = re.compile(r"\033\[[^m]*m")
 
+# ---------------------------------------------------------------------------
+# ANSI colors (shared by every protocol engine)
+# ---------------------------------------------------------------------------
+_RST = "\033[0m"
+_BOLD = "\033[1m"
+_DIM = "\033[2m"
+_RED = "\033[31m"
+_GREEN = "\033[32m"
+_YELLOW = "\033[33m"
+_BLUE = "\033[34m"
+_MAGENTA = "\033[35m"
+_CYAN = "\033[36m"
+_BRED = "\033[1;31m"
+_BGREEN = "\033[1;32m"
+_BYELLOW = "\033[1;33m"
+_BBLUE = "\033[1;34m"
+_BMAGENTA = "\033[1;35m"
+_BCYAN = "\033[1;36m"
+_BWHITE = "\033[1;37m"
+
+COLOR_ENABLED = False
+
+
+def set_color(enabled):
+    """Enable/disable ANSI colorization for :func:`c`."""
+    global COLOR_ENABLED
+    COLOR_ENABLED = bool(enabled)
+
+
+def c(text, code):
+    """Wrap *text* in ANSI *code* when color is enabled, else return it plain."""
+    return f"{code}{text}{_RST}" if COLOR_ENABLED else text
+
 
 def strip_ansi(text):
     """Remove ANSI SGR escape sequences from *text*."""

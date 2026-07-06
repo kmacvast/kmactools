@@ -30,7 +30,6 @@ import os
 import re
 import select
 import shutil
-import signal
 import ssl
 import sys
 import termios
@@ -45,7 +44,9 @@ import vast_api_log
 import vast_common
 from tui_layout import (
     display_width, format_fixed_number, format_scaled_metric, join_columns,
-    pad_display, truncate_display,
+    pad_display, truncate_display, c, set_color,
+    _RST, _BOLD, _DIM, _GREEN, _YELLOW, _CYAN,
+    _BRED, _BGREEN, _BYELLOW, _BCYAN, _BWHITE,
 )
 
 VERSION = "0.1.2"
@@ -238,19 +239,6 @@ else:
     _DOT, _BLK, _SHD = "*", "#", "."
     _ARR_UP, _ARR_DN, _ARR_EQ = "^", "v", ">"
 
-_RST = "\033[0m"
-_BOLD = "\033[1m"
-_DIM = "\033[2m"
-_RED = "\033[31m"
-_GREEN = "\033[32m"
-_YELLOW = "\033[33m"
-_CYAN = "\033[36m"
-_BRED = "\033[1;31m"
-_BGREEN = "\033[1;32m"
-_BYELLOW = "\033[1;33m"
-_BCYAN = "\033[1;36m"
-_BWHITE = "\033[1;37m"
-
 _COLOR = False
 ARGS = None
 VMS = PORT = USER = PASSWORD = None
@@ -325,6 +313,7 @@ def init_config(args):
         print(f"API call logging enabled: {log_path}", file=sys.stderr, flush=True)
     global _COLOR
     _COLOR = sys.stdout.isatty() and not args.no_color
+    set_color(_COLOR)
     CSV_FILE = getattr(args, "csv", None)
     RUN_STARTED_AT = datetime.now()
     configure_client_scope(args)
@@ -422,10 +411,6 @@ def probe_monitor(cluster_id, prop_list, label):
 
 def _common_fqn(suffix):
     return f"{_PROTO_SMB_COMMON},{suffix}"
-
-
-def c(text, code):
-    return f"{code}{text}{_RST}" if _COLOR else text
 
 
 def as_float(value):

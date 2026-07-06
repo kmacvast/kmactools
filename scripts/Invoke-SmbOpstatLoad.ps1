@@ -33,8 +33,17 @@
 .PARAMETER DiskspdPath
     Path to diskspd.exe. When missing, .NET file I/O loops are used instead.
 
+    All workloads run **concurrently** from start — reads, writes, metadata, notify,
+    and locks are never paused. Phase rotation is a status label only.
+
 .PARAMETER PhaseSeconds
-    Seconds per emphasis phase before rotating workload bias label.
+    Seconds between status label rotation (does not stop any workers).
+
+.PARAMETER ReadWorkers
+    Supplemental .NET read loops (always run alongside diskspd when present).
+
+.PARAMETER WriteWorkers
+    Supplemental .NET write/flush loops (always run alongside diskspd when present).
 
 .EXAMPLE
     .\Invoke-SmbOpstatLoad.ps1
@@ -54,7 +63,10 @@ param(
     [int]    $SetInfoWorkers = 2,
     [int]    $LockWorkers    = 3,
     [int]    $NotifyWorkers  = 2,
-    [int]    $BurstWorkers   = 2
+    [int]    $BurstWorkers   = 2,
+    [int]    $ReadWorkers    = 3,
+    [int]    $WriteWorkers   = 3,
+    [int]    $DiskspdDurationSec = 90
 )
 
 Set-StrictMode -Version Latest
@@ -75,12 +87,13 @@ $LockFile      = Join-Path $DataDir 'lock_stress.dat'
 
 $script:WorkerJobs = @()
 $script:PhaseIndex = 0
+$script:DiskspdJobLabels = @('DiskspdRandom', 'DiskspdSeqWrite', 'DiskspdSeqRead')
 $script:PhaseNames = @(
-    'balanced mixed I/O + metadata',
-    'read-biased (large-block sequential reads)',
-    'write-biased (sequential writes + flush)',
-    'metadata-heavy (create/list/delete churn)',
-    'small-file metadata burst (query_info + set_info)'
+    'concurrent mixed (read + write + metadata)',
+    'concurrent mixed (read + write + metadata)',
+    'concurrent mixed (read + write + metadata)',
+    'concurrent mixed (read + write + metadata)',
+    'concurrent mixed (read + write + metadata)'
 )
 
 function Write-Status {
@@ -141,6 +154,99 @@ function Initialize-TestLayout {
 function Test-ShareReachable {
     if (-not (Test-Path -LiteralPath $NasShare)) {
         throw "SMB share not reachable: $NasShare"
+    }
+}
+
+function Stop-JobsByName {
+    param([string[]] $Names)
+    foreach ($job in @($script:WorkerJobs)) {
+        if ($job -and ($Names -contains $job.Name)) {
+            Stop-Job -Job $job -ErrorAction SilentlyContinue
+            Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+            $script:WorkerJobs = @($script:WorkerJobs | Where-Object { $_ -ne $job })
+        }
+    }
+}
+
+function Get-DiskspdArgLine {
+    param([string] $FilePath)
+    return "`"$FilePath`""
+}
+
+function Get-ConcurrentDiskspdProfiles {
+    $rnd = Get-DiskspdArgLine $RandomDat
+    $seq = Get-DiskspdArgLine $SeqDat
+    $read = Get-DiskspdArgLine $ReadDat
+    $d = $DiskspdDurationSec
+
+    # All three run together: mixed random I/O + dedicated seq read + dedicated seq write.
+    return @(
+        @{ Label = 'DiskspdRandom';  Args = "-b8K -d$d -o16 -t16 -r -w40 -c4G -h -L $rnd" }
+        @{ Label = 'DiskspdSeqRead'; Args = "-b64K -d$d -o8 -t8 -r -w0 -si -c4G -h -L $read" }
+        @{ Label = 'DiskspdSeqWrite'; Args = "-b64K -d$d -o8 -t8 -w100 -c4G -h -L $seq" }
+    )
+}
+
+function Start-ConcurrentDiskspdWorkers {
+    if (-not (Test-Path -LiteralPath $DiskspdPath)) { return }
+
+    foreach ($profile in (Get-ConcurrentDiskspdProfiles)) {
+        if (@($script:WorkerJobs | Where-Object { $_.Name -eq $profile.Label }).Count -gt 0) {
+            continue
+        }
+        $job = Start-DiskspdLoop -Label $profile.Label -Args $profile.Args -DurationSec $DiskspdDurationSec
+        if ($job) { $script:WorkerJobs += $job }
+    }
+}
+
+function Set-IoWorkerCount {
+    param(
+        [string] $NamePrefix,
+        [ValidateSet('Read', 'Write', 'Flush')]
+        [string] $Mode,
+        [int]    $DesiredCount
+    )
+
+    $existing = @($script:WorkerJobs | Where-Object { $_.Name -like "${NamePrefix}_*" })
+    $current = $existing.Count
+    if ($DesiredCount -le 0) {
+        Stop-JobsByName ($existing | ForEach-Object { $_.Name })
+        return
+    }
+    if ($current -gt $DesiredCount) {
+        $trim = $existing | Select-Object -First ($current - $DesiredCount)
+        Stop-JobsByName ($trim | ForEach-Object { $_.Name })
+    }
+    elseif ($current -lt $DesiredCount) {
+        ($current + 1)..$DesiredCount | ForEach-Object {
+            $idx = $_
+            switch ($Mode) {
+                'Read' {
+                    $target = if ($idx % 2 -eq 0) { $ReadDat } else { $RandomDat }
+                    $block = if ($idx % 2 -eq 0) { 65536 } else { 8192 }
+                }
+                'Write' {
+                    $target = if ($idx % 2 -eq 0) { $SeqDat } else { $RandomDat }
+                    $block = if ($idx % 2 -eq 0) { 65536 } else { 8192 }
+                }
+                'Flush' {
+                    $target = $SeqDat
+                    $block = 16384
+                }
+            }
+            $script:WorkerJobs += Start-DotNetIoLoop -Name "${NamePrefix}_$idx" -Mode $Mode -BlockSize $block -TargetFile $target
+        }
+    }
+}
+
+function Start-ConcurrentIoWorkers {
+    Set-IoWorkerCount -NamePrefix 'NetRead'  -Mode 'Read'  -DesiredCount $ReadWorkers
+    Set-IoWorkerCount -NamePrefix 'NetWrite' -Mode 'Write' -DesiredCount $WriteWorkers
+    Set-IoWorkerCount -NamePrefix 'NetFlush' -Mode 'Flush' -DesiredCount 1
+    if (-not (Test-Path -LiteralPath $DiskspdPath)) {
+        if (-not (@($script:WorkerJobs | Where-Object { $_.Name -eq 'NetRandom' }).Count)) {
+            $script:WorkerJobs += Start-DotNetIoLoop -Name 'NetRandom' -Mode 'Random' -BlockSize 8192 -TargetFile $RandomDat
+        }
     }
 }
 
@@ -227,7 +333,7 @@ function Start-DotNetIoLoop {
                         $fs.Close()
                     }
                     'Random' {
-                        if ($rng.NextDouble() -lt 0.35) {
+                        if ($rng.NextDouble() -lt 0.65) {
                             $fs = [System.IO.File]::Open($Target, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
                             [void]$fs.Read($buf, 0, [Math]::Min($BlockSize, 8192))
                         }
@@ -479,18 +585,14 @@ function Start-CompressionWorker {
 function Start-AllWorkloads {
     $useDiskspd = Test-Path -LiteralPath $DiskspdPath
     if ($useDiskspd) {
-        Write-Status "Using diskspd at $DiskspdPath" 'Green'
-        $script:WorkerJobs += Start-DiskspdLoop -Label 'DiskspdRandom' -Args "-b8K -d45 -o8 -t8 -r -w35 -c1G -h -L `"$RandomDat`""
-        $script:WorkerJobs += Start-DiskspdLoop -Label 'DiskspdSeqWrite' -Args "-b64K -d45 -o4 -t4 -w100 -c1G -h -L `"$SeqDat`""
-        $script:WorkerJobs += Start-DiskspdLoop -Label 'DiskspdSeqRead' -Args "-b64K -d45 -o4 -t4 -r -w0 -c1G -h -L `"$ReadDat`""
+        Write-Status "Using diskspd at $DiskspdPath (concurrent read+write+random)" 'Green'
+        Start-ConcurrentDiskspdWorkers
     }
     else {
-        Write-Status 'diskspd not found — using .NET I/O loops' 'Yellow'
-        $script:WorkerJobs += Start-DotNetIoLoop -Name 'NetRandom' -Mode 'Random' -BlockSize 8192  -TargetFile $RandomDat
-        $script:WorkerJobs += Start-DotNetIoLoop -Name 'NetWrite'  -Mode 'Write'  -BlockSize 65536 -TargetFile $SeqDat
-        $script:WorkerJobs += Start-DotNetIoLoop -Name 'NetRead'   -Mode 'Read'   -BlockSize 65536 -TargetFile $ReadDat
-        $script:WorkerJobs += Start-DotNetIoLoop -Name 'NetFlush'  -Mode 'Flush'  -BlockSize 16384 -TargetFile $SeqDat
+        Write-Status 'diskspd not found — using .NET I/O loops only' 'Yellow'
     }
+
+    Start-ConcurrentIoWorkers
 
     1..$MetaWorkers | ForEach-Object {
         $script:WorkerJobs += Start-MetadataWorker -WorkerId $_ -Folder $MetaDir
@@ -527,13 +629,14 @@ try {
     Write-Host '======================================================================' -ForegroundColor Cyan
     Write-Host " Share:      $NasShare"
     Write-Host " Test root:  $TestRoot"
-    Write-Host " Phase rot:  every ${PhaseSeconds}s (bias label for operator)"
+    Write-Host " Phase rot:  every ${PhaseSeconds}s (status label only — all workers stay up)"
+    Write-Host " Data I/O:   diskspd random+seq R/W + NetRead($ReadWorkers) + NetWrite($WriteWorkers) + NetFlush(1)"
     Write-Host ''
-    Write-Host ' Opcode mapping (vast-opstat --smb):' -ForegroundColor DarkCyan
-    Write-Host '   Authoritative:  READ/WRITE I/O, METADATA (total)'
-    Write-Host '   Derived rows:   CHANGE_NOTIFY (watchers), LOCK (byte-range locks)'
-    Write-Host '   Derived hints:  CREATE/CLOSE/QUERY_* /SET_INFO (classifier text)'
-    Write-Host '   Session rows:   run opstat with --clients <this Windows host IP>'
+    Write-Host ' Concurrent opcode coverage (vast-opstat --smb):' -ForegroundColor DarkCyan
+    Write-Host '   SMB2_READ/WRITE  — diskspd + NetRead/NetWrite/NetFlush (always together)'
+    Write-Host '   METADATA         — Meta/Burst/Dir/QueryInfo/SetInfo workers (always)'
+    Write-Host '   CHANGE_NOTIFY    — FileSystemWatcher workers (always)'
+    Write-Host '   LOCK             — byte-range lock workers (always)'
     Write-Host ''
     Write-Host ' Press Ctrl+C to stop.' -ForegroundColor Yellow
     Write-Host '======================================================================' -ForegroundColor Cyan
@@ -547,7 +650,7 @@ try {
         if (((Get-Date) - $phaseStarted).TotalSeconds -ge $PhaseSeconds) {
             $script:PhaseIndex = ($script:PhaseIndex + 1) % $script:PhaseNames.Count
             $phaseStarted = Get-Date
-            Write-Status ("Phase emphasis: {0}" -f $script:PhaseNames[$script:PhaseIndex]) 'Cyan'
+            Write-Status ("Status tick: {0}" -f $script:PhaseNames[$script:PhaseIndex]) 'Cyan'
         }
 
         $alive = @($script:WorkerJobs | Where-Object { $_.State -eq 'Running' }).Count

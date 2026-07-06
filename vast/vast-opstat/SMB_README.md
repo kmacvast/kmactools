@@ -6,7 +6,7 @@ workloads. Per-command `SmbMetrics` is not exported on current VMS builds — me
 appears as a single **METADATA (total)** aggregate row with an optional read-md /
 write-md split sub-line.
 
-![SMB TUI Dashboard](images/smb_tui.png)
+![SMB TUI Dashboard](images/vast-opstat_SMB.png)
 
 **Version:** 0.1.2 · **Implementation:** [smb.py](smb.py) · **Setup:** [SETUP.md](SETUP.md) ·
 **Opcodes:** [SMB_OPCODES.md](SMB_OPCODES.md) · **Discovery:** [SMB_PHASE0_RESULTS.md](SMB_PHASE0_RESULTS.md)

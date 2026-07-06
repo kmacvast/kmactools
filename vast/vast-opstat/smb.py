@@ -24,6 +24,7 @@
 import base64
 import csv
 import getpass
+import io
 import json
 import os
 import re
@@ -40,8 +41,14 @@ import urllib.parse
 import urllib.request
 from datetime import datetime
 
+import ipaddress
+
 import vast_api_log
-from tui_layout import display_width, format_fixed_number, format_scaled_metric, join_columns, pad_display
+import vast_common
+from tui_layout import (
+    display_width, format_fixed_number, format_scaled_metric, join_columns,
+    pad_display, truncate_display,
+)
 
 VERSION = "0.1.2"
 
@@ -332,7 +339,22 @@ def configure_client_scope(args):
         CLIENT_SCOPED = False
         CLIENT_IPS = []
         return
-    CLIENT_IPS = [item.strip() for item in raw.split(",") if item.strip()]
+    cleaned, rejected = [], []
+    for item in (s.strip() for s in raw.split(",") if s.strip()):
+        try:
+            ipaddress.ip_address(item)
+            cleaned.append(item)
+        except ValueError:
+            if item and all(ch.isalnum() or ch in ".-_" for ch in item):
+                cleaned.append(item)  # permit hostnames
+            else:
+                rejected.append(item)
+    if rejected:
+        print(
+            f"WARNING: ignoring malformed --clients entries: {', '.join(rejected)}",
+            file=sys.stderr,
+        )
+    CLIENT_IPS = cleaned
     CLIENT_SCOPED = bool(CLIENT_IPS)
 
 
@@ -373,13 +395,7 @@ def get_current_cluster():
     clusters = normalize_list_response(data)
     if not clusters:
         raise RuntimeError(f"No clusters returned from /clusters/: {data}")
-    cluster = clusters[0]
-    if len(clusters) > 1:
-        for cl in clusters:
-            blob = json.dumps(cl).lower()
-            if '"local": true' in blob or '"is_local": true' in blob or '"current": true' in blob:
-                cluster = cl
-                break
+    cluster = vast_common.select_local_cluster(clusters)
     cluster_id = cluster.get("id")
     cluster_name = (
         cluster.get("name") or cluster.get("cluster_name")
@@ -539,7 +555,9 @@ def box_sep(width):
 
 
 def box_row(content, width):
-    inner = width - 4
+    inner = max(0, width - 4)
+    if display_width(content) > inner:
+        content = truncate_display(content, inner) + (_RST if _COLOR else "")
     pad = max(0, inner - display_width(content))
     return f"{c(_V, _DIM)} {content}{' ' * pad} {c(_V, _DIM)}"
 
@@ -792,7 +810,7 @@ def _create_monitor_raw(name_suffix, prop_list, object_type, object_ids, *, no_a
     monitor_id = result.get("id") if isinstance(result, dict) else None
     if not monitor_id:
         raise RuntimeError(f"Monitor create did not return id for {name_suffix}: {result}")
-    return monitor_id
+    return vast_common.register_monitor(monitor_id)
 
 
 def create_monitor(name_suffix, prop_list):
@@ -826,8 +844,13 @@ def delete_monitor(monitor_id):
         return
     try:
         api_request("DELETE", f"/monitors/{monitor_id}/")
-    except Exception:
-        pass
+    except RuntimeError as e:
+        if "HTTP 404" not in str(e):
+            vast_common.record_failed_delete(monitor_id, str(e)[:80])
+    except Exception as e:
+        vast_common.record_failed_delete(monitor_id, str(e)[:80])
+    finally:
+        vast_common.forget_monitor(monitor_id)
 
 
 def _result_parts(result):
@@ -1221,7 +1244,7 @@ def smb_workload_mix(meta, data_rows):
 
 def classify_smb_workload(meta, data_rows):
     """Return a human-readable SMB workload description."""
-    total = as_float(meta.get("total_iops")) or 0
+    total = _component_ops_total(meta, data_rows)
     if total < 0.5:
         return "Idle / no SMB load"
 
@@ -1880,11 +1903,14 @@ def _avg_from_sum_count_deltas(result, sum_fqn, count_fqn):
     idx_s, idx_c = prop_idx.get(sum_fqn), prop_idx.get(count_fqn)
     if idx_s is None or idx_c is None or len(data) < 2:
         return None
-    sum_delta = as_float(data[0][idx_s]) - as_float(data[-1][idx_s])
-    cnt_delta = as_float(data[0][idx_c]) - as_float(data[-1][idx_c])
-    if sum_delta is None or cnt_delta is None or cnt_delta <= 0:
+    s_new, s_old = as_float(data[0][idx_s]), as_float(data[-1][idx_s])
+    c_new, c_old = as_float(data[0][idx_c]), as_float(data[-1][idx_c])
+    if None in (s_new, s_old, c_new, c_old):
         return None
-    return sum_delta / cnt_delta
+    cnt_delta = c_new - c_old
+    if cnt_delta <= 0:
+        return None
+    return (s_new - s_old) / cnt_delta
 
 
 def _weighted_us(pairs):
@@ -2239,7 +2265,7 @@ def _render_drill_panel(width):
 def fetch_monitor_query(*, force_aux=False):
     global LAST_ROWS, LAST_SAMPLE, PREV_ROWS
     result = api_request("GET", f"/monitors/{HEADLINE_MONITOR_ID}/query/")
-    PREV_ROWS = _all_panel_rows(LAST_ROWS) if LAST_ROWS else {}
+    PREV_ROWS = _all_panel_rows(LAST_ROWS) if LAST_ROWS else []
     LAST_ROWS, LAST_SAMPLE = build_rows_from_results(result)
     smb_result = None
     if SMB_COMMAND_MONITOR_ID:
@@ -2256,8 +2282,19 @@ def fetch_monitor_query(*, force_aux=False):
 
 
 def render_screen():
+    """Compose the whole frame into a buffer, then flush it in one write."""
+    buf = io.StringIO()
+    real_stdout = sys.stdout
+    sys.stdout = buf
+    try:
+        _render_frame()
+    finally:
+        sys.stdout = real_stdout
+    vast_common.flush_frame(buf.getvalue())
+
+
+def _render_frame():
     width = min(shutil.get_terminal_size((120, 40)).columns, 120)
-    clear_screen()
     title = (
         c("  VAST SMB", _BCYAN) + c(" opstat", _BWHITE) + c(f" v{VERSION}", _DIM)
         + f"   VMS {c(f'{VMS}:{PORT}', _BWHITE)}   cluster {c(CLUSTER_NAME or '?', _BWHITE)}"
@@ -2329,12 +2366,19 @@ def check_keypress():
     return data.decode(errors="ignore") if data else ""
 
 
+_CLEANED_UP = False
+
+
 def cleanup():
+    global _CLEANED_UP
+    if _CLEANED_UP:
+        return
+    _CLEANED_UP = True
     restore_terminal()
-    delete_monitor(HEADLINE_MONITOR_ID)
-    delete_monitor(SMB_COMMAND_MONITOR_ID)
-    _cleanup_drill_monitors()
+    vast_common.drain_monitors(delete_monitor)
     vast_api_log.close()
+    for monitor_id, detail in vast_common.failed_deletes():
+        print(f"WARNING: monitor {monitor_id} not deleted: {detail}", file=sys.stderr)
 
 
 def signal_handler(_signum, _frame):
@@ -2530,8 +2574,8 @@ def main():
     if ARGS.discover_metrics:
         return discover_metrics()
 
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    vast_common.install_signal_handlers(signal_handler)
+    vast_common.register_atexit(cleanup)
 
     setup_keyboard()
     CLUSTER_ID, CLUSTER_NAME = get_current_cluster()

@@ -28,8 +28,11 @@ import urllib.error
 import urllib.request
 from datetime import datetime
 
+import io
+
 import vast_api_log
-from tui_layout import display_width, join_columns, pad_display, format_fixed_number, format_scaled_metric
+import vast_common
+from tui_layout import display_width, join_columns, pad_display, format_fixed_number, format_scaled_metric, truncate_display
 
 # Table column widths — headers and data rows share these exactly.
 _COL_SEP = "  "
@@ -354,14 +357,11 @@ def resolve_volume_names(names):
     for name in names:
         match = by_exact.get(name)
         if match is None:
-            partial = [v for v in volumes if name in str(v.get("name", ""))]
-            if len(partial) == 1:
-                match = partial[0]
-            elif len(partial) > 1:
-                options = ", ".join(sorted(str(v.get("name")) for v in partial[:5]))
-                raise RuntimeError(f"Volume name '{name}' is ambiguous. Matches include: {options}")
-        if match is None:
-            raise RuntimeError(f"Volume not found: {name}")
+            # No exact match: refuse rather than silently binding a substring hit,
+            # which could scope metrics to an unintended volume.
+            near = sorted(str(v.get("name")) for v in volumes if name in str(v.get("name", "")))
+            hint = f" Did you mean: {', '.join(near[:5])}?" if near else ""
+            raise RuntimeError(f"Volume not found: '{name}' (exact name required).{hint}")
         ids.append(match["id"])
         resolved.append(str(match.get("name")))
     return ids, resolved
@@ -774,7 +774,9 @@ def box_sep(width):
 
 
 def box_row(content, width):
-    inner = width - 4
+    inner = max(0, width - 4)
+    if _vlen(content) > inner:
+        content = truncate_display(content, inner) + (_RST if _COLOR else "")
     pad = max(0, inner - _vlen(content))
     border = c(_V, _DIM)
     return f"{border} {content}{' ' * pad} {border}"
@@ -906,13 +908,7 @@ def get_current_cluster():
     clusters = normalize_list_response(data)
     if not clusters:
         raise RuntimeError(f"No clusters returned from /api/clusters/: {data}")
-    cluster = clusters[0]
-    if len(clusters) > 1:
-        for cl in clusters:
-            blob = json.dumps(cl).lower()
-            if '"local": true' in blob or '"is_local": true' in blob or '"current": true' in blob:
-                cluster = cl
-                break
+    cluster = vast_common.select_local_cluster(clusters)
     cluster_id = cluster.get("id")
     cluster_name = (
         cluster.get("name") or cluster.get("cluster_name")
@@ -944,16 +940,25 @@ def _create_monitor_raw(name_suffix, prop_list, object_type, object_ids):
     monitor_id = result.get("id") if isinstance(result, dict) else None
     if not monitor_id:
         raise RuntimeError(f"Monitor create did not return id for {name_suffix}: {result}")
-    return monitor_id
+    return vast_common.register_monitor(monitor_id)
 
 
 def create_ops_monitors(name_prefix, object_type, object_ids, ops_rows=None):
-    """Create one VMS monitor per compatible metric group."""
+    """Create one VMS monitor per compatible metric group.
+
+    On a mid-loop failure, roll back this call's already-created monitors so a
+    partially-warmed group never orphans monitors on the VMS.
+    """
     monitor_ids = []
-    for idx, prop_list in enumerate(build_ops_monitor_groups(ops_rows=ops_rows)):
-        monitor_ids.append(
-            _create_monitor_raw(f"{name_prefix}_ops_{idx}", prop_list, object_type, object_ids)
-        )
+    try:
+        for idx, prop_list in enumerate(build_ops_monitor_groups(ops_rows=ops_rows)):
+            monitor_ids.append(
+                _create_monitor_raw(f"{name_prefix}_ops_{idx}", prop_list, object_type, object_ids)
+            )
+    except Exception:
+        for monitor_id in monitor_ids:
+            delete_monitor(monitor_id)
+        raise
     return monitor_ids
 
 
@@ -987,8 +992,13 @@ def delete_monitor(monitor_id):
         return
     try:
         api_request("DELETE", f"/monitors/{monitor_id}/")
-    except Exception:
-        pass
+    except RuntimeError as e:
+        if "HTTP 404" not in str(e):
+            vast_common.record_failed_delete(monitor_id, str(e)[:80])
+    except Exception as e:
+        vast_common.record_failed_delete(monitor_id, str(e)[:80])
+    finally:
+        vast_common.forget_monitor(monitor_id)
 
 
 def setup_keyboard():
@@ -1013,16 +1023,19 @@ def restore_terminal():
     KEYBOARD_ENABLED = False
 
 
+_CLEANED_UP = False
+
+
 def cleanup():
+    global _CLEANED_UP
+    if _CLEANED_UP:
+        return
+    _CLEANED_UP = True
     restore_terminal()
-    for monitor_id in OPS_MONITOR_IDS:
-        delete_monitor(monitor_id)
-    for monitor_id in CLUSTER_SUPPLEMENT_MONITOR_IDS:
-        delete_monitor(monitor_id)
-    if PROTO_MONITOR_ID is not None:
-        delete_monitor(PROTO_MONITOR_ID)
-    _cleanup_drill_monitors()
+    vast_common.drain_monitors(delete_monitor)
     vast_api_log.close()
+    for monitor_id, detail in vast_common.failed_deletes():
+        print(f"WARNING: monitor {monitor_id} not deleted: {detail}", file=sys.stderr)
 
 
 def signal_handler(_signum, _frame):
@@ -1946,14 +1959,24 @@ def _render_help_bar(width):
 
 
 def render_screen():
+    """Compose the whole frame into a buffer, then flush it in one write."""
+    buf = io.StringIO()
+    real_stdout = sys.stdout
+    sys.stdout = buf
+    try:
+        _render_frame()
+    finally:
+        sys.stdout = real_stdout
+    vast_common.flush_frame(buf.getvalue())
+
+
+def _render_frame():
     rows = LAST_ROWS
     if not rows:
-        clear_screen()
-        print(f"Waiting for data…  VMS={VMS}:{PORT}  cluster={CLUSTER_NAME}", flush=True)
+        print(f"Waiting for data…  VMS={VMS}:{PORT}  cluster={CLUSTER_NAME}")
         return
 
     width = min(shutil.get_terminal_size((120, 40)).columns, 120)
-    clear_screen()
 
     title = (
         c("  VAST NVMe-oTCP", _BCYAN) + c(" opstat", _BWHITE) + c(f" v{VERSION}", _DIM)
@@ -2035,8 +2058,8 @@ def discover_metrics():
 def main():
     global OPS_MONITOR_IDS, PROTO_MONITOR_ID, CLUSTER_ID, CLUSTER_NAME, DRILL_ERROR
 
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    vast_common.install_signal_handlers(signal_handler)
+    vast_common.register_atexit(cleanup)
 
     if ARGS.discover_metrics:
         discover_metrics()

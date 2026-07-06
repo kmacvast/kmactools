@@ -230,6 +230,14 @@ def dispatch(args):
 
 def main(argv=None):
     args = parse_args(argv)
+    source = argv if argv is not None else sys.argv[1:]
+    if any(a == "--password" or a.startswith("--password=") for a in source):
+        print(
+            "WARNING: passing --password on the command line exposes it via `ps` "
+            "and shell history. Prefer the VAST_PASSWORD/VAST_TOKEN env var or the "
+            "secure prompt.",
+            file=sys.stderr,
+        )
     return dispatch(args)
 
 

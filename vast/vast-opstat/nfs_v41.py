@@ -39,8 +39,11 @@ import urllib.error
 import urllib.request
 from datetime import datetime
 
+import io
+
 import vast_api_log
-from tui_layout import display_width, join_columns, pad_display, format_fixed_number, format_scaled_metric
+import vast_common
+from tui_layout import display_width, join_columns, pad_display, format_fixed_number, format_scaled_metric, truncate_display
 
 VERSION = "0.1.2"
 
@@ -260,7 +263,9 @@ def box_sep(width):
 
 
 def box_row(content, width):
-    inner = width - 4
+    inner = max(0, width - 4)
+    if display_width(content) > inner:
+        content = truncate_display(content, inner) + (_RST if _COLOR else "")
     pad = max(0, inner - display_width(content))
     return f"{c(_V, _DIM)} {content}{' ' * pad} {c(_V, _DIM)}"
 
@@ -304,13 +309,7 @@ def get_current_cluster():
     clusters = normalize_list_response(data)
     if not clusters:
         raise RuntimeError(f"No clusters returned from /clusters/: {data}")
-    cluster = clusters[0]
-    if len(clusters) > 1:
-        for cl in clusters:
-            blob = json.dumps(cl).lower()
-            if '"local": true' in blob or '"is_local": true' in blob or '"current": true' in blob:
-                cluster = cl
-                break
+    cluster = vast_common.select_local_cluster(clusters)
     cluster_id = cluster.get("id")
     cluster_name = (
         cluster.get("name") or cluster.get("cluster_name")
@@ -403,7 +402,7 @@ def _create_monitor_raw(name_suffix, prop_list, object_type, object_ids):
     monitor_id = result.get("id") if isinstance(result, dict) else None
     if not monitor_id:
         raise RuntimeError(f"Monitor create did not return id for {name_suffix}: {result}")
-    return monitor_id
+    return vast_common.register_monitor(monitor_id)
 
 
 def create_monitor(name_suffix, prop_list):
@@ -415,8 +414,13 @@ def delete_monitor(monitor_id):
         return
     try:
         api_request("DELETE", f"/monitors/{monitor_id}/")
-    except Exception:
-        pass
+    except RuntimeError as e:
+        if "HTTP 404" not in str(e):
+            vast_common.record_failed_delete(monitor_id, str(e)[:80])
+    except Exception as e:
+        vast_common.record_failed_delete(monitor_id, str(e)[:80])
+    finally:
+        vast_common.forget_monitor(monitor_id)
 
 
 def _result_parts(result):
@@ -448,34 +452,32 @@ def _supplement_metric(values, op, suffix):
 
 
 def _op_metrics(nfs4_values, supplement_values, bw_values, op_key):
+    """Resolve one op's metrics, choosing a single tier so ops and latency stay consistent.
+
+    The tier (NFS4Common vs NfsMetrics) is selected once from the IOPS signal;
+    latency is then read from the *same* tier to avoid flapping/mismatched blends
+    at low load.
+    """
     if op_key == "read":
-        ops = _first_positive(
-            _metric(nfs4_values, "rd_iops"),
-            _supplement_metric(supplement_values, "read", "rate"),
-        )
-        avg_us = _first_positive(
-            _metric(nfs4_values, "read_latency__avg"),
-            _supplement_metric(supplement_values, "read", "avg"),
-        )
-        bw_mbs = _first_positive(
-            raw_bw_to_mb_sec(_metric(nfs4_values, "rd_bw")),
-            raw_bw_to_mb_sec(as_float(bw_values.get(f"{_NFS_COMMON},rd_bw"))),
-        )
-        avg_io = _avg_io_from_bw_ops(ops, bw_mbs)
+        iops_suffix, lat_suffix, supp_op = "rd_iops", "read_latency__avg", "read"
+        bw_native, bw_common = "rd_bw", f"{_NFS_COMMON},rd_bw"
     else:
-        ops = _first_positive(
-            _metric(nfs4_values, "wr_iops"),
-            _supplement_metric(supplement_values, "write", "rate"),
-        )
-        avg_us = _first_positive(
-            _metric(nfs4_values, "write_latency__avg"),
-            _supplement_metric(supplement_values, "write", "avg"),
-        )
-        bw_mbs = _first_positive(
-            raw_bw_to_mb_sec(_metric(nfs4_values, "wr_bw")),
-            raw_bw_to_mb_sec(as_float(bw_values.get(f"{_NFS_COMMON},wr_bw"))),
-        )
-        avg_io = _avg_io_from_bw_ops(ops, bw_mbs)
+        iops_suffix, lat_suffix, supp_op = "wr_iops", "write_latency__avg", "write"
+        bw_native, bw_common = "wr_bw", f"{_NFS_COMMON},wr_bw"
+
+    nfs4_iops = as_float(_metric(nfs4_values, iops_suffix))
+    if nfs4_iops is not None and nfs4_iops > 0:
+        ops = nfs4_iops
+        avg_us = _first_positive(_metric(nfs4_values, lat_suffix))
+    else:
+        ops = _first_positive(_supplement_metric(supplement_values, supp_op, "rate"))
+        avg_us = _first_positive(_supplement_metric(supplement_values, supp_op, "avg"))
+
+    bw_mbs = _first_positive(
+        raw_bw_to_mb_sec(_metric(nfs4_values, bw_native)),
+        raw_bw_to_mb_sec(as_float(bw_values.get(bw_common))),
+    )
+    avg_io = _avg_io_from_bw_ops(ops, bw_mbs)
     return {"ops_sec": ops, "avg_us": avg_us, "bw_mbs": bw_mbs, "avg_io_bytes": avg_io}
 
 
@@ -884,8 +886,19 @@ def fetch_monitor_query():
 
 
 def render_screen():
+    """Compose the whole frame into a buffer, then flush it in one write."""
+    buf = io.StringIO()
+    real_stdout = sys.stdout
+    sys.stdout = buf
+    try:
+        _render_frame()
+    finally:
+        sys.stdout = real_stdout
+    vast_common.flush_frame(buf.getvalue())
+
+
+def _render_frame():
     width = min(shutil.get_terminal_size((120, 40)).columns, 120)
-    clear_screen()
     title = (
         c("  VAST NFS", _BCYAN) + c(" opstat", _BWHITE) + c(f" v{VERSION}", _DIM)
         + f"   VMS {c(f'{VMS}:{PORT}', _BWHITE)}   cluster {c(CLUSTER_NAME, _BWHITE)}"
@@ -987,14 +1000,19 @@ def check_keypress():
     return ""
 
 
+_CLEANED_UP = False
+
+
 def cleanup():
+    global _CLEANED_UP
+    if _CLEANED_UP:
+        return
+    _CLEANED_UP = True
     restore_terminal()
-    delete_monitor(DATA_MONITOR_ID)
-    delete_monitor(SUPPLEMENT_MONITOR_ID)
-    delete_monitor(BW_MONITOR_ID)
-    delete_monitor(META_MONITOR_ID)
-    _cleanup_drill_monitors()
+    vast_common.drain_monitors(delete_monitor)
     vast_api_log.close()
+    for monitor_id, detail in vast_common.failed_deletes():
+        print(f"WARNING: monitor {monitor_id} not deleted: {detail}", file=sys.stderr)
 
 
 def signal_handler(_signum, _frame):
@@ -1006,8 +1024,8 @@ def main():
     global DATA_MONITOR_ID, META_MONITOR_ID, SUPPLEMENT_MONITOR_ID, BW_MONITOR_ID
     global CLUSTER_ID, CLUSTER_NAME
 
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    vast_common.install_signal_handlers(signal_handler)
+    vast_common.register_atexit(cleanup)
 
     if ARGS.discover_metrics:
         discover_metrics()

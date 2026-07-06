@@ -42,6 +42,7 @@
 
 import base64
 import csv
+import io
 import json
 import getpass
 import os
@@ -59,7 +60,8 @@ import urllib.request
 from datetime import datetime
 
 import vast_api_log
-from tui_layout import display_width, join_columns, pad_display, format_fixed_number, format_scaled_metric
+import vast_common
+from tui_layout import display_width, join_columns, pad_display, format_fixed_number, format_scaled_metric, truncate_display
 
 # NFS table column widths — headers and data rows must share these exactly.
 _NFS_COL_SEP = " "
@@ -403,8 +405,10 @@ def box_sep(width):
 
 
 def box_row(content, width):
-    """Print: │ content (padded to width)    │"""
-    inner = width - 4          # 2 border chars + 2 padding spaces
+    """Print: │ content (padded/truncated to width)    │"""
+    inner = max(0, width - 4)   # 2 border chars + 2 padding spaces
+    if _vlen(content) > inner:
+        content = truncate_display(content, inner) + (_RST if _COLOR else "")
     pad   = max(0, inner - _vlen(content))
     border = c(_V, _DIM)
     return f"{border} {content}{' ' * pad} {border}"
@@ -529,14 +533,7 @@ def get_current_cluster():
     if not clusters:
         raise RuntimeError(f"No clusters returned from /api/clusters/: {data}")
 
-    cluster = clusters[0]
-
-    if len(clusters) > 1:
-        for cl in clusters:
-            blob = json.dumps(cl).lower()
-            if '"local": true' in blob or '"is_local": true' in blob or '"current": true' in blob:
-                cluster = cl
-                break
+    cluster = vast_common.select_local_cluster(clusters)
 
     cluster_id   = cluster.get("id")
     cluster_name = (
@@ -659,7 +656,7 @@ def _create_monitor_raw(name_suffix, prop_list, object_type, object_ids, *, no_a
     monitor_id = result.get("id") if isinstance(result, dict) else None
     if not monitor_id:
         raise RuntimeError(f"Monitor create did not return id for {name_suffix}: {result}")
-    return monitor_id
+    return vast_common.register_monitor(monitor_id)
 
 
 def create_monitor(name_suffix, prop_list):
@@ -671,8 +668,13 @@ def delete_monitor(monitor_id):
         return
     try:
         api_request("DELETE", f"/monitors/{monitor_id}/")
-    except Exception:
-        pass
+    except RuntimeError as e:
+        if "HTTP 404" not in str(e):
+            vast_common.record_failed_delete(monitor_id, str(e)[:80])
+    except Exception as e:
+        vast_common.record_failed_delete(monitor_id, str(e)[:80])
+    finally:
+        vast_common.forget_monitor(monitor_id)
 
 
 # ---------------------------------------------------------------------------
@@ -701,12 +703,19 @@ def restore_terminal():
     KEYBOARD_ENABLED = False
 
 
+_CLEANED_UP = False
+
+
 def cleanup():
+    global _CLEANED_UP
+    if _CLEANED_UP:
+        return
+    _CLEANED_UP = True
     restore_terminal()
-    delete_monitor(RPC_MONITOR_ID)
-    delete_monitor(BW_MONITOR_ID)
-    _cleanup_drill_monitors()
+    vast_common.drain_monitors(delete_monitor)
     vast_api_log.close()
+    for monitor_id, detail in vast_common.failed_deletes():
+        print(f"WARNING: monitor {monitor_id} not deleted: {detail}", file=sys.stderr)
 
 
 def signal_handler(_signum, _frame):
@@ -1319,11 +1328,14 @@ def _avg_from_sum_count_deltas(result, sum_fqn, count_fqn):
     idx_s, idx_c = prop_idx.get(sum_fqn), prop_idx.get(count_fqn)
     if idx_s is None or idx_c is None or len(data) < 2:
         return None
-    sum_delta = as_float(data[0][idx_s]) - as_float(data[-1][idx_s])
-    cnt_delta = as_float(data[0][idx_c]) - as_float(data[-1][idx_c])
-    if sum_delta is None or cnt_delta is None or cnt_delta <= 0:
+    s_new, s_old = as_float(data[0][idx_s]), as_float(data[-1][idx_s])
+    c_new, c_old = as_float(data[0][idx_c]), as_float(data[-1][idx_c])
+    if None in (s_new, s_old, c_new, c_old):
         return None
-    return sum_delta / cnt_delta
+    cnt_delta = c_new - c_old
+    if cnt_delta <= 0:
+        return None
+    return (s_new - s_old) / cnt_delta
 
 
 def _weighted_us(pairs):
@@ -2019,12 +2031,23 @@ def _render_drill_panel(width):
 # ---------------------------------------------------------------------------
 
 def render_screen():
+    """Compose the whole frame into a buffer, then flush it in one write."""
+    buf = io.StringIO()
+    real_stdout = sys.stdout
+    sys.stdout = buf
+    try:
+        _render_frame()
+    finally:
+        sys.stdout = real_stdout
+    vast_common.flush_frame(buf.getvalue())
+
+
+def _render_frame():
     rows            = LAST_ROWS
     selected_sample = LAST_SAMPLE
 
     if not rows:
-        clear_screen()
-        print(f"Waiting for data…  VMS={VMS}:{PORT}  cluster={CLUSTER_NAME}", flush=True)
+        print(f"Waiting for data…  VMS={VMS}:{PORT}  cluster={CLUSTER_NAME}")
         return
 
     total_ops        = sum(as_float(r["ops_sec"]) or 0 for r in rows)
@@ -2033,8 +2056,6 @@ def render_screen():
     deltas           = compute_deltas(rows, PREV_ROWS)
     width            = min(shutil.get_terminal_size((184, 40)).columns, 184)
     mode_tag         = "avg " + API_TIME_FRAME if SAMPLE_AVERAGE_MODE else "latest"
-
-    clear_screen()
 
     # ── Title bar (plain — intentionally outside any box, htop style) ────────
     drill_tag = c(f"  {_V} {DRILL_MODE.upper()} DRILL {_V}", _BYELLOW) if DRILL_MODE else ""
@@ -2189,8 +2210,8 @@ def discover_metrics():
 def main():
     global RPC_MONITOR_ID, BW_MONITOR_ID, CLUSTER_ID, CLUSTER_NAME, SORT_MODE, DRILL_ERROR
 
-    signal.signal(signal.SIGINT,  signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    vast_common.install_signal_handlers(signal_handler)
+    vast_common.register_atexit(cleanup)
 
     if ARGS.discover_metrics:
         discover_metrics()

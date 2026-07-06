@@ -1427,3 +1427,137 @@ class TestNvmeTcpMetrics:
     def test_display_names_cover_table_order(self):
         for key in nvme_tcp.TABLE_ORDER:
             assert key in nvme_tcp.DISPLAY_NAMES
+
+    def test_resolve_volume_names_requires_exact_match(self):
+        nvme_tcp.init_config(self._connection_args())
+        vols = [{"id": 1, "name": "db_archive_2024"}, {"id": 2, "name": "db_live"}]
+        with patch.object(nvme_tcp, "api_request", return_value=vols):
+            ids, resolved = nvme_tcp.resolve_volume_names(["db_live"])
+            assert ids == [2] and resolved == ["db_live"]
+            with pytest.raises(RuntimeError, match="exact name required"):
+                nvme_tcp.resolve_volume_names(["db"])  # substring must not auto-bind
+
+    def test_create_ops_monitors_rolls_back_on_failure(self):
+        nvme_tcp.init_config(self._connection_args())
+        nvme_tcp.CLUSTER_ID = 1
+        nvme_tcp.vast_common.reset_registry()
+        posted, deleted = [], []
+        seq = iter(range(1, 99))
+
+        def fake_api_request(method, path, payload=None):
+            if method == "POST" and path == "/monitors/":
+                posted.append(payload["name"])
+                if len(posted) == 2:  # fail on the 2nd group
+                    raise RuntimeError("POST /monitors/ failed: HTTP 400: property_error")
+                return {"id": next(seq)}
+            if method == "DELETE":
+                deleted.append(path)
+                return None
+            raise AssertionError(f"Unexpected: {method} {path}")
+
+        with patch.object(nvme_tcp, "api_request", side_effect=fake_api_request):
+            with pytest.raises(RuntimeError):
+                nvme_tcp.create_ops_monitors("nvme", "cluster", [1])
+
+        assert len(deleted) == 1  # the first, already-created monitor is cleaned up
+        assert not nvme_tcp.vast_common._CREATED_MONITORS  # nothing left registered
+
+
+class TestVastCommon:
+    def setup_method(self):
+        smb.vast_common.reset_registry()
+
+    def test_register_and_drain_monitors(self):
+        vc = smb.vast_common
+        vc.register_monitor(11)
+        vc.register_monitor(22)
+        deleted = []
+        vc.drain_monitors(deleted.append)
+        assert sorted(deleted) == [11, 22]
+        assert not vc._CREATED_MONITORS  # drained
+
+    def test_select_local_cluster_prefers_flag_over_first(self):
+        vc = smb.vast_common
+        clusters = [{"id": 1, "name": "remote"}, {"id": 2, "name": "home", "is_local": True}]
+        assert vc.select_local_cluster(clusters)["id"] == 2
+        assert vc.select_local_cluster([{"id": 9}])["id"] == 9  # fallback to first
+        assert vc.select_local_cluster([]) is None
+
+    def test_flush_frame_is_single_write_without_full_erase(self, capsys):
+        smb.vast_common.flush_frame("hello")
+        out = capsys.readouterr().out
+        assert out == "\033[Hhello\033[J"
+        assert "\033[2J" not in out  # no full-screen erase → no flicker
+
+    def test_install_signal_handlers_covers_sighup(self):
+        import signal as _signal
+        captured = {}
+
+        def fake_signal(sig, handler):
+            captured[sig] = handler
+
+        with patch("signal.signal", side_effect=fake_signal):
+            smb.vast_common.install_signal_handlers(lambda *a: None)
+        assert _signal.SIGINT in captured
+        assert _signal.SIGTERM in captured
+        assert _signal.SIGHUP in captured
+
+
+class TestAuditRegressions:
+    def test_avg_from_sum_count_deltas_handles_null_rows(self):
+        # Leading null padding row must not raise (was: None - float TypeError)
+        result = {
+            "prop_list": ["timestamp", "S", "C"],
+            "data": [
+                ["2026-07-06T20:11:36Z", None, None],
+                ["2026-07-06T20:11:36Z", 1000.0, 10.0],
+                ["2026-07-06T20:10:36Z", 500.0, 5.0],
+            ],
+        }
+        # Not enough info to trust a null newest row → returns None, no crash.
+        assert smb._avg_from_sum_count_deltas(result, "S", "C") is None
+        clean = {
+            "prop_list": ["timestamp", "S", "C"],
+            "data": [
+                ["2026-07-06T20:11:36Z", 1000.0, 10.0],
+                ["2026-07-06T20:10:36Z", 500.0, 5.0],
+            ],
+        }
+        assert smb._avg_from_sum_count_deltas(clean, "S", "C") == pytest.approx(100.0)
+        assert nfs_v3._avg_from_sum_count_deltas(clean, "S", "C") == pytest.approx(100.0)
+
+    def test_box_row_truncates_overwide_content(self):
+        line = smb.box_row("X" * 200, 40)
+        assert smb.display_width(line) <= 40
+
+    def test_classify_smb_workload_metadata_only_not_idle(self):
+        meta = {"md_iops": 500.0, "total_iops": 0.0}
+        data = [{"key": "read", "ops_sec": 0.0}, {"key": "write", "ops_sec": 0.0}]
+        label = smb.classify_smb_workload(meta, data)
+        assert "Idle" not in label
+
+    def test_configure_client_scope_rejects_malformed(self, capsys):
+        smb.configure_client_scope(SimpleNamespace(clients="10.1.1.5, bad ip, host-01"))
+        assert smb.CLIENT_IPS == ["10.1.1.5", "host-01"]
+        assert "malformed" in capsys.readouterr().err
+
+    def test_delete_monitor_records_real_failure_not_404(self):
+        smb.vast_common.reset_registry()
+        smb.vast_common.register_monitor(7)
+        with patch.object(smb, "api_request", side_effect=RuntimeError("DELETE failed: HTTP 500: boom")):
+            smb.delete_monitor(7)
+        assert smb.vast_common.failed_deletes() == [(7, "DELETE failed: HTTP 500: boom")]
+        assert 7 not in smb.vast_common._CREATED_MONITORS
+        smb.vast_common.reset_registry()
+        smb.vast_common.register_monitor(8)
+        with patch.object(smb, "api_request", side_effect=RuntimeError("DELETE failed: HTTP 404: gone")):
+            smb.delete_monitor(8)
+        assert smb.vast_common.failed_deletes() == []  # 404 is expected, not a failure
+
+    def test_nfs41_op_metrics_single_tier_no_mixing(self):
+        # NFS4Common has iops but zero latency; must NOT borrow NfsMetrics latency.
+        nfs4 = {f"{nfs_v41._NFS4},rd_iops": 100.0, f"{nfs_v41._NFS4},read_latency__avg": 0.0}
+        supp = {"NfsMetrics,nfs_read_latency__rate": 50.0, "NfsMetrics,nfs_read_latency__avg": 999.0}
+        row = nfs_v41._op_metrics(nfs4, supp, {}, "read")
+        assert row["ops_sec"] == pytest.approx(100.0)   # NFS4Common tier chosen
+        assert row["avg_us"] is None                     # latency not cross-borrowed

@@ -25,7 +25,9 @@ def configure(enabled, protocol, vms, port):
         "/tmp",
         f"vast-opstat-api-{protocol}-{safe_vms}-{port}-{os.getpid()}.log",
     )
-    _LOG_FILE = open(_LOG_PATH, "a", encoding="utf-8")
+    # Create private (0600) so response bodies aren't world-readable in /tmp.
+    fd = os.open(_LOG_PATH, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
+    _LOG_FILE = os.fdopen(fd, "a", encoding="utf-8")
     atexit.register(close)
     _write_line(
         f"session start protocol={protocol} vms={vms} port={port} pid={os.getpid()}"

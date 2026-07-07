@@ -1312,11 +1312,7 @@ def fetch_monitor_query():
 
 
 def _obj_name(obj, name_fields):
-    for field in name_fields:
-        val = obj.get(field)
-        if val:
-            return str(val)
-    return str(obj.get("id", "?"))
+    return vast_common.resolve_object_name(obj, name_fields)
 
 
 def _cleanup_drill_monitors():

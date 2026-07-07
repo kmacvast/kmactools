@@ -1116,11 +1116,7 @@ def fetch_monitor_query():
 # ---------------------------------------------------------------------------
 
 def _obj_name(obj, name_fields):
-    for field in name_fields:
-        val = obj.get(field)
-        if val:
-            return str(val)
-    return str(obj.get("id", "?"))
+    return vast_common.resolve_object_name(obj, name_fields)
 
 
 def _cleanup_drill_monitors():
@@ -1286,45 +1282,53 @@ def _build_drill_row(mode, result, obj_name):
 
 
 def _rank_drill_candidates(mode, objects, cfg):
-    """Rank view/tenant candidates with one batch monitor + one query."""
+    """Rank view/tenant candidates in chunks — scans all objects, not just the first 32.
+
+    A cluster can have hundreds of views whose active ones are listed well past
+    any fixed head slice, so probing only ``objects[:N]`` silently hides the busy
+    views (the drill-down then shows near-zero rows). Chunk through *every* object
+    and keep the top ``_MAX_DRILL_OBJECTS`` by activity.
+    """
     if not objects:
         return []
 
-    object_ids = [obj["id"] for obj in objects]
-    id_to_name = {
-        obj["id"]: _obj_name(obj, cfg["name_fields"])
-        for obj in objects
-    }
-    ranked = []
-    rank_monitor_id = None
-    try:
-        rank_monitor_id = _create_monitor_raw(
-            f"rank_{mode}",
-            build_drill_rank_prop_list(mode),
-            cfg["object_type"],
-            object_ids,
-            no_aggregation=cfg.get("no_aggregation", False),
-        )
-        result = api_request("GET", f"/monitors/{rank_monitor_id}/query/")
-        for obj_id in object_ids:
-            name = id_to_name[obj_id]
-            slice_result = _slice_result_for_object(result, obj_id)
-            row = _build_drill_row(mode, slice_result, name)
-            ranked.append({
-                "id": obj_id,
-                "name": name,
-                "total_ops": as_float(row.get("total_ops")) or 0.0,
-            })
-    except RuntimeError:
-        ranked = [
-            {"id": obj["id"], "name": id_to_name[obj["id"]], "total_ops": 0.0}
-            for obj in objects
-        ]
-    finally:
-        delete_monitor(rank_monitor_id)
+    id_to_name = {obj["id"]: _obj_name(obj, cfg["name_fields"]) for obj in objects}
+    all_ranked = []
 
-    ranked.sort(key=lambda item: (-item["total_ops"], item["name"].lower()))
-    return [{"id": item["id"], "name": item["name"]} for item in ranked[:_MAX_DRILL_OBJECTS]]
+    for chunk_start in range(0, len(objects), _DRILL_PROBE_LIMIT):
+        chunk = objects[chunk_start:chunk_start + _DRILL_PROBE_LIMIT]
+        object_ids = [obj["id"] for obj in chunk]
+        rank_monitor_id = None
+        try:
+            rank_monitor_id = _create_monitor_raw(
+                f"rank_{mode}_{chunk_start}",
+                build_drill_rank_prop_list(mode),
+                cfg["object_type"],
+                object_ids,
+                no_aggregation=cfg.get("no_aggregation", False),
+            )
+            result = api_request("GET", f"/monitors/{rank_monitor_id}/query/")
+            for obj_id in object_ids:
+                name = id_to_name[obj_id]
+                slice_result = _slice_result_for_object(result, obj_id)
+                row = _build_drill_row(mode, slice_result, name)
+                all_ranked.append({
+                    "id": obj_id,
+                    "name": name,
+                    "total_ops": as_float(row.get("total_ops")) or 0.0,
+                })
+        except RuntimeError:
+            for obj in chunk:
+                all_ranked.append({
+                    "id": obj["id"],
+                    "name": id_to_name[obj["id"]],
+                    "total_ops": 0.0,
+                })
+        finally:
+            delete_monitor(rank_monitor_id)
+
+    all_ranked.sort(key=lambda item: (-item["total_ops"], item["name"].lower()))
+    return [{"id": item["id"], "name": item["name"]} for item in all_ranked[:_MAX_DRILL_OBJECTS]]
 
 
 def enter_drill_mode(mode):
@@ -1348,8 +1352,7 @@ def enter_drill_mode(mode):
 
     all_valid = [o for o in objects if "id" in o]
     if mode in ("view", "tenant"):
-        probe_pool = all_valid[:_DRILL_PROBE_LIMIT]
-        DRILL_OBJECTS = _rank_drill_candidates(mode, probe_pool, cfg)
+        DRILL_OBJECTS = _rank_drill_candidates(mode, all_valid, cfg)
     else:
         selected = all_valid[:_MAX_DRILL_OBJECTS]
         DRILL_OBJECTS = [

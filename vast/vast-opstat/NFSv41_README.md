@@ -67,24 +67,36 @@ NFS traffic, vast-opstat supplements from:
 
 The title bar shows `source NfsMetrics supplement` when fallback is active.
 
-### 2. Stateful Overhead (VMS Proxies)
+### 2. State / Locking / Session (adaptive)
 
-Native v4.1 counters **OPEN**, **CLOSE**, **LOCK**, **LOCKU**, and **SEQUENCE** are
-**not exported** by the VMS time-series engine on current builds (confirmed via
-privileged `--discover-metrics` — not an API-permission issue).
+vast-opstat now **probes the metric catalog at startup** (`probe_available_state_ops`)
+and, when the cluster exports them, renders **native** stateful/session/delegation
+counters directly: **OPEN, CLOSE, LOCK, UNLOCK (LOCKU)**, `OPEN_CONFIRM`,
+`OPEN_DOWNGRD`, `LOCK_TEST`, `REL_LCKOWNER`, delegations (`DELEG_RETURN`,
+`DELEG_PURGE`), and v4.1 session ops (`SEQUENCE`, `EXCHANGE_ID`, `CREATE_SESS`,
+`DESTROY_SESS`, `BIND_CONN`, `RECLAIM_CMPL`).
 
-The **Stateful Overhead** pane uses **VMS proxy metrics** — active NfsMetrics metadata
-drivers that correlate with stateful client activity:
+Only ops the cluster actually exposes are monitored — the catalog result trims the
+candidate list, and the choice is verified by monitor creation. If **none** are
+exported (older builds), the panel automatically falls back to the proxy view below.
+Run `--discover-metrics` to see the live exported/not-exported status per op.
 
-| Proxy row | Maps to unexported | NfsMetrics source |
-|-----------|-------------------|-------------------|
-| GETATTR | session/state introspection | `nfs_getattr_latency__rate/__avg` |
-| LOOKUP | path resolution / open precursor | `nfs_lookup_latency__rate/__avg` |
-| CREATE | file creation (open proxy) | `nfs_create_latency__rate/__avg` |
-| REMOVE | file deletion (close lifecycle proxy) | `nfs_remove_latency__rate/__avg` |
+Monitor: `STATE` (`build_state_monitor_props()`), created only when at least one op
+is available.
 
-These are **active telemetry replacements**, not synthetic counters. They surface
-real VMS-measured metadata rates where native v4.1 stateful counters are absent.
+#### Fallback: Namespace & Metadata Ops (real NfsMetrics)
+
+When native OPEN/CLOSE/LOCK counters are **not exported** by the VMS time-series
+engine (all builds through 5.5.x — confirmed via live `--discover-metrics`), the pane
+renders the **full set of real, exported NFS namespace/metadata operations** with
+measured rate + average latency (not synthetic proxies):
+
+`ACCESS, GETATTR, LOOKUP, SETATTR, READDIR, READDIRPLUS, CREATE, REMOVE, RENAME,
+MKDIR, RMDIR, LINK, SYMLINK, READLINK, COMMIT`
+
+Each maps to `NfsMetrics,nfs_<op>_latency__rate / __avg`. Only ops with active
+traffic in the current sample are shown. The footer also surfaces **commit-wait**
+(`NfsMetrics,commit_wait_latency__avg`) — server-side write-durability wait time.
 
 Monitor: `SUPPLEMENT` (`build_supplement_monitor_props()`).
 
@@ -113,6 +125,7 @@ vast-opstat.py --nfs --version=4.1
         └── nfs_v41.run()
                 ├── DATA monitor        NFS4Common rd/wr IOPS, bw, latency
                 ├── SUPPLEMENT monitor  NfsMetrics proxy rows (GETATTR…REMOVE)
+                ├── STATE monitor       native OPEN/CLOSE/LOCK/UNLOCK/session (if exported)
                 ├── BW monitor          NFSCommon throughput fallback
                 ├── META monitor        md_iops session workload profile
                 └── drill monitors      per cnode / view / tenant (optional)
@@ -130,12 +143,18 @@ Drill-down endpoints are path-relative to `BASE_URL` (`/cnodes/`, `/views/`,
 
 | Key | Action |
 |-----|--------|
+| `o` | Sort tables by operations/sec (high→low) |
+| `l` | Sort tables by average latency (high→low) |
+| `n` | Reset to default (defined) order |
 | **`c`** | **cNode drill-down** — `GET /cnodes/`, `object_type=cnode` |
 | **`v`** | **View drill-down** — `GET /views/`, `object_type=view` |
 | **`t`** | **Tenant drill-down** — `GET /tenants/`, `object_type=tenant` |
 | **`x`** | Exit drill-down, return to cluster dashboard |
 | `Space` | Force immediate refresh |
 | `q` | Quit |
+
+Sorting applies to the DATA, NAMESPACE/METADATA, and STATE panels; inactive rows
+(0 ops) always sink to the bottom. The active sort is shown in the header line.
 
 Press `c`, `v`, or `t` to enter the corresponding scope. Press `x` to exit.
 

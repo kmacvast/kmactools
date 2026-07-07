@@ -72,6 +72,23 @@ def request(method, path, payload=None):
         raise RuntimeError(f"{method} {url} failed: {e}") from e
 
 
+def resolve_object_name(obj, fields):
+    """Resolve a drill-down object's display name from candidate fields.
+
+    Falls back to the object id. The cluster root/default view has path ``/``;
+    label it ``/ (default)`` so it is not mistaken for a blank/unnamed row.
+    """
+    name = None
+    for field in fields:
+        val = obj.get(field)
+        if val:
+            name = str(val)
+            break
+    if name is None:
+        name = str(obj.get("id", "?"))
+    return "/ (default)" if name == "/" else name
+
+
 def normalize_list_response(data):
     """Normalize VMS list endpoints (list, or {results|data|objects: [...]}) to a list."""
     if isinstance(data, list):

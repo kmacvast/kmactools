@@ -133,6 +133,11 @@ def format_iops(ops):
     return f"{ops:,.2f}"
 
 
+def format_os_release(version):
+    """Render the VAST OS release header label, or '' when the version is unknown."""
+    return f"vast-os-release-{version}" if version else ""
+
+
 def format_block_size(value):
     """Return (display, bytes) auto-scaled across B, KB, MB for average I/O size."""
     value = as_float(value)

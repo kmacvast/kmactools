@@ -1538,6 +1538,172 @@ class TestVastCommon:
         assert vc.keyboard_enabled() is False
 
 
+class TestClusterOsHeader:
+    def test_os_release_from_cluster_precedence(self):
+        vc = smb.vast_common
+        assert vc.os_release_from_cluster({"sw_version": "5.4.3-sp4"}) == "5.4.3-sp4"
+        # falls through to the next key when the preferred one is absent
+        assert vc.os_release_from_cluster({"os_version": "5.3.0"}) == "5.3.0"
+        assert vc.os_release_from_cluster({"release": "5.2"}) == "5.2"
+        assert vc.os_release_from_cluster({"name": "no-version-here"}) is None
+        assert vc.os_release_from_cluster(None) is None
+
+    def test_get_current_cluster_os_reads_local_cluster(self):
+        vc = smb.vast_common
+
+        def fake_request(method, path):
+            assert method == "GET" and path == "/clusters/"
+            return [
+                {"id": 1, "name": "remote", "sw_version": "9.9.9"},
+                {"id": 2, "name": "home", "is_local": True, "sw_version": "5.4.3-sp4"},
+            ]
+
+        assert vc.get_current_cluster_os(fake_request) == "5.4.3-sp4"
+
+    def test_get_current_cluster_os_is_best_effort(self):
+        vc = smb.vast_common
+
+        def boom(*_a):
+            raise RuntimeError("VMS unreachable")
+
+        # Header adornment must never crash the tool.
+        assert vc.get_current_cluster_os(boom) is None
+
+    def test_all_engines_capture_cluster_os(self, monkeypatch):
+        for eng in (nfs_v3, nfs_v41, nvme_tcp, smb):
+            eng.CLUSTER_OS = None
+            monkeypatch.setattr(
+                eng.vast_common, "get_current_cluster_os", lambda _rf: "5.4.3-sp4"
+            )
+            eng._capture_cluster_os()
+            assert eng.CLUSTER_OS == "5.4.3-sp4"
+            assert eng.format_os_release(eng.CLUSTER_OS) == "vast-os-release-5.4.3-sp4"
+
+
+class _WizardScript:
+    """Scripted stdin/getpass driver for exercising the wizard headlessly."""
+
+    def __init__(self, answers, secrets=None):
+        self._answers = list(answers)
+        self._secrets = list(secrets or [])
+        self.out = []
+
+    def input_fn(self, _prompt=""):
+        assert self._answers, "wizard requested more input than scripted"
+        return self._answers.pop(0)
+
+    def getpass_fn(self, _prompt=""):
+        assert self._secrets, "wizard requested more secrets than scripted"
+        return self._secrets.pop(0)
+
+    def output_fn(self, text=""):
+        self.out.append(text)
+
+
+def _run_wizard(answers, secrets=None, config_loader=lambda _p: None):
+    w = opstat.wizard
+    script = _WizardScript(answers, secrets)
+    env = {}
+    argv = w.run(
+        input_fn=script.input_fn,
+        output_fn=script.output_fn,
+        getpass_fn=script.getpass_fn,
+        environ=env,
+        config_loader=config_loader,
+    )
+    return argv, env, script
+
+
+class TestWizard:
+    def test_should_launch_rules(self):
+        w = opstat.wizard
+        assert w.should_launch([], True, True) is True
+        assert w.should_launch([], False, True) is False
+        assert w.should_launch(["--nfs"], True, True) is False
+        assert w.should_launch(["--menu"], True, True) is True
+        assert w.should_launch(["--menu"], False, True) is False
+        assert w.should_launch(["--no-menu"], True, True) is False
+
+    def test_nfs_v3_happy_path_builds_argv_and_sets_password(self):
+        # protocol=NFS, version=3.0, vms, default port, default user,
+        # auth=password, no advanced, start.
+        argv, env, _ = _run_wizard(
+            ["1", "1", "10.0.0.5", "", "", "1", "", "1"], secrets=["s3cret"]
+        )
+        assert argv == ["--nfs", "--version=3.0", "--vms", "10.0.0.5"]
+        assert env["VAST_PASSWORD"] == "s3cret"
+        # produced argv must satisfy the real validator
+        parsed = opstat.parse_args(argv)
+        assert parsed.nfs is True and parsed.protocol_version == "3.0"
+
+    def test_block_scope_emits_volume_flags(self):
+        argv, env, _ = _run_wizard(
+            ["2", "203.0.113.9", "", "", "1", "vol1,vol2", "", "1"], secrets=["pw"]
+        )
+        assert argv == [
+            "--block", "--nvme-over-tcp", "--vms", "203.0.113.9",
+            "--volumes", "vol1,vol2",
+        ]
+        assert opstat.parse_args(argv).block is True
+
+    def test_smb_token_auth_sets_env_and_cluster_scope(self):
+        # protocol=SMB, vms, default port/user, auth=token, no client scope, start.
+        argv, env, _ = _run_wizard(
+            ["3", "smb-vms", "", "", "2", "", "", "1"], secrets=["TOK-XYZ"]
+        )
+        assert argv == ["--smb", "--vms", "smb-vms"]
+        assert env["VAST_TOKEN"] == "TOK-XYZ"
+        assert "VAST_PASSWORD" not in env
+
+    def test_advanced_options_and_nfs41(self):
+        argv, _env, _ = _run_wizard(
+            [
+                "1", "2",           # NFS, v4.1
+                "v", "8443", "svc",  # vms, port, user
+                "1",                 # auth = password
+                "y",                 # configure advanced
+                "2", "10m", "/tmp/out.csv", "n", "y",  # refresh, avg, csv, color=no, log=yes
+                "1",                 # start
+            ],
+            secrets=["pw"],
+        )
+        assert argv == [
+            "--nfs", "--version=4.1", "--vms", "v",
+            "--vms-port", "8443", "--user", "svc",
+            "--refresh", "2", "--sample-average", "10m",
+            "--csv", "/tmp/out.csv", "--no-color", "--log-api-calls",
+        ]
+        assert opstat.parse_args(argv).protocol_version == "4.1"
+
+    def test_quit_returns_none(self):
+        argv, env, _ = _run_wizard(["q"])
+        assert argv is None
+        assert env == {}
+
+    def test_nfs42_choice_is_rejected(self):
+        # choosing planned 4.2 (index 3) re-prompts; then pick 4.1.
+        argv, _env, _ = _run_wizard(
+            ["1", "3", "2", "h", "", "", "1", "", "1"], secrets=["pw"]
+        )
+        assert "--version=4.1" in argv
+
+    def test_config_shortcut_seeds_connection(self):
+        cfg = {"vms": "cfg-host", "user": "cfguser", "password": "cfgpw"}
+        # load config = yes, protocol NFS, version 3.0, advanced no, start.
+        argv, env, _ = _run_wizard(
+            ["", "1", "1", "", "1"], config_loader=lambda _p: cfg
+        )
+        assert argv == [
+            "--nfs", "--version=3.0", "--vms", "cfg-host", "--user", "cfguser",
+        ]
+        assert env["VAST_PASSWORD"] == "cfgpw"
+
+    def test_equivalent_cli_quotes_spaces(self):
+        line = opstat.wizard._equivalent_cli(["--csv", "/tmp/a b/out.csv"])
+        assert '"/tmp/a b/out.csv"' in line
+        assert line.startswith("vast-opstat.py")
+
+
 class TestAuditRegressions:
     def test_avg_from_sum_count_deltas_handles_null_rows(self):
         # Leading null padding row must not raise (was: None - float TypeError)

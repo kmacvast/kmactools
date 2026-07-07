@@ -22,6 +22,7 @@ import nfs_v3
 import nfs_v41
 import nvme_tcp
 import smb
+import wizard
 
 VERSION = "0.1.2"
 
@@ -203,6 +204,17 @@ def parse_args(argv=None):
         help="Log VMS REST API requests/responses to a file under /tmp.",
     )
     parser.add_argument(
+        "--menu",
+        "-i",
+        action="store_true",
+        help="Launch the interactive setup wizard (default when run with no options on a TTY).",
+    )
+    parser.add_argument(
+        "--no-menu",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "-V",
         "--tool-version",
         action="version",
@@ -229,8 +241,13 @@ def dispatch(args):
 
 
 def main(argv=None):
-    args = parse_args(argv)
-    source = argv if argv is not None else sys.argv[1:]
+    source = list(argv) if argv is not None else sys.argv[1:]
+    if wizard.should_launch(source, sys.stdin.isatty(), sys.stdout.isatty()):
+        built = wizard.run()
+        if built is None:
+            return 0
+        source = built
+    args = parse_args(source)
     if any(a == "--password" or a.startswith("--password=") for a in source):
         print(
             "WARNING: passing --password on the command line exposes it via `ps` "

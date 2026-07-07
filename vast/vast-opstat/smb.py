@@ -43,7 +43,7 @@ from tui_layout import (
     display_width, format_fixed_number, format_scaled_metric, join_columns,
     pad_display, truncate_display, c, set_color, set_unicode, glyph_set,
     as_float, raw_bw_to_mb_sec, raw_bw_to_gb_sec, format_throughput_mbs,
-    format_latency_us, format_iops, format_block_size,
+    format_latency_us, format_iops, format_block_size, format_os_release,
     _RST, _BOLD, _DIM, _GREEN, _YELLOW, _CYAN,
     _BRED, _BGREEN, _BYELLOW, _BCYAN, _BWHITE,
 )
@@ -242,6 +242,7 @@ BASE_URL = AUTH = HEADERS = None
 SSL_CTX = ssl._create_unverified_context()
 
 CLUSTER_ID = CLUSTER_NAME = None
+CLUSTER_OS = None
 HEADLINE_MONITOR_ID = None
 SMB_COMMAND_MONITOR_ID = None
 CLIENT_SCOPED = False
@@ -351,6 +352,12 @@ def normalize_list_response(data):
 def get_current_cluster():
     """Return (cluster_id, cluster_name) for the active cluster."""
     return vast_common.get_current_cluster(api_request)
+
+
+def _capture_cluster_os():
+    """Fetch the cluster VAST OS version once for the header (best-effort)."""
+    global CLUSTER_OS
+    CLUSTER_OS = vast_common.get_current_cluster_os(api_request)
 
 
 def smb_metric_fqn(cmd, suffix):
@@ -2158,7 +2165,12 @@ def _render_frame():
         title += c(f"   csv:{CSV_FILE}", _DIM)
     print(title)
     frame_note = f"sample-average {API_TIME_FRAME}" if SAMPLE_AVERAGE_MODE else f"frame {API_TIME_FRAME}"
-    print(c(f"  sample {LAST_SAMPLE}   {frame_note}   source {METRICS_SOURCE}", _DIM))
+    os_label = format_os_release(CLUSTER_OS)
+    print(c(
+        f"  sample {LAST_SAMPLE}   {frame_note}   source {METRICS_SOURCE}"
+        + (f"   {os_label}" if os_label else ""),
+        _DIM,
+    ))
     print()
 
     if DRILL_MODE or DRILL_ERROR or DRILL_STATUS:
@@ -2400,6 +2412,7 @@ def main():
 
     setup_keyboard()
     CLUSTER_ID, CLUSTER_NAME = get_current_cluster()
+    _capture_cluster_os()
     HEADLINE_MONITOR_ID = create_monitor("headline", build_headline_monitor_props())
     try_create_smb_command_monitor()
     ensure_csv_file()

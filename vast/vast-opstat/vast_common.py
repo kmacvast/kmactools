@@ -104,6 +104,38 @@ def get_current_cluster(request_fn):
     return cluster_id, cluster_name
 
 
+# VMS cluster records expose the running VAST OS build under one of these keys,
+# depending on cluster version. Ordered by preference.
+_OS_VERSION_KEYS = (
+    "sw_version", "os_version", "sw_version_str", "release", "version", "build",
+)
+
+
+def os_release_from_cluster(cluster):
+    """Return the first non-empty OS version field from a cluster dict, or None."""
+    if not isinstance(cluster, dict):
+        return None
+    for key in _OS_VERSION_KEYS:
+        val = cluster.get(key)
+        if val:
+            return str(val)
+    return None
+
+
+def get_current_cluster_os(request_fn):
+    """Best-effort local-cluster VAST OS version string, or None.
+
+    Read-only and defensive: the OS label is a cosmetic header adornment, so any
+    failure (network, missing field) degrades to None rather than raising.
+    """
+    try:
+        data = request_fn("GET", "/clusters/")
+        cluster = select_local_cluster(normalize_list_response(data))
+        return os_release_from_cluster(cluster)
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Monitor scaffolding (create / delete)
 # ---------------------------------------------------------------------------

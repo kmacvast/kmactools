@@ -38,7 +38,7 @@ from tui_layout import (
     display_width, join_columns, pad_display, format_fixed_number,
     format_scaled_metric, truncate_display, c, set_color, set_unicode, glyph_set,
     as_float, raw_bw_to_mb_sec, format_throughput_mbs, format_latency_us,
-    format_iops, format_block_size,
+    format_iops, format_block_size, format_os_release,
     _RST, _BOLD, _DIM, _GREEN, _YELLOW, _CYAN,
     _BRED, _BGREEN, _BYELLOW, _BCYAN, _BWHITE,
 )
@@ -122,6 +122,7 @@ BASE_URL = AUTH = HEADERS = None
 SSL_CTX = ssl._create_unverified_context()
 
 CLUSTER_ID = CLUSTER_NAME = None
+CLUSTER_OS = None
 DATA_MONITOR_ID = META_MONITOR_ID = None
 SUPPLEMENT_MONITOR_ID = BW_MONITOR_ID = None
 METRICS_SOURCE = "NFS4Common"
@@ -205,6 +206,12 @@ def normalize_list_response(data):
 
 def get_current_cluster():
     return vast_common.get_current_cluster(api_request)
+
+
+def _capture_cluster_os():
+    """Fetch the cluster VAST OS version once for the header (best-effort)."""
+    global CLUSTER_OS
+    CLUSTER_OS = vast_common.get_current_cluster_os(api_request)
 
 
 def _data_fqn(suffix):
@@ -768,7 +775,12 @@ def _render_frame():
     if DRILL_MODE:
         title += c(f"   | {DRILL_MODE.upper()} DRILL", _BYELLOW)
     print(title)
-    print(c(f"  sample {LAST_SAMPLE}   frame {API_TIME_FRAME}   source {METRICS_SOURCE}", _DIM))
+    os_label = format_os_release(CLUSTER_OS)
+    print(c(
+        f"  sample {LAST_SAMPLE}   frame {API_TIME_FRAME}   source {METRICS_SOURCE}"
+        + (f"   {os_label}" if os_label else ""),
+        _DIM,
+    ))
     print()
     if DRILL_MODE:
         _render_drill_panel(width)
@@ -875,6 +887,7 @@ def main():
 
     setup_keyboard()
     CLUSTER_ID, CLUSTER_NAME = get_current_cluster()
+    _capture_cluster_os()
     DATA_MONITOR_ID = create_monitor("data", build_data_monitor_props())
     SUPPLEMENT_MONITOR_ID = create_monitor("supplement", build_supplement_monitor_props())
     BW_MONITOR_ID = create_monitor("bw", build_bw_monitor_props())

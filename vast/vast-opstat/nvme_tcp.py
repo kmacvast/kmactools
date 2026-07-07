@@ -28,7 +28,7 @@ from tui_layout import (
     display_width, join_columns, pad_display, format_fixed_number,
     format_scaled_metric, truncate_display, c, set_color, set_unicode, glyph_set,
     as_float, raw_bw_to_mb_sec, format_throughput_mbs, format_latency_us,
-    format_iops, format_block_size,
+    format_iops, format_block_size, format_os_release,
     _RST, _BOLD, _DIM, _GREEN, _YELLOW, _CYAN,
     _BRED, _BGREEN, _BYELLOW, _BBLUE, _BMAGENTA, _BCYAN, _BWHITE,
 )
@@ -155,6 +155,7 @@ OPS_MONITOR_IDS = []
 CLUSTER_SUPPLEMENT_MONITOR_IDS = []
 PROTO_MONITOR_ID = None
 CLUSTER_ID = CLUSTER_NAME = None
+CLUSTER_OS = None
 LAST_ROWS = []
 LAST_SAMPLE = "-"
 PREV_ROWS = []
@@ -792,6 +793,12 @@ def normalize_list_response(obj):
 
 def get_current_cluster():
     return vast_common.get_current_cluster(api_request)
+
+
+def _capture_cluster_os():
+    """Fetch the cluster VAST OS version once for the header (best-effort)."""
+    global CLUSTER_OS
+    CLUSTER_OS = vast_common.get_current_cluster_os(api_request)
 
 
 def _create_monitor_raw(name_suffix, prop_list, object_type, object_ids):
@@ -1808,6 +1815,9 @@ def _render_frame():
         + c("   VMS ", _DIM) + c(f"{VMS}:{PORT}", _BWHITE)
         + c("   Refresh ", _DIM) + c(f"{REFRESH_SECONDS}s", _BWHITE)
     )
+    os_label = format_os_release(CLUSTER_OS)
+    if os_label:
+        meta += c(f"   {os_label}", _DIM)
     print(c("  ", _DIM) + meta)
     print(c(_H * width, _DIM))
 
@@ -1881,6 +1891,7 @@ def main():
     ensure_csv_file()
     setup_keyboard()
     CLUSTER_ID, CLUSTER_NAME = get_current_cluster()
+    _capture_cluster_os()
     configure_volume_scope(ARGS)
     create_cluster_monitors()
     fetch_monitor_query()

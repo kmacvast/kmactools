@@ -136,6 +136,11 @@ class TestSharedFormatters:
         assert tui_layout.format_latency_us(1500, active=False)[0] == "-"
         assert tui_layout.format_latency_us(2000)[0] == "2.00 ms"
 
+    def test_os_release_label(self):
+        assert tui_layout.format_os_release("5.4.3-sp4") == "vast-os-release-5.4.3-sp4"
+        assert tui_layout.format_os_release(None) == ""
+        assert tui_layout.format_os_release("") == ""
+
     def test_latency_glyph_follows_set_unicode(self):
         try:
             tui_layout.set_unicode(False)

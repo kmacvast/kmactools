@@ -57,7 +57,7 @@ import vast_common
 from tui_layout import (
     display_width, join_columns, pad_display, format_fixed_number,
     format_scaled_metric, truncate_display, c, set_color, set_unicode, glyph_set,
-    as_float, raw_bw_to_gb_sec,
+    as_float, raw_bw_to_gb_sec, format_os_release,
     _RST, _BOLD, _DIM, _RED, _GREEN, _YELLOW, _CYAN,
     _BRED, _BGREEN, _BYELLOW, _BCYAN, _BWHITE,
 )
@@ -195,6 +195,7 @@ RPC_MONITOR_ID = None
 BW_MONITOR_ID  = None
 CLUSTER_ID     = None
 CLUSTER_NAME   = None
+CLUSTER_OS     = None
 
 SORT_MODE                 = "rpc"
 
@@ -471,6 +472,12 @@ def normalize_list_response(obj):
 
 def get_current_cluster():
     return vast_common.get_current_cluster(api_request)
+
+
+def _capture_cluster_os():
+    """Fetch the cluster VAST OS version once for the header (best-effort)."""
+    global CLUSTER_OS
+    CLUSTER_OS = vast_common.get_current_cluster_os(api_request)
 
 
 # ---------------------------------------------------------------------------
@@ -1911,9 +1918,11 @@ def _render_frame():
         + c(f"   refresh {REFRESH_SECONDS}s", _DIM)
         + drill_tag + csv_tag
     )
+    os_label = format_os_release(CLUSTER_OS)
     info_line = c(
         f"  mode:{mode_tag}  frame:{API_TIME_FRAME}"
-        f"  sort:{sort_label()}  sample:{selected_sample}",
+        f"  sort:{sort_label()}  sample:{selected_sample}"
+        + (f"  {os_label}" if os_label else ""),
         _DIM,
     )
     print(title_line)
@@ -2064,6 +2073,7 @@ def main():
     setup_keyboard()
 
     CLUSTER_ID, CLUSTER_NAME = get_current_cluster()
+    _capture_cluster_os()
 
     RPC_MONITOR_ID = create_monitor("rpc", build_rpc_prop_list())
     BW_MONITOR_ID  = create_monitor("bw",  build_bw_prop_list())

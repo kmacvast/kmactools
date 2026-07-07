@@ -46,20 +46,18 @@ import io
 import getpass
 import os
 import re
-import select
 import shutil
 import ssl
 import sys
-import termios
 import time
-import tty
 from datetime import datetime
 
 import vast_api_log
 import vast_common
 from tui_layout import (
     display_width, join_columns, pad_display, format_fixed_number,
-    format_scaled_metric, truncate_display, c, set_color,
+    format_scaled_metric, truncate_display, c, set_color, set_unicode, glyph_set,
+    as_float, raw_bw_to_gb_sec,
     _RST, _BOLD, _DIM, _RED, _GREEN, _YELLOW, _CYAN,
     _BRED, _BGREEN, _BYELLOW, _BCYAN, _BWHITE,
 )
@@ -199,8 +197,6 @@ CLUSTER_ID     = None
 CLUSTER_NAME   = None
 
 SORT_MODE                 = "rpc"
-ORIGINAL_TERMINAL_SETTINGS = None
-KEYBOARD_ENABLED          = False
 
 LAST_ROWS   = []
 LAST_SAMPLE = "-"
@@ -240,7 +236,6 @@ def init_config(args):
     global API_TIME_FRAME, SAMPLE_AVERAGE_MODE, BASE_URL, AUTH, HEADERS, _COLOR
     global RUN_STARTED_AT, RUN_STATS
     global RPC_MONITOR_ID, BW_MONITOR_ID, CLUSTER_ID, CLUSTER_NAME, SORT_MODE
-    global ORIGINAL_TERMINAL_SETTINGS, KEYBOARD_ENABLED
     global LAST_ROWS, LAST_SAMPLE, PREV_ROWS
     global DRILL_MODE, DRILL_OBJECTS, DRILL_MONITORS, LAST_DRILL_ROWS, DRILL_ERROR, DRILL_STATUS
 
@@ -287,6 +282,7 @@ def init_config(args):
 
     _COLOR = sys.stdout.isatty() and not args.no_color
     set_color(_COLOR)
+    set_unicode(_UTF8)
 
     RUN_STARTED_AT = datetime.now()
     RUN_STATS = _fresh_run_stats()
@@ -296,8 +292,6 @@ def init_config(args):
     CLUSTER_ID = None
     CLUSTER_NAME = None
     SORT_MODE = "rpc"
-    ORIGINAL_TERMINAL_SETTINGS = None
-    KEYBOARD_ENABLED = False
     LAST_ROWS = []
     LAST_SAMPLE = "-"
     PREV_ROWS = []
@@ -338,30 +332,18 @@ def _vpad(s, width, align="<"):
 # Fall back to plain ASCII if encoding is unset or non-UTF.
 _UTF8 = (sys.stdout.encoding or "ascii").lower().startswith("utf")
 
-if _UTF8:
-    _H,  _V   = "─", "│"
-    _TL, _TR  = "┌", "┐"
-    _BL, _BR  = "└", "┘"
-    _LT, _RT  = "├", "┤"
-    _BLK      = "█"    # full block  (workload bar fill)
-    _SHD      = "░"    # light shade (workload bar empty)
-    _ARR_UP   = "▲"
-    _ARR_DN   = "▼"
-    _ARR_EQ   = "►"
-    _DOT      = "●"    # latency severity indicator
-    _MUS      = "µs"
-else:
-    _H,  _V   = "-", "|"
-    _TL, _TR  = "+", "+"
-    _BL, _BR  = "+", "+"
-    _LT, _RT  = "+", "+"
-    _BLK      = "#"
-    _SHD      = "."
-    _ARR_UP   = "+"
-    _ARR_DN   = "-"
-    _ARR_EQ   = "~"
-    _DOT      = "o"
-    _MUS      = "us"
+_G = glyph_set(_UTF8)
+_H,  _V   = _G["H"], _G["V"]
+_TL, _TR  = _G["TL"], _G["TR"]
+_BL, _BR  = _G["BL"], _G["BR"]
+_LT, _RT  = _G["LT"], _G["RT"]
+_BLK      = _G["BLK"]    # full block  (workload bar fill)
+_SHD      = _G["SHD"]    # light shade (workload bar empty)
+_ARR_UP   = _G["ARR_UP"]
+_ARR_DN   = _G["ARR_DN"]
+_ARR_EQ   = _G["ARR_EQ"]
+_DOT      = _G["DOT"]    # latency severity indicator
+_MUS      = _G["MUS"]
 
 _COLOR = False
 
@@ -590,26 +572,8 @@ def delete_monitor(monitor_id):
 # Terminal / keyboard
 # ---------------------------------------------------------------------------
 
-def setup_keyboard():
-    global ORIGINAL_TERMINAL_SETTINGS, KEYBOARD_ENABLED
-    if not sys.stdin.isatty():
-        KEYBOARD_ENABLED = False
-        return
-    fd = sys.stdin.fileno()
-    ORIGINAL_TERMINAL_SETTINGS = termios.tcgetattr(fd)
-    tty.setcbreak(fd)
-    KEYBOARD_ENABLED = True
-
-
-def restore_terminal():
-    global ORIGINAL_TERMINAL_SETTINGS, KEYBOARD_ENABLED
-    if ORIGINAL_TERMINAL_SETTINGS is not None and sys.stdin.isatty():
-        try:
-            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, ORIGINAL_TERMINAL_SETTINGS)
-        except Exception:
-            pass
-    ORIGINAL_TERMINAL_SETTINGS = None
-    KEYBOARD_ENABLED = False
+setup_keyboard = vast_common.setup_keyboard
+restore_terminal = vast_common.restore_terminal
 
 
 _CLEANED_UP = False
@@ -633,35 +597,12 @@ def signal_handler(_signum, _frame):
     sys.exit(0)
 
 
-def check_keypress():
-    if not KEYBOARD_ENABLED:
-        return ""
-    fd = sys.stdin.fileno()
-    try:
-        readable, _w, _e = select.select([fd], [], [], 0)
-    except Exception:
-        return ""
-    if not readable:
-        return ""
-    try:
-        data = os.read(fd, 32)
-    except Exception:
-        return ""
-    return data.decode(errors="ignore") if data else ""
+check_keypress = vast_common.check_keypress
 
 
 # ---------------------------------------------------------------------------
 # Formatting helpers
 # ---------------------------------------------------------------------------
-
-def as_float(value):
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except Exception:
-        return None
-
 
 def fmt(value, width=12, precision=2):
     return format_fixed_number(value, width, precision)
@@ -703,9 +644,7 @@ def csv_value(value):
         return value
 
 
-def clear_screen():
-    sys.stdout.write("\033[2J\033[H")
-    sys.stdout.flush()
+clear_screen = vast_common.clear_screen
 
 
 # ---------------------------------------------------------------------------
@@ -754,11 +693,6 @@ def write_csv_rows(rows, selected_sample):
 # ---------------------------------------------------------------------------
 # Math helpers
 # ---------------------------------------------------------------------------
-
-def raw_bw_to_gb_sec(value):
-    value = as_float(value)
-    return None if value is None else value / 1_000_000_000.0
-
 
 def avg_io_size_bytes(ops_sec, bw_gbs):
     ops = as_float(ops_sec)

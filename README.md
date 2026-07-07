@@ -24,7 +24,7 @@ Each module ships with its own README where operational detail matters. The root
 
 ### `vast/` — VAST Data Platform SE Toolkit
 
-The primary engineering surface. Sub-modules cover authentication (`auth/`), shared config helpers (`common/`), identity/AD inspection (`identity/`), the flagship unified catalog CLI (`vast-catalog/vcatalog_tool.py`), VASTDB time-series ingest (`vast-db/`), logical-vs-physical capacity reporters (`vast-du/`), NFS transaction monitors (`vast-nfstop/`), protocol sniffing (`vast-sniff/`), and storage-plane viewers (`vast-viewer/`).
+The primary engineering surface. Sub-modules cover authentication (`auth/`), shared config helpers (`common/`), identity/AD inspection (`identity/`), the flagship unified catalog CLI (`vast-catalog/vcatalog_tool.py`), VASTDB time-series ingest (`vast-db/`), logical-vs-physical capacity reporters (`vast-du/`), the live multi-protocol performance monitor (`vast-opstat/`), protocol sniffing (`vast-sniff/`), and storage-plane viewers (`vast-viewer/`).
 
 **Flagship entry point:** [`vast/vast-catalog/vcatalog_tool.py`](vast/vast-catalog/vcatalog_tool.py) — parallel streaming catalog analytics, early-exit search, VMS-backed DRR dashboards, and multi-protocol path/S3 operations. See [`vast/vast-catalog/README.md`](vast/vast-catalog/README.md) and [`vast/vast-catalog/USAGE.md`](vast/vast-catalog/USAGE.md).
 

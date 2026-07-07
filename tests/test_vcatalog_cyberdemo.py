@@ -7,11 +7,14 @@ import sys
 import zipfile
 from unittest.mock import MagicMock, patch
 
-import pandas as pd
 import pytest
 
+# vcatalog_cyberdemo.py imports pandas + vastdb; skip the suite when absent
+pd = pytest.importorskip("pandas")
+pytest.importorskip("vastdb")
+
 _script_path = os.path.join(
-    os.path.dirname(__file__), "..", "vast", "vast-catalog", "cyberdemo", "vcatalog_cyberdemo.py"
+    os.path.dirname(__file__), "..", "vast", "vast-catalog", "vcatalog_cyberdemo.py"
 )
 _spec = importlib.util.spec_from_file_location("vcatalog_cyberdemo", _script_path)
 demo = importlib.util.module_from_spec(_spec)

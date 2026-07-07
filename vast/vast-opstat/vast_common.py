@@ -8,11 +8,21 @@ each protocol engine: VMS monitor teardown tracking, signal/atexit wiring
 
 import atexit
 import json
+import os
+import select
 import signal
 import sys
 import time
 import urllib.error
 import urllib.request
+
+try:
+    import termios
+    import tty
+    _TERMIOS_OK = True
+except ImportError:  # non-POSIX (e.g. Windows); keyboard features degrade gracefully
+    termios = tty = None
+    _TERMIOS_OK = False
 
 import vast_api_log
 
@@ -247,4 +257,65 @@ def flush_frame(text):
     screen tearing caused by ``\\033[2J`` + many per-line prints.
     """
     sys.stdout.write("\033[H" + text + "\033[J")
+    sys.stdout.flush()
+
+
+# ---------------------------------------------------------------------------
+# Terminal / keyboard I/O (cbreak-mode single-key polling)
+# ---------------------------------------------------------------------------
+_TERM_ORIGINAL = None
+_TERM_ENABLED = False
+
+
+def setup_keyboard():
+    """Put stdin into cbreak mode for non-blocking key polling; no-op off a tty."""
+    global _TERM_ORIGINAL, _TERM_ENABLED
+    if not _TERMIOS_OK or not sys.stdin.isatty():
+        _TERM_ENABLED = False
+        return False
+    fd = sys.stdin.fileno()
+    _TERM_ORIGINAL = termios.tcgetattr(fd)
+    tty.setcbreak(fd)
+    _TERM_ENABLED = True
+    return True
+
+
+def restore_terminal():
+    """Restore original terminal settings saved by :func:`setup_keyboard`."""
+    global _TERM_ORIGINAL, _TERM_ENABLED
+    if _TERM_ORIGINAL is not None and _TERMIOS_OK and sys.stdin.isatty():
+        try:
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, _TERM_ORIGINAL)
+        except Exception:
+            pass
+    _TERM_ORIGINAL = None
+    _TERM_ENABLED = False
+
+
+def keyboard_enabled():
+    """Return True when cbreak keyboard polling is active."""
+    return _TERM_ENABLED
+
+
+def check_keypress():
+    """Return any buffered keypresses (non-blocking), or '' when none/inactive."""
+    if not _TERM_ENABLED:
+        return ""
+    fd = sys.stdin.fileno()
+    try:
+        readable, _w, _e = select.select([fd], [], [], 0)
+    except Exception:
+        return ""
+    if not readable:
+        return ""
+    try:
+        data = os.read(fd, 32)
+    except Exception:
+        return ""
+    return data.decode(errors="ignore") if data else ""
+
+
+def clear_screen():
+    """Clear the screen and home the cursor (used at startup/teardown)."""
+    sys.stdout.write("\033[2J\033[H")
     sys.stdout.flush()

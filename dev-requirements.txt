@@ -1,0 +1,24 @@
+# Development / test dependencies for the kmactools root regression suite.
+#
+# The stdlib-only suites (vast-opstat, tui_layout, common utils) need only pytest.
+# The remaining suites exercise dep-heavy tools and are auto-skipped via
+# pytest.importorskip when their packages are absent. Install this file to run
+# the full matrix:
+#
+#     python3 -m venv .venv && source .venv/bin/activate
+#     pip install -r dev-requirements.txt
+#     pytest tests/
+#
+# Test framework
+pytest
+pytest-mock
+
+# vast-catalog (vcatalog_tool.py, vcatalog_cyberdemo.py)
+vastdb
+pyarrow
+pandas
+numpy
+boto3
+
+# vast-du.py
+vastpy

@@ -230,10 +230,10 @@ Design principle: **top = health verdict, middle = where to look, bottom = comma
 ## Phase 1 — Skeleton & CLI Wiring
 
 **Deliverables:**
-- [ ] `smb.py` module stub with `run(args)`, `discover_metrics()`, `VERSION`
-- [ ] `vast-opstat.py` dispatch: `--smb` → `smb.run()`
-- [ ] Remove "not implemented" exit for `--smb`
-- [ ] Tests: CLI parse, dispatch, discover-metrics exits cleanly
+- [x] `smb.py` module stub with `run(args)`, `discover_metrics()`, `VERSION`
+- [x] `vast-opstat.py` dispatch: `--smb` → `smb.run()`
+- [x] Remove "not implemented" exit for `--smb`
+- [x] Tests: CLI parse, dispatch, discover-metrics exits cleanly
 
 **Approval checkpoint:** ☑ Phase 1 merged to feature branch
 
@@ -291,9 +291,9 @@ Design principle: **top = health verdict, middle = where to look, bottom = comma
 - [x] `SMB_README.md` + screenshot `images/smb_tui.png`
 - [x] Update root `README.md`, `SETUP.md`, `images/README.md`
 - [x] Version bump to **0.1.2** across all protocol modules
-- [ ] Merge `feat/vast-opstat-smb` → `main`
+- [x] Merge `feat/vast-opstat-smb` → `main` (PR #9)
 
-**Approval checkpoint:** ☑ pytest green (95 tests); live smoke + merge pending approval
+**Approval checkpoint:** ☑ pytest green; live smoke validated; merged via PR #9
 
 ---
 

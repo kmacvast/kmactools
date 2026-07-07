@@ -1512,6 +1512,31 @@ class TestVastCommon:
         assert _signal.SIGTERM in captured
         assert _signal.SIGHUP in captured
 
+    def test_all_engines_share_terminal_io(self):
+        # Terminal I/O now lives once in vast_common; each engine aliases it.
+        vc = smb.vast_common
+        for eng in (nfs_v3, nfs_v41, nvme_tcp, smb):
+            assert eng.setup_keyboard is vc.setup_keyboard
+            assert eng.restore_terminal is vc.restore_terminal
+            assert eng.check_keypress is vc.check_keypress
+            assert eng.clear_screen is vc.clear_screen
+
+    def test_check_keypress_inactive_returns_empty(self):
+        vc = smb.vast_common
+        vc.restore_terminal()  # ensure disabled state
+        assert vc.keyboard_enabled() is False
+        assert vc.check_keypress() == ""
+
+    def test_clear_screen_emits_erase_and_home(self, capsys):
+        smb.vast_common.clear_screen()
+        assert capsys.readouterr().out == "\033[2J\033[H"
+
+    def test_setup_keyboard_noop_off_tty(self, monkeypatch):
+        vc = smb.vast_common
+        monkeypatch.setattr(vc.sys.stdin, "isatty", lambda: False)
+        assert vc.setup_keyboard() is False
+        assert vc.keyboard_enabled() is False
+
 
 class TestAuditRegressions:
     def test_avg_from_sum_count_deltas_handles_null_rows(self):

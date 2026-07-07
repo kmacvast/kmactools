@@ -27,19 +27,18 @@ import getpass
 import io
 import os
 import re
-import select
 import shutil
 import ssl
 import sys
-import termios
 import time
-import tty
 
 import vast_api_log
 import vast_common
 from tui_layout import (
     display_width, join_columns, pad_display, format_fixed_number,
-    format_scaled_metric, truncate_display, c, set_color,
+    format_scaled_metric, truncate_display, c, set_color, set_unicode, glyph_set,
+    as_float, raw_bw_to_mb_sec, format_throughput_mbs, format_latency_us,
+    format_iops, format_block_size,
     _RST, _BOLD, _DIM, _GREEN, _YELLOW, _CYAN,
     _BRED, _BGREEN, _BYELLOW, _BCYAN, _BWHITE,
 )
@@ -108,14 +107,10 @@ _DRILL_COL = {"name": 24, "ops": 12, "lat": 10, "bw": 9, "top": 12, "pct": 6}
 
 _ANSI_RE = re.compile(r"\033\[[^m]*m")
 _UTF8 = (sys.stdout.encoding or "ascii").lower().startswith("utf")
-if _UTF8:
-    _H, _V = "─", "│"
-    _TL, _TR, _BL, _BR, _LT, _RT = "┌", "┐", "└", "┘", "├", "┤"
-    _MUS = "µs"
-else:
-    _H, _V = "-", "|"
-    _TL, _TR, _BL, _BR, _LT, _RT = "+", "+", "+", "+", "+", "+"
-    _MUS = "us"
+_G = glyph_set(_UTF8)
+_H, _V = _G["H"], _G["V"]
+_TL, _TR, _BL, _BR, _LT, _RT = _G["TL"], _G["TR"], _G["BL"], _G["BR"], _G["LT"], _G["RT"]
+_MUS = _G["MUS"]
 
 _COLOR = False
 ARGS = None
@@ -136,8 +131,6 @@ DRILL_MODE = DRILL_ERROR = None
 DRILL_OBJECTS = []
 DRILL_MONITORS = []
 LAST_DRILL_ROWS = []
-ORIGINAL_TERMINAL_SETTINGS = None
-KEYBOARD_ENABLED = False
 
 
 def init_config(args):
@@ -172,64 +165,7 @@ def init_config(args):
         print(f"API call logging enabled: {log_path}", file=sys.stderr, flush=True)
     _COLOR = sys.stdout.isatty() and not args.no_color
     set_color(_COLOR)
-
-
-
-
-def as_float(value):
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def raw_bw_to_mb_sec(value):
-    bw = as_float(value)
-    return bw / 1_000_000.0 if bw is not None else None
-
-
-def format_throughput_mbs(mbs):
-    mbs = as_float(mbs)
-    if mbs is None or mbs <= 0:
-        return "-", None
-    if mbs >= 1024:
-        return f"{mbs / 1024:.2f} GB/s", mbs
-    if mbs >= 1:
-        return f"{mbs:.2f} MB/s", mbs
-    return f"{mbs * 1024:.2f} KB/s", mbs
-
-
-def format_latency_us(us):
-    us = as_float(us)
-    if us is None or us <= 0:
-        return "-", None
-    if us >= 1000:
-        return f"{us / 1000:.2f} ms", us
-    return f"{us:.0f} {_MUS}", us
-
-
-def format_block_size(value):
-    value = as_float(value)
-    if value is None or value <= 0:
-        return "-", None
-    if value >= 1024 ** 2:
-        return f"{value / (1024 ** 2):.2f} MB", value
-    if value >= 1024:
-        return f"{value / 1024:.2f} KB", value
-    return f"{value:.0f} B", value
-
-
-def format_iops(ops):
-    ops = as_float(ops)
-    if ops is None or ops <= 0:
-        return "-"
-    if ops >= 100_000:
-        return f"{ops:,.0f}"
-    if ops >= 100:
-        return f"{ops:,.1f}"
-    return f"{ops:,.2f}"
+    set_unicode(_UTF8)
 
 
 def box_top(title, width):
@@ -256,9 +192,7 @@ def box_row(content, width):
     return f"{c(_V, _DIM)} {content}{' ' * pad} {c(_V, _DIM)}"
 
 
-def clear_screen():
-    sys.stdout.write("\033[2J\033[H")
-    sys.stdout.flush()
+clear_screen = vast_common.clear_screen
 
 
 def api_request(method, path, payload=None):
@@ -903,28 +837,9 @@ def discover_metrics():
     print("pre-averaged fields (__avg). No counter-delta engine is used in nfs_v41.")
 
 
-def setup_keyboard():
-    global ORIGINAL_TERMINAL_SETTINGS, KEYBOARD_ENABLED
-    if not sys.stdin.isatty():
-        KEYBOARD_ENABLED = False
-        return
-    fd = sys.stdin.fileno()
-    ORIGINAL_TERMINAL_SETTINGS = termios.tcgetattr(fd)
-    tty.setcbreak(fd)
-    KEYBOARD_ENABLED = True
-
-
-def restore_terminal():
-    if ORIGINAL_TERMINAL_SETTINGS and sys.stdin.isatty():
-        termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, ORIGINAL_TERMINAL_SETTINGS)
-
-
-def check_keypress():
-    if not KEYBOARD_ENABLED:
-        return ""
-    if select.select([sys.stdin], [], [], 0)[0]:
-        return sys.stdin.read(1)
-    return ""
+setup_keyboard = vast_common.setup_keyboard
+restore_terminal = vast_common.restore_terminal
+check_keypress = vast_common.check_keypress
 
 
 _CLEANED_UP = False

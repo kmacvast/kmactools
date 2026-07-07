@@ -102,3 +102,64 @@ class TestNvmeTableAlignment:
 
 def _OPS_KEYS():
     return ("proc", "iops", "throughput", "size", "latency")
+
+
+class TestSharedFormatters:
+    def test_as_float_handles_none_and_junk(self):
+        assert tui_layout.as_float(None) is None
+        assert tui_layout.as_float("nope") is None
+        assert tui_layout.as_float("3.5") == 3.5
+
+    def test_raw_bw_conversions(self):
+        assert tui_layout.raw_bw_to_mb_sec(2_000_000) == 2.0
+        assert tui_layout.raw_bw_to_gb_sec(3_000_000_000) == 3.0
+        assert tui_layout.raw_bw_to_mb_sec(None) is None
+
+    def test_throughput_scales_across_units(self):
+        assert tui_layout.format_throughput_mbs(2048)[0] == "2.00 GB/s"
+        assert tui_layout.format_throughput_mbs(4)[0] == "4.00 MB/s"
+        assert tui_layout.format_throughput_mbs(0.5)[0] == "512.00 KB/s"
+        assert tui_layout.format_throughput_mbs(0)[0] == "-"
+
+    def test_iops_precision_by_magnitude(self):
+        assert tui_layout.format_iops(250000) == "250,000"
+        assert tui_layout.format_iops(150.5) == "150.5"
+        assert tui_layout.format_iops(5) == "5.00"
+        assert tui_layout.format_iops(0) == "-"
+
+    def test_block_size_scales(self):
+        assert tui_layout.format_block_size(2 * 1024 ** 2)[0] == "2.00 MB"
+        assert tui_layout.format_block_size(4096)[0] == "4.00 KB"
+        assert tui_layout.format_block_size(512)[0] == "512 B"
+
+    def test_latency_inactive_and_scaling(self):
+        assert tui_layout.format_latency_us(1500, active=False)[0] == "-"
+        assert tui_layout.format_latency_us(2000)[0] == "2.00 ms"
+
+    def test_latency_glyph_follows_set_unicode(self):
+        try:
+            tui_layout.set_unicode(False)
+            assert tui_layout.format_latency_us(250)[0] == "250 us"
+            tui_layout.set_unicode(True)
+            assert tui_layout.format_latency_us(250)[0] == "250 µs"
+        finally:
+            tui_layout.set_unicode(False)
+
+
+class TestGlyphSet:
+    def test_ascii_and_utf8_variants(self):
+        ascii_g = tui_layout.glyph_set(False)
+        utf_g = tui_layout.glyph_set(True)
+        assert ascii_g["V"] == "|" and utf_g["V"] == "│"
+        assert ascii_g["MUS"] == "us" and utf_g["MUS"] == "µs"
+
+    def test_returns_independent_copies(self):
+        g = tui_layout.glyph_set(True)
+        g["V"] = "X"
+        assert tui_layout.glyph_set(True)["V"] == "│"
+
+    def test_engines_share_canonical_glyph_set(self):
+        # All engines now source glyphs from tui_layout.glyph_set, so their
+        # box/indicator characters must be identical.
+        assert nfs_v3._V == nvme_tcp._V == tui_layout.glyph_set(nfs_v3._UTF8)["V"]
+        assert nfs_v3._DOT == nvme_tcp._DOT

@@ -40,6 +40,111 @@ def c(text, code):
     return f"{code}{text}{_RST}" if COLOR_ENABLED else text
 
 
+# ---------------------------------------------------------------------------
+# Glyph system: UTF-8 box/indicator characters with an ASCII fallback, shared
+# by every protocol engine so the drawing set lives in exactly one place.
+# ---------------------------------------------------------------------------
+_GLYPHS_UTF8 = {
+    "H": "─", "V": "│",
+    "TL": "┌", "TR": "┐", "BL": "└", "BR": "┘", "LT": "├", "RT": "┤",
+    "BLK": "█", "SHD": "░",
+    "ARR_UP": "▲", "ARR_DN": "▼", "ARR_EQ": "►", "DOT": "●", "MUS": "µs",
+}
+_GLYPHS_ASCII = {
+    "H": "-", "V": "|",
+    "TL": "+", "TR": "+", "BL": "+", "BR": "+", "LT": "+", "RT": "+",
+    "BLK": "#", "SHD": ".",
+    "ARR_UP": "+", "ARR_DN": "-", "ARR_EQ": "~", "DOT": "o", "MUS": "us",
+}
+
+# Latency-unit glyph used by :func:`format_latency_us`; updated by set_unicode().
+_MUS = _GLYPHS_ASCII["MUS"]
+
+
+def glyph_set(utf8):
+    """Return a fresh copy of the box/indicator glyph map for the given mode."""
+    return dict(_GLYPHS_UTF8 if utf8 else _GLYPHS_ASCII)
+
+
+def set_unicode(enabled):
+    """Select the latency-unit glyph used by the shared formatters."""
+    global _MUS
+    _MUS = _GLYPHS_UTF8["MUS"] if enabled else _GLYPHS_ASCII["MUS"]
+
+
+# ---------------------------------------------------------------------------
+# Numeric / display formatters (shared by every protocol engine)
+# ---------------------------------------------------------------------------
+def as_float(value):
+    """Coerce *value* to float, returning None for null or unparseable input."""
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def raw_bw_to_mb_sec(value):
+    """Convert a raw bytes/sec counter to MB/s (decimal, 1e6)."""
+    bw = as_float(value)
+    return bw / 1_000_000.0 if bw is not None else None
+
+
+def raw_bw_to_gb_sec(value):
+    """Convert a raw bytes/sec counter to GB/s (decimal, 1e9)."""
+    bw = as_float(value)
+    return bw / 1_000_000_000.0 if bw is not None else None
+
+
+def format_throughput_mbs(mbs):
+    """Return (display, mbs) auto-scaled across KB/s, MB/s, GB/s."""
+    mbs = as_float(mbs)
+    if mbs is None or mbs <= 0:
+        return "-", None
+    if mbs >= 1024:
+        return f"{mbs / 1024:.2f} GB/s", mbs
+    if mbs >= 1:
+        return f"{mbs:.2f} MB/s", mbs
+    return f"{mbs * 1024:.2f} KB/s", mbs
+
+
+def format_latency_us(us, active=True):
+    """Return (display, us) auto-scaled between µs and ms; '-' when inactive/empty."""
+    if not active:
+        return "-", None
+    us = as_float(us)
+    if us is None or us <= 0:
+        return "-", None
+    if us >= 1000:
+        return f"{us / 1000:.2f} ms", us
+    return f"{us:.0f} {_MUS}", us
+
+
+def format_iops(ops):
+    """Return an ops/sec display string with precision that scales with magnitude."""
+    ops = as_float(ops)
+    if ops is None or ops <= 0:
+        return "-"
+    if ops >= 100_000:
+        return f"{ops:,.0f}"
+    if ops >= 100:
+        return f"{ops:,.1f}"
+    return f"{ops:,.2f}"
+
+
+def format_block_size(value):
+    """Return (display, bytes) auto-scaled across B, KB, MB for average I/O size."""
+    value = as_float(value)
+    if value is None or value <= 0:
+        return "-", None
+    if value >= 1024 ** 2:
+        return f"{value / (1024 ** 2):.2f} MB", value
+    if value >= 1024:
+        return f"{value / 1024:.2f} KB", value
+    return f"{value:.0f} B", value
+
+
 def strip_ansi(text):
     """Remove ANSI SGR escape sequences from *text*."""
     return _ANSI_RE.sub("", text or "")

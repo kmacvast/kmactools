@@ -132,14 +132,24 @@ Advanced multi-threaded logical vs unique capacity estimators and dataset entrop
 | `vast-entropy-sim.py` | Entropy / compressibility simulation for lab datasets |
 | `README.md` | Metrics glossary and setup |
 
-### `vast/vast-nfstop/`
+### `vast/vast-opstat/`
 
-Terminal interactive, top-like real-time transaction monitor for cluster NFS mount paths.
+Terminal interactive, top-like real-time **multi-protocol** performance monitor. Polls VMS
+performance counters and renders live op rates, latency, throughput, workload classification,
+and interactive drill-downs across four protocols (stdlib-only at runtime).
 
 | File | Purpose |
 | :--- | :--- |
-| `vast-nfstop.py` | Live NFS RPC op rates, latency, throughput, workload classification (stdlib-only) |
-| `README.md` | Display layout, VMS query parameters, credits |
+| `vast-opstat.py` | Unified CLI + protocol dispatch (`--nfs --version=3.0/4.1`, `--block --nvme-over-tcp`, `--smb`) |
+| `nfs_v3.py` | NFS v3 engine (RPC op rates, latency, throughput) |
+| `nfs_v41.py` | NFS v4.1 engine (hybrid `NFS4Common`/`NfsMetrics` telemetry) |
+| `nvme_tcp.py` | NVMe-oTCP block engine (counter-delta rates, volume scoping) |
+| `smb.py` | SMB engine (opcode workflow, session/lock panels, client scoping) |
+| `vast_common.py` | Shared REST transport, monitor lifecycle, signals, frame flush |
+| `tui_layout.py` | Shared table/color/box rendering helpers |
+| `vast_api_log.py` | Optional VMS REST request/response logging (`--log-api-calls`) |
+| `smb_phase0_discover.py` | SMB metric discovery probe (Phase 0 research helper) |
+| `README.md` + per-protocol `*_README.md` | Usage, display layout, VMS query parameters |
 
 ### `vast/vast-sniff/`
 
@@ -168,12 +178,18 @@ Storage-plane configuration validators and active object auditors.
 
 **What it does:** Runs automated unit and mock cycles ensuring local enhancements do not introduce regressions before live lab validation. Tests are designed to **mock VASTClient / VASTDB** and avoid hitting production VMS endpoints unless explicitly labeled integration tests.
 
-| Test file | Covers |
-| :--- | :--- |
-| `test_vcatalog_tool.py` | **`vcatalog_tool.py`** — 48+ mocked tests: streaming search, DRR math, parallel aggregation, credentials, argparse |
-| `test_vast_du.py` | **`vast-du.py`** — capacity metric and config logic |
-| `test_utils.py` | **`vast/common/utils.py`** — `load_vast_config()` tenant normalization |
-| `test_vcatalog_cyberdemo.py` | **`vcatalog_cyberdemo.py`** — cyber-demo script behavior |
+| Test file | Covers | Deps |
+| :--- | :--- | :--- |
+| `test_vast_opstat.py` | **`vast-opstat` engines** — CLI dispatch, telemetry math, monitor lifecycle, color, audit regressions | stdlib |
+| `test_tui_layout.py` | **`tui_layout.py`** — column sizing, ANSI-aware width/truncation | stdlib |
+| `test_utils.py` | **`vast/common/utils.py`** — `load_vast_config()` tenant normalization | stdlib |
+| `test_vcatalog_tool.py` | **`vcatalog_tool.py`** — 48+ mocked tests: streaming search, DRR math, parallel aggregation, credentials, argparse | `vastpy`, `pandas`, `pyarrow` |
+| `test_vcatalog_cyberdemo.py` | **`vcatalog_cyberdemo.py`** — cyber-demo script behavior | `pandas` |
+| `test_vast_du.py` | **`vast-du.py`** — capacity metric and config logic | `vastpy` |
+
+> Dep-heavy suites are skipped automatically (via `pytest.importorskip`) when their
+> third-party packages are absent, so `pytest tests/` stays green on a stdlib-only venv.
+> Install `dev-requirements.txt` to run the full matrix.
 
 ### How to run
 
@@ -198,7 +214,7 @@ cd vast/vast-catalog && ./run_vcat_test_suite.sh
 | Search 44M+ catalog files without crawling NFS | `vast/vast-catalog/vcatalog_tool.py --search` · [USAGE.md](vast/vast-catalog/USAGE.md) |
 | Show DRR dedup/similarity/compression pillars | `vcatalog_tool.py --show-data-reduction-rates` |
 | Get a VMS API token | `vast/auth/vast_get_token.py` |
-| Monitor live NFS ops on cluster | `vast/vast-nfstop/vast-nfstop.py` |
+| Monitor live protocol perf (NFS/NVMe/SMB) | `vast/vast-opstat/vast-opstat.py` · [README.md](vast/vast-opstat/README.md) |
 | Report directory logical vs physical usage | `vast/vast-du/vast-du.py` |
 | Harvest Slack/Gmail for work journal | `timefinder/timefinder.py --gather-candidate-entries` · [timefinder/README.md](timefinder/README.md) |
 | Run all mock regressions | `python3 -m unittest discover -s tests` |
@@ -215,4 +231,4 @@ cd vast/vast-catalog && ./run_vcat_test_suite.sh
 | Catalog CLI manual | [vast/vast-catalog/USAGE.md](vast/vast-catalog/USAGE.md) |
 | TimeFinder workflow | [timefinder/README.md](timefinder/README.md) |
 | VAST-DU metrics | [vast/vast-du/README.md](vast/vast-du/README.md) |
-| NFS monitor | [vast/vast-nfstop/README.md](vast/vast-nfstop/README.md) |
+| Multi-protocol perf monitor | [vast/vast-opstat/README.md](vast/vast-opstat/README.md) |

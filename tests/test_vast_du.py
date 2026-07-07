@@ -12,6 +12,9 @@ import sys
 import os
 import importlib.util
 
+# vast-du.py imports vastpy at module load; skip the suite when it's absent
+pytest.importorskip("vastpy")
+
 # Load module from file path (directory contains hyphens)
 _script_path = os.path.join(
     os.path.dirname(__file__), "..", "vast", "vast-du", "vast-du.py"

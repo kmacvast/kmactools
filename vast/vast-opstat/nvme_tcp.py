@@ -16,20 +16,19 @@ import io
 import getpass
 import os
 import re
-import select
 import shutil
 import ssl
 import sys
-import termios
 import time
-import tty
 from datetime import datetime
 
 import vast_api_log
 import vast_common
 from tui_layout import (
     display_width, join_columns, pad_display, format_fixed_number,
-    format_scaled_metric, truncate_display, c, set_color,
+    format_scaled_metric, truncate_display, c, set_color, set_unicode, glyph_set,
+    as_float, raw_bw_to_mb_sec, format_throughput_mbs, format_latency_us,
+    format_iops, format_block_size,
     _RST, _BOLD, _DIM, _GREEN, _YELLOW, _CYAN,
     _BRED, _BGREEN, _BYELLOW, _BBLUE, _BMAGENTA, _BCYAN, _BWHITE,
 )
@@ -156,8 +155,6 @@ OPS_MONITOR_IDS = []
 CLUSTER_SUPPLEMENT_MONITOR_IDS = []
 PROTO_MONITOR_ID = None
 CLUSTER_ID = CLUSTER_NAME = None
-ORIGINAL_TERMINAL_SETTINGS = None
-KEYBOARD_ENABLED = False
 LAST_ROWS = []
 LAST_SAMPLE = "-"
 PREV_ROWS = []
@@ -182,16 +179,11 @@ CSV_HEADER = [
 
 _ANSI_RE = re.compile(r"\033\[[^m]*m")
 _UTF8 = (sys.stdout.encoding or "ascii").lower().startswith("utf")
-if _UTF8:
-    _H, _V = "─", "│"
-    _TL, _TR, _BL, _BR, _LT, _RT = "┌", "┐", "└", "┘", "├", "┤"
-    _BLK, _SHD = "█", "░"
-    _ARR_UP, _ARR_DN, _ARR_EQ, _DOT, _MUS = "▲", "▼", "►", "●", "µs"
-else:
-    _H, _V = "-", "|"
-    _TL, _TR, _BL, _BR, _LT, _RT = "+", "+", "+", "+", "+", "+"
-    _BLK, _SHD = "#", "."
-    _ARR_UP, _ARR_DN, _ARR_EQ, _DOT, _MUS = "+", "-", "~", "o", "us"
+_G = glyph_set(_UTF8)
+_H, _V = _G["H"], _G["V"]
+_TL, _TR, _BL, _BR, _LT, _RT = _G["TL"], _G["TR"], _G["BL"], _G["BR"], _G["LT"], _G["RT"]
+_BLK, _SHD = _G["BLK"], _G["SHD"]
+_ARR_UP, _ARR_DN, _ARR_EQ, _DOT, _MUS = _G["ARR_UP"], _G["ARR_DN"], _G["ARR_EQ"], _G["DOT"], _G["MUS"]
 
 def _fresh_run_stats():
     return {
@@ -204,7 +196,7 @@ def init_config(args):
     global ARGS, VMS, PORT, USER, PASSWORD, SAMPLE_AVERAGE, REFRESH_SECONDS, CSV_FILE
     global API_TIME_FRAME, SAMPLE_AVERAGE_MODE, BASE_URL, AUTH, HEADERS, _COLOR
     global RUN_STARTED_AT, RUN_STATS, OPS_MONITOR_IDS, CLUSTER_SUPPLEMENT_MONITOR_IDS, PROTO_MONITOR_ID
-    global CLUSTER_ID, CLUSTER_NAME, ORIGINAL_TERMINAL_SETTINGS, KEYBOARD_ENABLED
+    global CLUSTER_ID, CLUSTER_NAME
     global LAST_ROWS, LAST_SAMPLE, PREV_ROWS, PREV_COUNTER_STATE, LAST_POLL_MONOTONIC, DELTA_READY
     global DRILL_MODE, DRILL_OBJECTS, DRILL_MONITORS, LAST_DRILL_ROWS, DRILL_ERROR
     global VOLUME_NAMES, VOLUME_IDS, VOLUME_SCOPED, SCOPE_LABEL
@@ -243,14 +235,13 @@ def init_config(args):
         print(f"API call logging enabled: {log_path}", file=sys.stderr, flush=True)
     _COLOR = sys.stdout.isatty() and not args.no_color
     set_color(_COLOR)
+    set_unicode(_UTF8)
     RUN_STARTED_AT = datetime.now()
     RUN_STATS = _fresh_run_stats()
     OPS_MONITOR_IDS = []
     CLUSTER_SUPPLEMENT_MONITOR_IDS = []
     PROTO_MONITOR_ID = None
     CLUSTER_ID = CLUSTER_NAME = None
-    ORIGINAL_TERMINAL_SETTINGS = None
-    KEYBOARD_ENABLED = False
     LAST_ROWS = []
     LAST_SAMPLE = "-"
     PREV_ROWS = []
@@ -673,53 +664,6 @@ def _vpad(s, width, align="<"):
     return pad_display(s, width, align)
 
 
-def format_block_size(bytes_val):
-    """Return (display_string, bytes) for average I/O size."""
-    value = as_float(bytes_val)
-    if value is None or value <= 0:
-        return "-", None
-    if value >= 1024 ** 2:
-        return f"{value / (1024 ** 2):.2f} MB", value
-    if value >= 1024:
-        return f"{value / 1024:.2f} KB", value
-    return f"{value:.0f} B", value
-
-
-def format_latency_us(us, active=True):
-    """Return (display_string, us_value) with auto µs/ms scaling."""
-    if not active:
-        return "-", None
-    us = as_float(us)
-    if us is None or us <= 0:
-        return "-", None
-    if us >= 1000:
-        return f"{us / 1000:.2f} ms", us
-    return f"{us:.0f} {_MUS}", us
-
-
-def format_throughput_mbs(mbs):
-    """Return (display_string, mbs_value) scaled to KB/s, MB/s, or GB/s."""
-    mbs = as_float(mbs)
-    if mbs is None or mbs <= 0:
-        return "-", None
-    if mbs >= 1024:
-        return f"{mbs / 1024:.2f} GB/s", mbs
-    if mbs >= 1:
-        return f"{mbs:.2f} MB/s", mbs
-    return f"{mbs * 1024:.2f} KB/s", mbs
-
-
-def format_iops(ops):
-    ops = as_float(ops)
-    if ops is None or ops <= 0:
-        return "-"
-    if ops >= 100_000:
-        return f"{ops:,.0f}"
-    if ops >= 100:
-        return f"{ops:,.1f}"
-    return f"{ops:,.2f}"
-
-
 def rows_by_key(rows):
     return {r["key"]: r for r in rows}
 
@@ -790,15 +734,6 @@ def workload_bar(pct, bar_width=22, color=_GREEN):
     return c(_BLK * filled, color) + c(_SHD * empty, _DIM) + f"  {pct:4.1f}%"
 
 
-def as_float(value):
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except Exception:
-        return None
-
-
 def fmt(value, width=12, precision=2):
     return format_fixed_number(value, width, precision)
 
@@ -823,11 +758,6 @@ def fmt_delta(value, precision=2):
         return ""
     sign = "+" if value >= 0 else ""
     return f"{sign}{value:.{precision}f}"
-
-
-def raw_bw_to_mb_sec(value):
-    value = as_float(value)
-    return None if value is None else value / 1_000_000.0
 
 
 def avg_io_size_bytes(ops_sec, bw_mbs):
@@ -920,26 +850,8 @@ def delete_monitor(monitor_id):
     vast_common.delete_monitor(api_request, monitor_id)
 
 
-def setup_keyboard():
-    global ORIGINAL_TERMINAL_SETTINGS, KEYBOARD_ENABLED
-    if not sys.stdin.isatty():
-        KEYBOARD_ENABLED = False
-        return
-    fd = sys.stdin.fileno()
-    ORIGINAL_TERMINAL_SETTINGS = termios.tcgetattr(fd)
-    tty.setcbreak(fd)
-    KEYBOARD_ENABLED = True
-
-
-def restore_terminal():
-    global ORIGINAL_TERMINAL_SETTINGS, KEYBOARD_ENABLED
-    if ORIGINAL_TERMINAL_SETTINGS is not None and sys.stdin.isatty():
-        try:
-            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, ORIGINAL_TERMINAL_SETTINGS)
-        except Exception:
-            pass
-    ORIGINAL_TERMINAL_SETTINGS = None
-    KEYBOARD_ENABLED = False
+setup_keyboard = vast_common.setup_keyboard
+restore_terminal = vast_common.restore_terminal
 
 
 _CLEANED_UP = False
@@ -963,26 +875,8 @@ def signal_handler(_signum, _frame):
     sys.exit(0)
 
 
-def check_keypress():
-    if not KEYBOARD_ENABLED:
-        return ""
-    fd = sys.stdin.fileno()
-    try:
-        readable, _w, _e = select.select([fd], [], [], 0)
-    except Exception:
-        return ""
-    if not readable:
-        return ""
-    try:
-        data = os.read(fd, 32)
-    except Exception:
-        return ""
-    return data.decode(errors="ignore") if data else ""
-
-
-def clear_screen():
-    sys.stdout.write("\033[2J\033[H")
-    sys.stdout.flush()
+check_keypress = vast_common.check_keypress
+clear_screen = vast_common.clear_screen
 
 
 def _result_parts(result):

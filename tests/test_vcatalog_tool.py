@@ -12,8 +12,14 @@ from contextlib import redirect_stdout
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
-import pandas as pd
-import pyarrow as pa
+import pytest
+
+# vcatalog_tool.py imports vastdb/boto3/numpy/pandas/pyarrow; skip if any are absent
+pytest.importorskip("vastdb")
+pytest.importorskip("boto3")
+pytest.importorskip("numpy")
+pd = pytest.importorskip("pandas")
+pa = pytest.importorskip("pyarrow")
 
 _SCRIPT = os.path.join(
     os.path.dirname(__file__), "..", "vast", "vast-catalog", "vcatalog_tool.py"

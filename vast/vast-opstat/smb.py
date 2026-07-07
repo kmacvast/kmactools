@@ -1659,11 +1659,7 @@ def _render_session_panel(snapshot, width):
 
 
 def _obj_name(obj, fields):
-    for field in fields:
-        val = obj.get(field)
-        if val:
-            return str(val)
-    return str(obj.get("id", "?"))
+    return vast_common.resolve_object_name(obj, fields)
 
 
 def _cleanup_drill_monitors():

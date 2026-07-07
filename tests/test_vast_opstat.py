@@ -435,6 +435,50 @@ class TestNfsDrillEndpoints:
         assert len(get_query_calls) == 1
         assert len(nfs_v3.DRILL_MONITORS) == 1
 
+    def test_view_ranking_scans_all_objects_beyond_probe_limit(self):
+        # Regression: active views listed past _DRILL_PROBE_LIMIT must still be
+        # ranked (previously the probe pool was truncated to the first N views,
+        # so a busy view listed later showed near-zero and was hidden).
+        nfs_v3.init_config(_connection_args())
+        nfs_v3.CLUSTER_ID = 1
+        total = nfs_v3._DRILL_PROBE_LIMIT + 8
+        busy_id = nfs_v3._DRILL_PROBE_LIMIT + 5   # lives in the 2nd chunk
+        views = [{"id": i, "path": f"/v{i}"} for i in range(total)]
+        rank_query_count = 0
+
+        def fake_api_request(method, path, payload=None):
+            nonlocal rank_query_count
+            if method == "GET" and path == "/views/":
+                return views
+            if method == "POST" and path == "/monitors/":
+                return {"id": 5000 + len(payload["object_ids"])}
+            if method == "GET" and path.endswith("/query/"):
+                rank_query_count += 1
+                rows = [
+                    ["2026-07-01T00:00:00Z", vid,
+                     (100.0 if vid == busy_id else 0.0), 0.0, 0.0, 0.0]
+                    for vid in range(total)
+                ]
+                return {
+                    "prop_list": [
+                        "timestamp", "object_id",
+                        nfs_v3._VIEW_READ_IOPS, nfs_v3._VIEW_WRITE_IOPS,
+                        nfs_v3._VIEW_READ_MD, nfs_v3._VIEW_WRITE_MD,
+                    ],
+                    "data": rows,
+                }
+            if method == "DELETE":
+                return None
+            raise AssertionError(f"Unexpected API call: {method} {path}")
+
+        with patch.object(nfs_v3, "api_request", side_effect=fake_api_request):
+            objs = [{"id": v["id"], "path": v["path"]} for v in views]
+            ranked = nfs_v3._rank_drill_candidates("view", objs, nfs_v3._DRILL_CFG["view"])
+
+        # More than one chunk was probed, and the busy view ranked first.
+        assert rank_query_count >= 2
+        assert ranked[0]["id"] == busy_id
+
     def test_fetch_drill_query_view_uses_single_batch_get(self):
         nfs_v3.init_config(_connection_args())
         nfs_v3.DRILL_MODE = "view"
@@ -665,6 +709,155 @@ class TestNfsV41Metrics:
         assert read_row["bw_mbs"] == pytest.approx(5.0)
         assert read_row["avg_io_bytes"] == pytest.approx(500_000.0)
         assert nfs_v41.METRICS_SOURCE == "NFS4Common"
+
+
+class TestNfsV41StateMetrics:
+    def test_state_monitor_props_pair_rate_and_avg(self):
+        ops = [("open", "OPEN"), ("lock", "LOCK")]
+        props = nfs_v41.build_state_monitor_props(ops)
+        assert nfs_v41._nfs_fqn("open", "rate") in props
+        assert nfs_v41._nfs_fqn("open", "avg") in props
+        assert nfs_v41._nfs_fqn("lock", "avg") in props
+        assert len(props) == 4
+
+    def test_collect_metric_names_is_schema_agnostic(self):
+        raw = {"results": [{"name": "NfsMetrics,nfs_open_latency__rate"},
+                           {"name": "NfsMetrics,nfs_lock_latency__avg"}]}
+        names = nfs_v41._collect_metric_names(raw)
+        assert "NfsMetrics,nfs_open_latency__rate" in names
+        assert "NfsMetrics,nfs_lock_latency__avg" in names
+
+    def test_probe_returns_only_exported_ops(self, monkeypatch):
+        catalog = {"data": [
+            "NfsMetrics,nfs_open_latency__rate",
+            "NfsMetrics,nfs_close_latency__rate",
+            "NfsMetrics,nfs_lock_latency__rate",
+            "NfsMetrics,nfs_locku_latency__rate",
+        ]}
+        monkeypatch.setattr(nfs_v41, "api_request", lambda m, p: catalog)
+        available = nfs_v41.probe_available_state_ops()
+        keys = {op for op, _ in available}
+        assert keys == {"open", "close", "lock", "locku"}
+        assert "sequence" not in keys
+
+    def test_probe_returns_none_when_catalog_unreadable(self, monkeypatch):
+        def boom(method, path):
+            raise RuntimeError("403 Forbidden")
+        monkeypatch.setattr(nfs_v41, "api_request", boom)
+        assert nfs_v41.probe_available_state_ops() is None
+
+    def test_build_state_rows_from_monitor(self, monkeypatch):
+        monkeypatch.setattr(nfs_v41, "STATE_OPS_AVAILABLE",
+                            [("open", "OPEN"), ("lock", "LOCK")])
+        state_result = {
+            "prop_list": [
+                "timestamp",
+                nfs_v41._nfs_fqn("open", "rate"),
+                nfs_v41._nfs_fqn("open", "avg"),
+                nfs_v41._nfs_fqn("lock", "rate"),
+                nfs_v41._nfs_fqn("lock", "avg"),
+            ],
+            "data": [["2026-07-01T00:00:00Z", 40.0, 300.0, 10.0, 150.0]],
+        }
+        snapshot, _ = nfs_v41.build_rows_from_results(
+            {"prop_list": ["timestamp"], "data": []},
+            state_result=state_result,
+        )
+        open_row = next(r for r in snapshot["state"] if r["key"] == "open")
+        assert open_row["ops_sec"] == pytest.approx(40.0)
+        assert open_row["avg_us"] == pytest.approx(300.0)
+        assert open_row["pct"] == pytest.approx(80.0)
+
+    def test_state_rows_empty_when_no_ops_available(self, monkeypatch):
+        monkeypatch.setattr(nfs_v41, "STATE_OPS_AVAILABLE", [])
+        snapshot, _ = nfs_v41.build_rows_from_results(
+            {"prop_list": ["timestamp"], "data": []},
+        )
+        assert snapshot["state"] == []
+
+    def test_init_state_monitor_disables_on_create_failure(self, monkeypatch):
+        monkeypatch.setattr(nfs_v41, "probe_available_state_ops",
+                            lambda: [("open", "OPEN")])
+
+        def boom(name, props):
+            raise RuntimeError("unknown property")
+        monkeypatch.setattr(nfs_v41, "create_monitor", boom)
+        monkeypatch.setattr(nfs_v41, "STATE_MONITOR_ID", None)
+        monkeypatch.setattr(nfs_v41, "STATE_OPS_AVAILABLE", [("x", "X")])
+        nfs_v41._init_state_monitor()
+        assert nfs_v41.STATE_MONITOR_ID is None
+        assert nfs_v41.STATE_OPS_AVAILABLE == []
+
+    def test_init_state_monitor_uses_full_set_when_catalog_unreadable(self, monkeypatch):
+        monkeypatch.setattr(nfs_v41, "probe_available_state_ops", lambda: None)
+        captured = {}
+
+        def fake_create(name, props):
+            captured["props"] = props
+            return "mon-state"
+        monkeypatch.setattr(nfs_v41, "create_monitor", fake_create)
+        nfs_v41._init_state_monitor()
+        assert nfs_v41.STATE_MONITOR_ID == "mon-state"
+        assert nfs_v41.STATE_OPS_AVAILABLE == nfs_v41.STATE_PANEL_OPS
+
+    def test_namespace_panel_uses_real_exported_ops(self):
+        keys = {op for op, _ in nfs_v41.METADATA_PROXY_OPS}
+        # Confirmed exported by live discovery against a real cluster.
+        for expected in ("access", "setattr", "rename", "readdirplus", "commit"):
+            assert expected in keys
+        props = nfs_v41.build_supplement_monitor_props()
+        assert nfs_v41._nfs_fqn("rename", "rate") in props
+        assert f"{nfs_v41._COMMIT_WAIT_FQN}__avg" in props
+
+    def test_sort_rows_by_ops_desc(self, monkeypatch):
+        rows = [
+            {"label": "A", "ops_sec": 5.0, "avg_us": 100.0},
+            {"label": "B", "ops_sec": 50.0, "avg_us": 10.0},
+            {"label": "C", "ops_sec": None, "avg_us": 999.0},
+        ]
+        monkeypatch.setattr(nfs_v41, "SORT_MODE", "ops")
+        assert [r["label"] for r in nfs_v41._sort_rows(rows)] == ["B", "A", "C"]
+
+    def test_sort_rows_by_latency_desc_none_last(self, monkeypatch):
+        rows = [
+            {"label": "A", "ops_sec": 5.0, "avg_us": 100.0},
+            {"label": "B", "ops_sec": 50.0, "avg_us": 900.0},
+            {"label": "C", "ops_sec": 1.0, "avg_us": None},
+        ]
+        monkeypatch.setattr(nfs_v41, "SORT_MODE", "latency")
+        assert [r["label"] for r in nfs_v41._sort_rows(rows)] == ["B", "A", "C"]
+
+    def test_sort_rows_default_preserves_order(self, monkeypatch):
+        rows = [{"label": x, "ops_sec": 1.0, "avg_us": 1.0} for x in ("A", "B", "C")]
+        monkeypatch.setattr(nfs_v41, "SORT_MODE", "default")
+        assert [r["label"] for r in nfs_v41._sort_rows(rows)] == ["A", "B", "C"]
+
+    def test_commit_wait_surfaced_in_meta(self):
+        supplement_result = {
+            "prop_list": ["timestamp", f"{nfs_v41._COMMIT_WAIT_FQN}__avg"],
+            "data": [["2026-07-01T00:00:00Z", 420.0]],
+        }
+        snapshot, _ = nfs_v41.build_rows_from_results(
+            {"prop_list": ["timestamp"], "data": []},
+            supplement_result=supplement_result,
+        )
+        assert snapshot["meta"]["commit_wait_us"] == pytest.approx(420.0)
+
+
+class TestResolveObjectName:
+    def test_root_view_labeled_default(self):
+        assert nfs_v3.vast_common.resolve_object_name({"path": "/"}, ("path",)) == "/ (default)"
+
+    def test_normal_view_unchanged(self):
+        assert nfs_v3.vast_common.resolve_object_name({"path": "/data"}, ("path",)) == "/data"
+
+    def test_falls_back_to_id(self):
+        assert nfs_v3.vast_common.resolve_object_name({"id": 42}, ("path", "name")) == "42"
+
+    def test_all_engines_label_root_view(self):
+        for eng in (nfs_v3, nfs_v41, nvme_tcp, smb):
+            assert eng._obj_name({"path": "/"}, ("path", "name")) == "/ (default)"
+            assert eng._obj_name({"path": "/x"}, ("path", "name")) == "/x"
 
 
 class TestDispatch:

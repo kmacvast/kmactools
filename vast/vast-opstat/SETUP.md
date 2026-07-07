@@ -159,6 +159,19 @@ pip install pytest pytest-mock
 Replace `var203.selab.vastdata.com` with your VMS hostname. Omit `--password` to be
 prompted securely, or set `VAST_PASSWORD` in the environment.
 
+### Easiest: interactive wizard (no flags)
+
+Run with no arguments and vast-opstat walks you through every choice, then starts:
+
+```bash
+./vast-opstat.py          # macOS / Linux
+python vast-opstat.py     # Windows
+```
+
+Use `--menu` to force the wizard, or `--no-menu` to skip it. The wizard collects your
+password/token securely (never on the command line). Everything below shows the equivalent
+explicit-flag commands.
+
 ### NFS v3 (macOS / Linux)
 
 ```bash

@@ -26,7 +26,7 @@ This script bridges that gap. It queries the VAST Element Store directly to reve
 1. **Install python packages:**  
 
 ```bash
-pip3 install requests
+pip install vastpy
 ```
 
 2. **Configure Credentials:**  
@@ -76,8 +76,8 @@ python3 vast-du.py -d /kmac/nfs --children
 
 #### **4\. Output Options**
 
-* **CSV (Excel):** python3 get\_drr\_by\_directory.py \-d / \-c \-o csv \> vast\_report.csv  
-* **JSON:** python3 get\_drr\_by\_directory.py \-d / \-c \-o json
+* **CSV (Excel):** `python3 vast-du.py -d / -c -o csv > vast_report.csv`
+* **JSON:** `python3 vast-du.py -d / -c -o json`
 
 ---
 #### **Example Usage**

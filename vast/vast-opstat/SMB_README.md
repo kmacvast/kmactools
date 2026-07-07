@@ -9,7 +9,7 @@ write-md split sub-line.
 ![SMB TUI Dashboard](images/vast-opstat_SMB.png)
 
 **Version:** 0.1.2 · **Implementation:** [smb.py](smb.py) · **Setup:** [SETUP.md](SETUP.md) ·
-**Opcodes:** [SMB_OPCODES.md](SMB_OPCODES.md) · **Discovery:** [SMB_PHASE0_RESULTS.md](SMB_PHASE0_RESULTS.md)
+**Opcodes:** [SMB_OPCODES.md](SMB_OPCODES.md) · **Discovery:** [SMB_PHASE0_RESULTS.md](../../docs/dev/smb/SMB_PHASE0_RESULTS.md)
 
 ---
 
@@ -183,6 +183,6 @@ ssh -L 8443:var203.selab.vastdata.com:443 user@jump-host
 ## Related Docs
 
 - [SMB_OPCODES.md](SMB_OPCODES.md) — SMB2 opcode catalog and calculation reference
-- [SMB_IMPLEMENTATION_PLAN.md](SMB_IMPLEMENTATION_PLAN.md) — phased design record
-- [SMB_PHASE0_RESULTS.md](SMB_PHASE0_RESULTS.md) — var203 metric catalog and API probes
+- [SMB_IMPLEMENTATION_PLAN.md](../../docs/dev/smb/SMB_IMPLEMENTATION_PLAN.md) — phased design record (dev)
+- [SMB_PHASE0_RESULTS.md](../../docs/dev/smb/SMB_PHASE0_RESULTS.md) — var203 metric catalog and API probes (dev)
 - [scripts/Invoke-SmbOpstatLoad.ps1](../../scripts/Invoke-SmbOpstatLoad.ps1) — Windows SMB load generator

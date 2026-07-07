@@ -3,7 +3,7 @@
 How **vast-opstat** maps SMB2 opcodes to VMS telemetry, what each opcode means in a
 real workload, and exactly how rates are calculated in [smb.py](smb.py).
 
-**Parent doc:** [SMB_README.md](SMB_README.md) · **VMS catalog:** [SMB_PHASE0_RESULTS.md](SMB_PHASE0_RESULTS.md)
+**Parent doc:** [SMB_README.md](SMB_README.md) · **VMS catalog:** [SMB_PHASE0_RESULTS.md](../../docs/dev/smb/SMB_PHASE0_RESULTS.md)
 
 ---
 
@@ -459,6 +459,6 @@ create separate opcode rows.
 ## Related
 
 - [SMB_README.md](SMB_README.md) — dashboard panels, drill-down, `--clients`
-- [SMB_PHASE0_RESULTS.md](SMB_PHASE0_RESULTS.md) — var203 metric catalog and API probes
-- [SMB_IMPLEMENTATION_PLAN.md](SMB_IMPLEMENTATION_PLAN.md) — phased design record
+- [SMB_PHASE0_RESULTS.md](../../docs/dev/smb/SMB_PHASE0_RESULTS.md) — var203 metric catalog and API probes
+- [SMB_IMPLEMENTATION_PLAN.md](../../docs/dev/smb/SMB_IMPLEMENTATION_PLAN.md) — phased design record
 - [smb.py](smb.py) — `SMB2_OPCODES`, `build_opcode_workflow_rows()`, `build_rows_from_results()`

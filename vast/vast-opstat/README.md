@@ -19,6 +19,34 @@ Runtime dependencies: [requirements.txt](requirements.txt) (stdlib only for exec
 
 ---
 
+## How it works
+
+`vast-opstat.py` dispatches to one of four protocol engines. Each engine creates ad-hoc
+VMS monitors, polls them on a refresh loop, and renders a live terminal dashboard. REST
+transport, monitor lifecycle, and rendering helpers are shared across all engines.
+
+![vast-opstat data flow](../../docs/images/vast-opstat-dataflow.png)
+
+---
+
+## Interactive wizard (no flags needed)
+
+Run `vast-opstat` **with no arguments** on a terminal and it launches an interactive setup
+wizard: pick a protocol, enter connection details, choose authentication, set optional
+scoping/advanced options, review the equivalent command, and start.
+
+```bash
+./vast-opstat.py            # launches the wizard
+./vast-opstat.py --menu     # force the wizard even with other flags present
+./vast-opstat.py --no-menu  # never launch the wizard
+```
+
+The wizard collects secrets securely and exports them via `VAST_PASSWORD` / `VAST_TOKEN`,
+so passwords never appear on the command line, in `ps`, or in the printed command. It can
+also seed connection details from `~/.vastconf` if present.
+
+---
+
 ## Protocol Reference
 
 | Protocol | CLI flags | Status | Documentation |
@@ -42,6 +70,9 @@ Runtime dependencies: [requirements.txt](requirements.txt) (stdlib only for exec
 
 ```bash
 cd vast/vast-opstat
+
+# Interactive — no flags; the wizard prompts for everything
+./vast-opstat.py
 
 # NFS v3 — cluster-wide
 ./vast-opstat.py --nfs --version=3.0 --vms <VMS_HOST> --user <USER>
@@ -81,6 +112,8 @@ These flags apply to **every implemented protocol** (NFS v3, NFS v4.1, NVMe-oTCP
 | `--no-color` | — | Disable ANSI color output |
 | `--discover-metrics` | — | Enumerate metrics and objects, then exit |
 | `--log-api-calls` | — | Log VMS REST traffic to `/tmp/vast-opstat-api-*.log` |
+| `--menu` / `-i` | — | Launch the interactive wizard (default when run with no options on a TTY) |
+| `--no-menu` | — | Never launch the interactive wizard |
 | `-V` / `--tool-version` | — | Print tool version and exit |
 
 ### Cluster-wide vs volume-scoped monitoring (NVMe-oTCP only)
@@ -110,6 +143,17 @@ ssh -L 8443:var203.selab.vastdata.com:443 user@jump-host
 Pass `--log-api-calls` to record every VMS HTTPS request and response under `/tmp`.
 The log path is printed on startup. Authorization headers and passwords are never
 written to the log.
+
+### Dashboard header
+
+Every protocol renders a two-line header. The second line ends with the cluster's VAST OS
+release in grey (fetched once per session), e.g.:
+
+```
+sample:2026-07-07T17:15:33Z   vast-os-release-5.4.3-sp4
+```
+
+If the version can't be read it is simply omitted — it never blocks the dashboard.
 
 ---
 

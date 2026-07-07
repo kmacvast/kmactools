@@ -2,106 +2,74 @@
 
 **Solutions Engineering Diagnostic, Automation, and Systems Interrogation Toolkit**
 
-An optimized workspace for VAST Data Solutions Engineering: storage-fabric profiling, catalog-scale metadata analytics, communication intelligence harvesting, and lab virtualization diagnostics. Tools here are built for repeatable lab workflows, customer-facing demonstrations, and fast root-cause analysis—not ad hoc one-offs.
+An optimized workspace for VAST Data Solutions Engineering: storage-fabric profiling,
+catalog-scale metadata analytics, communication-intelligence harvesting, and lab
+diagnostics. Built for repeatable lab workflows, customer-facing demos, and fast
+root-cause analysis.
+
+![kmactools repository architecture](docs/images/repo-architecture.png)
 
 ---
 
-## Repository Statement of Intent
+## Start here
 
-**kmactools** consolidates tactical utilities used across VAST SE engagements into a single, version-controlled repository. The collection spans three architectural pillars:
+| I want to… | Go to |
+|---|---|
+| Understand the repo and how it's organized | [docs/architecture.md](docs/architecture.md) |
+| Install and run my first command | [docs/getting-started.md](docs/getting-started.md) |
+| Configure cluster credentials | [docs/credentials.md](docs/credentials.md) |
+| Run the tests | [docs/testing.md](docs/testing.md) |
+| Find a specific tool or script | [docs/tool-index.md](docs/tool-index.md) |
+| Browse all documentation | [docs/README.md](docs/README.md) |
+
+---
+
+## The three pillars
 
 | Pillar | Path | Focus |
-| :--- | :--- | :--- |
-| **Storage fabric engineering** | [`vast/`](vast/) | Element Store catalog queries, capacity/DRR analysis, VMS auth, NFS monitoring, and audit tooling |
-| **Communication intelligence** | [`timefinder/`](timefinder/) | Slack/Gmail message harvesting, thread heuristics, work-journal candidates, and Google Calendar sync |
-| **Infrastructure diagnostics** | [`scripts/`](scripts/) | macOS scopes, virtualization debuggers, media transcription, and lab harness scripts |
+|---|---|---|
+| **Storage-fabric engineering** | [`vast/`](vast/) | Catalog analytics, capacity/DRR, VMS auth, multi-protocol performance monitoring, config auditing |
+| **Communication intelligence** | [`timefinder/`](timefinder/) | Local Slack/Gmail harvesting → work-journal candidates → Google Calendar |
+| **Infrastructure diagnostics** | [`scripts/`](scripts/) | macOS scopes, virtualization debuggers, transcription, lab harnesses |
 
-Each module ships with its own README where operational detail matters. The root document stays intentionally high-level.
-
----
-
-## High-Level Architectural Core Modules
-
-### `vast/` — VAST Data Platform SE Toolkit
-
-The primary engineering surface. Sub-modules cover authentication (`auth/`), shared config helpers (`common/`), identity/AD inspection (`identity/`), the flagship unified catalog CLI (`vast-catalog/vcatalog_tool.py`), VASTDB time-series ingest (`vast-db/`), logical-vs-physical capacity reporters (`vast-du/`), the live multi-protocol performance monitor (`vast-opstat/`), protocol sniffing (`vast-sniff/`), and storage-plane viewers (`vast-viewer/`).
-
-**Flagship entry point:** [`vast/vast-catalog/vcatalog_tool.py`](vast/vast-catalog/vcatalog_tool.py) — parallel streaming catalog analytics, early-exit search, VMS-backed DRR dashboards, and multi-protocol path/S3 operations. See [`vast/vast-catalog/README.md`](vast/vast-catalog/README.md) and [`vast/vast-catalog/USAGE.md`](vast/vast-catalog/USAGE.md).
-
-### `timefinder/` — Communication Intelligence & Harvesting
-
-A local, rule-based pipeline that extracts Slack and Gmail activity, clusters conversations, scores work-journal candidates, supports interactive ICS review, and syncs approved entries to Google Calendar—without LLM inference during candidate scoring.
-
-### `scripts/` — Infrastructure Diagnostics & Workspace Automation
-
-Quick-strike operational utilities: macOS kernel scopes, YouTube transcription wrappers, VMware analyzers, SELab data-services harnesses, and other lab automation helpers that do not belong in the VAST-specific tree.
+Each module ships its own README next to the code; the [docs/](docs/) hub holds the
+cross-cutting guides.
 
 ---
 
-## Primary Entry-Point Guidance
-
-### Prerequisites
-
-- **Python 3.10+** (3.14+ supported; some modules require 3.8+ stdlib-only)
-- **Virtual environment** (strongly recommended)
-- **VAST lab credentials** where applicable (`~/.vastconf` or `~/.vast-catalog-config.json` depending on tool)
-- **NFS mount reachability** for catalog seeding and S3-tag modes (`/mnt/kmac` or lab-specific path)
-
-### Clone & environment setup
+## 60-second quickstart
 
 ```bash
 git clone git@github.com:kmacvast/kmactools.git
 cd kmactools
+python3 -m venv .venv && source .venv/bin/activate
 
-python3 -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
+# Live multi-protocol performance monitor (interactive — no flags needed)
+./vast/vast-opstat/vast-opstat.py
 
-# Install dependencies for the module you intend to run, e.g.:
-pip install -r vast/vast-catalog/requirements.txt
-pip install vastpy pytest pytest-mock   # common lab additions
-```
-
-### Recommended first commands
-
-```bash
-# VAST catalog platform guide (no credentials required for --about text)
+# Catalog platform education (no credentials needed)
 ./vast/vast-catalog/vcatalog_tool.py --about
 
-# Run root regression suite (mocked; no live VMS)
-python3 -m unittest discover -s tests -p 'test_*.py'
-
-# Generate a VMS API token (requires ~/.vastconf)
-python3 vast/auth/vast_get_token.py
+# Mocked regression suite
+pip install pytest pytest-mock && pytest tests/
 ```
 
-Configure credentials before any live cluster operation. Module-specific setup lives in each subdirectory's README.
+Full setup: [docs/getting-started.md](docs/getting-started.md).
 
 ---
 
-## Repository Contents & Tool Index
+## Highlighted tools
 
-**For an exhaustive, itemized map of every tool, diagnostic utility, and test script inside this repository—along with descriptions of exactly what they do—please refer to the [Repository Content Guide (REPO_CONTENT.md)](REPO_CONTENT.md).**
-
----
-
-## Testing
-
-Central regression tests live under [`tests/`](tests/). Run from the repository root:
-
-```bash
-python3 -m unittest discover -s tests -p 'test_*.py'
-# or, where pytest is installed:
-pytest tests/
-```
-
-Live integration harnesses (e.g. [`vast/vast-catalog/run_vcat_test_suite.sh`](vast/vast-catalog/run_vcat_test_suite.sh)) require lab credentials and a reachable NFS mount.
+- **[vast-catalog](vast/vast-catalog/README.md)** — parallel streaming catalog analytics,
+  early-exit search, DRR dashboards, S3 tagging (never crawls the filesystem).
+- **[vast-opstat](vast/vast-opstat/README.md)** — live NFS v3 / NFS v4.1 / NVMe-oTCP / SMB
+  performance dashboard, stdlib-only, with an interactive setup wizard.
+- **[timefinder](timefinder/README.md)** — evidence-backed work journal from Slack/Gmail.
 
 ---
 
 ## License
 
-This project is licensed under the terms of the [LICENSE](LICENSE) file in the repository root.
+Licensed under the terms of the [LICENSE](LICENSE) file.
 
----
-
-**Maintainer:** KMac kmac@vastdata.com · **Primary VAST docs:** [`vast/README.md`](vast/README.md) · **Catalog manual:** [`vast/vast-catalog/USAGE.md`](vast/vast-catalog/USAGE.md)
+**Maintainer:** KMac · kmac@vastdata.com

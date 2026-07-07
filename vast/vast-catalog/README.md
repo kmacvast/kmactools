@@ -84,16 +84,18 @@ Search modes with client-side filters (`--sparse`) use a different optimization:
 ```
 kmactools/
 ├── tests/
-│   └── test_vcatalog_tool.py          # Canonical mock regression suite (48 tests, no live VMS)
+│   ├── test_vcatalog_tool.py          # Canonical mock regression suite (no live VMS)
+│   └── test_vcatalog_cyberdemo.py     # Cyber-demo script tests
 └── vast/vast-catalog/
     ├── vcatalog_tool.py               # Master unified CLI engine (v1.3.7)
-    ├── run_vcat_test_suite.sh         # 11-stage live integration harness
+    ├── vcatalog_cyberdemo.py          # Cyber-demo variant
+    ├── find_files_nfs.py              # NFS find helper (superseded by catalog search)
+    ├── run_vcat_test_suite.sh         # Live integration harness
     ├── vast-catalog-config.example.json
     ├── requirements.txt               # Python dependencies (vastdb, pyarrow, boto3, …)
     ├── README.md                      # ← You are here (architecture & vision)
     ├── USAGE.md                       # Full CLI manual, flags, and output mockups
-    ├── ALGORITHM.md                   # Internal algorithm notes
-    └── test_vcatalog_tool.py          # Legacy local unittest stub (use repo tests/ instead)
+    └── ALGORITHM.md                   # Internal algorithm notes
 ```
 
 **Execution entry point:**
@@ -120,7 +122,7 @@ Quick starting points from that manual:
 | Capacity histogram | `./vcatalog_tool.py --show-capacity` |
 | Sparse-file search (early exit) | `./vcatalog_tool.py --search --sparse --limit 5` |
 | Multi-pillar DRR dashboard | `./vcatalog_tool.py --show-data-reduction-rates --directory workspace_1` |
-| Run mock unit tests | `python3 -m unittest tests.test_vcatalog_tool` (from repo root) |
+| Run mock unit tests | `pytest tests/test_vcatalog_tool.py` (from repo root) |
 | Run live integration harness | `./run_vcat_test_suite.sh` (from this directory) |
 
 ---

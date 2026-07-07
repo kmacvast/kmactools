@@ -31,6 +31,8 @@ DEFAULT_USER = "admin"
 DEFAULT_REFRESH_SECONDS = 5
 
 SUPPORTED_NFS_VERSIONS = frozenset({"3.0", "4.1"})
+# Convenience aliases so users can pass shorthand major versions.
+NFS_VERSION_ALIASES = {"3": "3.0", "4": "4.1"}
 PLANNED_NFS_VERSIONS = frozenset({"4.2"})
 
 
@@ -54,6 +56,9 @@ def validate_protocol_args(args):
                 "ERROR: --version is required when using --nfs.\n"
                 "Example: vast-opstat.py --nfs --version=3.0 --vms <VMS_IP>"
             )
+        args.protocol_version = NFS_VERSION_ALIASES.get(
+            args.protocol_version, args.protocol_version
+        )
         if args.protocol_version in PLANNED_NFS_VERSIONS:
             raise SystemExit(
                 f"ERROR: NFS version '{args.protocol_version}' is not implemented yet.\n"
@@ -107,7 +112,7 @@ def parse_args(argv=None):
         dest="protocol_version",
         default=None,
         metavar="VER",
-        help="Protocol version (required with --nfs, e.g. 3.0)",
+        help="Protocol version (required with --nfs; e.g. 3 or 3.0, 4 or 4.1)",
     )
 
     parser.add_argument(

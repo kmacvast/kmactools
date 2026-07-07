@@ -98,6 +98,16 @@ class TestCliParsing:
         assert args.nfs is True
         assert args.protocol_version == "4.1"
 
+    def test_nfs_version_shorthand_aliases(self):
+        assert opstat.parse_args(["--nfs", "--version=3", *BASE_ARGS]).protocol_version == "3.0"
+        assert opstat.parse_args(["--nfs", "--version=4", *BASE_ARGS]).protocol_version == "4.1"
+
+    def test_nfs_version_3_dispatches_to_v3(self):
+        args = opstat.parse_args(["--nfs", "--version=3", *BASE_ARGS])
+        with patch.object(opstat.nfs_v3, "run", return_value=0) as run_mock:
+            assert opstat.dispatch(args) == 0
+        run_mock.assert_called_once_with(args)
+
     def test_block_without_nvme_over_tcp_exits(self):
         with pytest.raises(SystemExit) as exc:
             opstat.parse_args(["--block", *BASE_ARGS])

@@ -283,12 +283,15 @@ def register_atexit(cleanup_fn):
 def flush_frame(text):
     """Write one composed frame with a single syscall.
 
-    Homes the cursor (no full-screen erase, so there is no blank interval),
-    writes the whole frame, then erases from the cursor to end-of-screen to
-    clear any stale tail from a previous, longer frame. This removes the
-    screen tearing caused by ``\\033[2J`` + many per-line prints.
+    Homes the cursor (no full-screen erase, so there is no blank interval) and
+    appends ``\\033[K`` (erase-to-end-of-line) after every line so a shorter new
+    line never leaves stale characters from the previous frame on the right.
+    A trailing ``\\033[J`` then clears any rows below a now-shorter frame. This
+    removes both the right-side ghosting and the screen tearing that a
+    ``\\033[2J`` + many per-line prints would cause.
     """
-    sys.stdout.write("\033[H" + text + "\033[J")
+    framed = "\033[K\n".join(text.split("\n"))
+    sys.stdout.write("\033[H" + framed + "\033[K\033[J")
     sys.stdout.flush()
 
 

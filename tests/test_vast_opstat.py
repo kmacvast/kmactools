@@ -1486,8 +1486,16 @@ class TestVastCommon:
     def test_flush_frame_is_single_write_without_full_erase(self, capsys):
         smb.vast_common.flush_frame("hello")
         out = capsys.readouterr().out
-        assert out == "\033[Hhello\033[J"
+        assert out == "\033[Hhello\033[K\033[J"
         assert "\033[2J" not in out  # no full-screen erase → no flicker
+
+    def test_flush_frame_erases_each_line_to_eol(self, capsys):
+        # Every line must be followed by \033[K so a shorter new line cannot
+        # leave stale characters from the previous frame on the right.
+        smb.vast_common.flush_frame("line1\nline2\nline3")
+        out = capsys.readouterr().out
+        assert out == "\033[Hline1\033[K\nline2\033[K\nline3\033[K\033[J"
+        assert out.count("\033[K") == 3
 
     def test_shared_color_helper_respects_toggle(self):
         assert smb.set_color.__module__.endswith("tui_layout")  # from tui_layout

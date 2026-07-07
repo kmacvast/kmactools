@@ -134,8 +134,15 @@ def format_iops(ops):
 
 
 def format_os_release(version):
-    """Render the VAST OS release header label, or '' when the version is unknown."""
-    return f"vast-os-release-{version}" if version else ""
+    """Render the VAST OS release header label, or '' when the version is unknown.
+
+    VMS reports the full build (e.g. ``5.4.3.1.14178074658457882785``); only the
+    first four dotted components are meaningful for display, so trim the rest.
+    """
+    if not version:
+        return ""
+    short = ".".join(str(version).split(".")[:4])
+    return f"vast-os-release-{short}"
 
 
 def format_block_size(value):

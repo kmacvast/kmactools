@@ -141,6 +141,16 @@ class TestSharedFormatters:
         assert tui_layout.format_os_release(None) == ""
         assert tui_layout.format_os_release("") == ""
 
+    def test_os_release_trims_to_four_components(self):
+        # VMS returns a long build suffix; only the first four parts are shown.
+        assert (
+            tui_layout.format_os_release("5.4.3.1.14178074658457882785")
+            == "vast-os-release-5.4.3.1"
+        )
+        # already-short versions are unaffected
+        assert tui_layout.format_os_release("5.4.3.1") == "vast-os-release-5.4.3.1"
+        assert tui_layout.format_os_release("5.4") == "vast-os-release-5.4"
+
     def test_latency_glyph_follows_set_unicode(self):
         try:
             tui_layout.set_unicode(False)

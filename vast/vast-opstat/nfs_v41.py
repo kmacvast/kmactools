@@ -768,7 +768,7 @@ def render_screen():
 def _render_frame():
     width = min(shutil.get_terminal_size((120, 40)).columns, 120)
     title = (
-        c("  VAST NFS", _BCYAN) + c(" opstat", _BWHITE) + c(f" v{VERSION}", _DIM)
+        c("  VAST NFSv41", _BCYAN) + c(" opstat", _BWHITE) + c(f" v{VERSION}", _DIM)
         + f"   VMS {c(f'{VMS}:{PORT}', _BWHITE)}   cluster {c(CLUSTER_NAME, _BWHITE)}"
         + c(f"   refresh {REFRESH_SECONDS}s", _DIM)
     )

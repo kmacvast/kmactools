@@ -1912,7 +1912,7 @@ def _render_frame():
     csv_tag   = c(f"  csv:{CSV_FILE}", _DIM) if CSV_FILE else ""
 
     title_line = (
-        c("  VAST NFS", _BCYAN) + c(" opstat", _BWHITE) + c(f" v{VERSION}", _DIM)
+        c("  VAST NFSv3", _BCYAN) + c(" opstat", _BWHITE) + c(f" v{VERSION}", _DIM)
         + "   VMS " + c(f"{VMS}:{PORT}", _BWHITE)
         + "   cluster " + c(CLUSTER_NAME, _BWHITE)
         + c(f"   refresh {REFRESH_SECONDS}s", _DIM)
@@ -1975,7 +1975,7 @@ def _render_frame():
 
 def discover_metrics():
     """Query the VMS for available NFS metrics and drill-down objects, then exit."""
-    print(f"\n=== VAST NFS Metrics Discovery ===")
+    print(f"\n=== VAST NFSv3 Metrics Discovery ===")
     print(f"VMS: {VMS}:{PORT}  (connecting...)\n")
 
     global CLUSTER_ID, CLUSTER_NAME

@@ -209,6 +209,20 @@ def parse_args(argv=None):
         help="Log VMS REST API requests/responses to a file under /tmp.",
     )
     parser.add_argument(
+        "--export-openmetrics",
+        action="store_true",
+        help="Stream polled metrics to a JSON Lines (.jsonl) file using an "
+             "OpenMetrics/OpenTelemetry-aligned schema.",
+    )
+    parser.add_argument(
+        "--openmetrics-file",
+        dest="openmetrics_file",
+        default=None,
+        metavar="FILENAME",
+        help="Destination .jsonl file for --export-openmetrics "
+             "(default: auto-named in the current directory).",
+    )
+    parser.add_argument(
         "--menu",
         "-i",
         action="store_true",

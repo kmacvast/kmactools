@@ -245,6 +245,10 @@ def _build_argv(ans):
         argv.append("--no-color")
     if ans.get("log_api_calls"):
         argv.append("--log-api-calls")
+    if ans.get("export_openmetrics"):
+        argv.append("--export-openmetrics")
+        if ans.get("openmetrics_file"):
+            argv += ["--openmetrics-file", ans["openmetrics_file"]]
     return argv
 
 
@@ -331,6 +335,8 @@ def _ask_advanced(p, ans):
         ans.setdefault("csv", None)
         ans.setdefault("no_color", False)
         ans.setdefault("log_api_calls", False)
+        ans.setdefault("export_openmetrics", False)
+        ans.setdefault("openmetrics_file", None)
         return
     ans["refresh"] = int(p.text(
         "Refresh interval (seconds)", default=str(ans.get("refresh", DEFAULT_REFRESH)),
@@ -348,6 +354,16 @@ def _ask_advanced(p, ans):
     ans["log_api_calls"] = p.yes_no(
         "Log VMS API calls to /tmp (debugging)?", default=False
     )
+    ans["export_openmetrics"] = p.yes_no(
+        "Export metrics to an OpenMetrics JSON Lines (.jsonl) file?", default=False
+    )
+    if ans["export_openmetrics"]:
+        ans["openmetrics_file"] = p.text(
+            "OpenMetrics .jsonl path, or Enter for an auto-named file",
+            default=ans.get("openmetrics_file") or None,
+        ) or None
+    else:
+        ans["openmetrics_file"] = None
 
 
 def _apply_config(ans, environ, cfg):
@@ -387,6 +403,8 @@ def _print_summary(p, ans, argv):
     p.say(f"  Color      : {'off' if ans.get('no_color') else 'on'}")
     if ans.get("log_api_calls"):
         p.say("  API log    : on")
+    if ans.get("export_openmetrics"):
+        p.say(f"  OpenMetrics: {ans.get('openmetrics_file') or 'auto-named .jsonl'}")
     p.say("")
     p.say(f"  Equivalent : {_equivalent_cli(argv)}")
     p.say("  (credentials are passed via environment, not shown above)")

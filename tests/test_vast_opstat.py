@@ -38,6 +38,7 @@ nfs_v41 = _load_module("vast_opstat_nfs_v41", _NFS_V41_SCRIPT)
 nvme_tcp = _load_module("vast_opstat_nvme_tcp", _NVME_TCP_SCRIPT)
 smb = _load_module("vast_opstat_smb", _SMB_SCRIPT)
 vast_api_log = _load_module("vast_opstat_api_log", _VAST_API_LOG_SCRIPT)
+openmetrics = nfs_v3.openmetrics
 
 BASE_ARGS = [
     "--vms", "203.0.113.10",
@@ -1873,7 +1874,7 @@ class TestWizard:
                 "v", "8443", "svc",  # vms, port, user
                 "1",                 # auth = password
                 "y",                 # configure advanced
-                "2", "10m", "/tmp/out.csv", "n", "y",  # refresh, avg, csv, color=no, log=yes
+                "2", "10m", "/tmp/out.csv", "n", "y", "n",  # refresh, avg, csv, color=no, log=yes, openmetrics=no
                 "1",                 # start
             ],
             secrets=["pw"],
@@ -1885,6 +1886,22 @@ class TestWizard:
             "--csv", "/tmp/out.csv", "--no-color", "--log-api-calls",
         ]
         assert opstat.parse_args(argv).protocol_version == "4.1"
+
+    def test_advanced_options_enable_openmetrics(self):
+        argv, _env, _ = _run_wizard(
+            [
+                "1", "2",            # NFS, v4.1
+                "v", "8443", "svc",  # vms, port, user
+                "1",                 # auth = password
+                "y",                 # configure advanced
+                "", "", "", "y", "n",  # refresh(def), avg(none), csv(none), color=yes, log=no
+                "y", "/tmp/metrics.jsonl",  # openmetrics=yes, file
+                "1",                 # start
+            ],
+            secrets=["pw"],
+        )
+        assert "--export-openmetrics" in argv
+        assert argv[argv.index("--openmetrics-file") + 1] == "/tmp/metrics.jsonl"
 
     def test_quit_returns_none(self):
         argv, env, _ = _run_wizard(["q"])
@@ -1973,3 +1990,107 @@ class TestAuditRegressions:
         row = nfs_v41._op_metrics(nfs4, supp, {}, "read")
         assert row["ops_sec"] == pytest.approx(100.0)   # NFS4Common tier chosen
         assert row["avg_us"] is None                     # latency not cross-borrowed
+
+
+class TestOpenMetricsExporter:
+    def _read_lines(self, path):
+        with open(path, encoding="utf-8") as fh:
+            return [json.loads(line) for line in fh if line.strip()]
+
+    def test_configure_disabled_returns_none(self):
+        assert openmetrics.configure(False, None, "nfs3", "10.0.0.1") is None
+        assert openmetrics.is_enabled() is False
+
+    def test_default_filename_uses_protocol_and_vms(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        try:
+            path = openmetrics.configure(True, None, "smb", "10.0.0.50")
+            assert path is not None
+            base = os.path.basename(path)
+            assert base.startswith("vast-opstat-openmetrics-smb-10.0.0.50-")
+            assert base.endswith(".jsonl")
+        finally:
+            openmetrics.close()
+
+    def test_snapshot_emits_openmetrics_schema(self, tmp_path):
+        out = tmp_path / "m.jsonl"
+        openmetrics.configure(True, str(out), "nfs3", "10.0.0.50")
+        try:
+            series = [{
+                "operation": "READ", "category": "data",
+                "ops_sec": 100.0, "avg_us": 250.0,
+                "bw_bytes_sec": 1.0e9, "io_bytes": 1.0e7,
+            }]
+            openmetrics.export_snapshot(
+                "cl01", None, "cl01", series, sample="2026-07-08T14:30:00Z",
+            )
+        finally:
+            openmetrics.close()
+        lines = self._read_lines(out)
+        assert len(lines) == 4  # ops, latency, throughput, io_size
+        by_name = {r["metric_name"]: r for r in lines}
+        ops = by_name["vast.nfs3.operations"]
+        assert ops["value"] == 100.0
+        assert ops["unit"] == "ops/s"
+        assert ops["timestamp"] == "2026-07-08T14:30:00.000Z"
+        assert ops["attributes"] == {
+            "cluster": "cl01", "vms": "10.0.0.50", "protocol": "nfs3",
+            "operation": "READ", "category": "data",
+            "drill_mode": "cluster", "target_name": "cl01",
+        }
+        assert by_name["vast.nfs3.latency"]["unit"] == "microseconds"
+        assert by_name["vast.nfs3.throughput"]["unit"] == "bytes/s"
+        assert by_name["vast.nfs3.throughput"]["value"] == 1.0e9
+        assert by_name["vast.nfs3.io_size"]["unit"] == "bytes"
+
+    def test_null_values_are_skipped(self, tmp_path):
+        out = tmp_path / "m.jsonl"
+        openmetrics.configure(True, str(out), "smb", "vms")
+        try:
+            series = [{"operation": "CLOSE", "category": "session",
+                       "ops_sec": 5.0, "avg_us": None,
+                       "bw_bytes_sec": None, "io_bytes": None}]
+            openmetrics.export_snapshot("c", None, "c", series)
+        finally:
+            openmetrics.close()
+        lines = self._read_lines(out)
+        assert [r["metric_name"] for r in lines] == ["vast.smb.operations"]
+
+    def test_disabled_export_is_noop(self, tmp_path):
+        out = tmp_path / "none.jsonl"
+        openmetrics.configure(False, str(out), "nfs3", "vms")
+        openmetrics.export_snapshot("c", None, "c", [{"operation": "READ",
+                                                      "ops_sec": 1.0}])
+        assert not out.exists()
+
+    def test_drill_export_uses_target_and_total(self, tmp_path):
+        out = tmp_path / "d.jsonl"
+        openmetrics.configure(True, str(out), "nvme_tcp", "vms")
+        try:
+            rows = [{"name": "vol-1", "total_iops": 42.0,
+                     "latency_us": 300.0, "bw_mbs": 2.0}]
+            openmetrics.export_drill("c", "volume", rows, sample="bad-ts")
+        finally:
+            openmetrics.close()
+        lines = self._read_lines(out)
+        by_name = {r["metric_name"]: r for r in lines}
+        ops = by_name["vast.nvme_tcp.operations"]
+        assert ops["value"] == 42.0
+        assert ops["attributes"]["drill_mode"] == "volume"
+        assert ops["attributes"]["target_name"] == "vol-1"
+        assert ops["attributes"]["category"] == "drill"
+        # bw_mbs 2.0 MB/s -> 2_000_000 bytes/s
+        assert by_name["vast.nvme_tcp.throughput"]["value"] == 2_000_000.0
+
+    def test_all_engines_expose_export_helpers(self):
+        for engine in (nfs_v3, nfs_v41, smb, nvme_tcp):
+            assert hasattr(engine, "_openmetrics_series")
+            assert hasattr(engine, "_export_openmetrics")
+            assert engine.openmetrics is openmetrics
+
+    def test_cli_flags_parse(self):
+        args = opstat.parse_args(BASE_ARGS + ["--block", "--nvme-over-tcp",
+                                              "--export-openmetrics",
+                                              "--openmetrics-file", "/tmp/x.jsonl"])
+        assert args.export_openmetrics is True
+        assert args.openmetrics_file == "/tmp/x.jsonl"

@@ -52,6 +52,7 @@ import sys
 import time
 from datetime import datetime
 
+import openmetrics
 import vast_api_log
 import vast_common
 from tui_layout import (
@@ -280,6 +281,13 @@ def init_config(args):
     )
     if log_path:
         print(f"API call logging enabled: {log_path}", file=sys.stderr, flush=True)
+    om_path = openmetrics.configure(
+        getattr(args, "export_openmetrics", False),
+        getattr(args, "openmetrics_file", None),
+        "nfs3", VMS,
+    )
+    if om_path:
+        print(f"OpenMetrics export enabled: {om_path}", file=sys.stderr, flush=True)
 
     _COLOR = sys.stdout.isatty() and not args.no_color
     set_color(_COLOR)
@@ -594,6 +602,7 @@ def cleanup():
     restore_terminal()
     vast_common.drain_monitors(delete_monitor)
     vast_api_log.close()
+    openmetrics.close()
     for monitor_id, detail in vast_common.failed_deletes():
         print(f"WARNING: monitor {monitor_id} not deleted: {detail}", file=sys.stderr)
 
@@ -1109,6 +1118,35 @@ def fetch_monitor_query():
     LAST_SAMPLE = sample
 
     write_csv_rows(rows, sample)
+    _export_openmetrics()
+
+
+def _openmetrics_series():
+    series = []
+    for r in LAST_ROWS:
+        label = r["label"]
+        is_io = label in IO_LABELS
+        bw_gbs = as_float(r.get("bw_gbs"))
+        io_bytes = as_float(r.get("avg_io_bytes"))
+        if io_bytes is None and is_io:
+            io_bytes = avg_io_size_bytes(r.get("ops_sec"), bw_gbs)
+        series.append({
+            "operation": label,
+            "category": "data" if is_io else "metadata",
+            "ops_sec": as_float(r.get("ops_sec")),
+            "avg_us": as_float(r.get("avg_us")),
+            "bw_bytes_sec": openmetrics.gbps_to_bytes_sec(bw_gbs),
+            "io_bytes": io_bytes,
+        })
+    return series
+
+
+def _export_openmetrics():
+    if not openmetrics.is_enabled():
+        return
+    openmetrics.export_snapshot(
+        CLUSTER_NAME, None, CLUSTER_NAME, _openmetrics_series(), sample=LAST_SAMPLE,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1454,6 +1492,8 @@ def fetch_drill_query():
         key=lambda r: r["total_ops"] or 0,
         reverse=True,
     )
+    if openmetrics.is_enabled() and DRILL_MODE:
+        openmetrics.export_drill(CLUSTER_NAME, DRILL_MODE, LAST_DRILL_ROWS, sample=LAST_SAMPLE)
     if not LAST_DRILL_ROWS and query_errors:
         DRILL_ERROR = (
             f"{DRILL_MODE} drill monitors returned no data "

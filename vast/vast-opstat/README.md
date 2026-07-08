@@ -33,7 +33,8 @@ transport, monitor lifecycle, and rendering helpers are shared across all engine
 
 Run `vast-opstat` **with no arguments** on a terminal and it launches an interactive setup
 wizard: pick a protocol, enter connection details, choose authentication, set optional
-scoping/advanced options, review the equivalent command, and start.
+scoping/advanced options, opt in to OpenMetrics export, review the equivalent command, and
+start.
 
 ```bash
 ./vast-opstat.py            # launches the wizard
@@ -112,6 +113,8 @@ These flags apply to **every implemented protocol** (NFS v3, NFS v4.1, NVMe-oTCP
 | `--no-color` | — | Disable ANSI color output |
 | `--discover-metrics` | — | Enumerate metrics and objects, then exit |
 | `--log-api-calls` | — | Log VMS REST traffic to `/tmp/vast-opstat-api-*.log` |
+| `--export-openmetrics` | — | Stream every poll to a JSON Lines file in OpenMetrics/OpenTelemetry format |
+| `--openmetrics-file FILE` | auto (`/tmp`) | Destination `.jsonl` file for `--export-openmetrics` |
 | `--menu` / `-i` | — | Launch the interactive wizard (default when run with no options on a TTY) |
 | `--no-menu` | — | Never launch the interactive wizard |
 | `-V` / `--tool-version` | — | Print tool version and exit |
@@ -143,6 +146,68 @@ ssh -L 8443:var203.selab.vastdata.com:443 user@jump-host
 Pass `--log-api-calls` to record every VMS HTTPS request and response under `/tmp`.
 The log path is printed on startup. Authorization headers and passwords are never
 written to the log.
+
+### OpenMetrics / OpenTelemetry export
+
+Pass `--export-openmetrics` to continuously stream the numbers behind the dashboard
+to a **JSON Lines** (`.jsonl`) file — one metric per line — so they can be shipped to
+Prometheus, Grafana, an OTel collector, or any log pipeline. Every refresh tick appends
+new lines; the dashboard keeps running exactly as before.
+
+```bash
+# Auto-named file under /tmp (path is printed on startup)
+./vast-opstat.py --nfs --version=3.0 --vms <VMS_HOST> --export-openmetrics
+
+# Choose your own destination
+./vast-opstat.py --smb --vms <VMS_HOST> \
+  --export-openmetrics --openmetrics-file /var/log/vast/smb-metrics.jsonl
+```
+
+On startup the tool prints, e.g.:
+
+```
+OpenMetrics export enabled: /tmp/vast-opstat-openmetrics-nfs3-10.0.0.50-20260708-143000.jsonl
+```
+
+**What gets written.** For each active operation, per tick, up to four metrics are emitted:
+
+| Metric name | Type | Unit | Meaning |
+|-------------|------|------|---------|
+| `vast.<protocol>.operations` | gauge | `ops/s` | Operation rate |
+| `vast.<protocol>.latency` | gauge | `microseconds` | Average latency |
+| `vast.<protocol>.throughput` | gauge | `bytes/s` | Bandwidth |
+| `vast.<protocol>.io_size` | gauge | `bytes` | Average I/O size (when available) |
+
+`<protocol>` is one of `nfs3`, `nfs41`, `smb`, `nvme_tcp`. Rates are modeled as OpenMetrics
+gauges (instantaneous per-second values). Metrics with no value for a given tick are skipped
+rather than written as null.
+
+**Line format.** Each line is a single, self-describing JSON object:
+
+```json
+{
+  "timestamp": "2026-07-08T14:30:00.000Z",
+  "metric_name": "vast.nfs3.operations",
+  "metric_type": "gauge",
+  "value": 14250.0,
+  "unit": "ops/s",
+  "attributes": {
+    "cluster": "vast-cluster-01",
+    "vms": "10.0.0.50",
+    "protocol": "nfs3",
+    "operation": "READ",
+    "category": "data",
+    "drill_mode": "cluster",
+    "target_name": "vast-cluster-01"
+  }
+}
+```
+
+The `attributes` block tags each sample for filtering and grouping: `category` groups the
+operation (`data`, `metadata`, `session`, `state`, `drill`), while `drill_mode` /
+`target_name` identify the scope. When you drill into a view, tenant, cNode, or volume,
+per-target aggregate lines are also written with `drill_mode` set to that mode and
+`target_name` set to the object name.
 
 ### Dashboard header
 

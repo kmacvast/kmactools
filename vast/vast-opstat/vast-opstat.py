@@ -220,7 +220,7 @@ def parse_args(argv=None):
         default=None,
         metavar="FILENAME",
         help="Destination .jsonl file for --export-openmetrics "
-             "(default: auto-named in the current directory).",
+             "(default: auto-named under /tmp).",
     )
     parser.add_argument(
         "--menu",

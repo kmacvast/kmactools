@@ -52,7 +52,9 @@ _METRIC_DEFS = (
 def _default_filename(protocol, vms):
     safe_vms = "".join(c if c.isalnum() or c in ".-_" else "_" for c in str(vms))
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    return f"vast-opstat-openmetrics-{protocol}-{safe_vms}-{stamp}.jsonl"
+    return os.path.join(
+        "/tmp", f"vast-opstat-openmetrics-{protocol}-{safe_vms}-{stamp}.jsonl"
+    )
 
 
 def configure(enabled, filename, protocol, vms):

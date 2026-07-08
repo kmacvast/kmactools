@@ -1840,7 +1840,7 @@ class TestWizard:
         # protocol=NFS, version=3.0, vms, default port, default user,
         # auth=password, no advanced, start.
         argv, env, _ = _run_wizard(
-            ["1", "1", "10.0.0.5", "", "", "1", "", "1"], secrets=["s3cret"]
+            ["1", "1", "10.0.0.5", "", "", "1", "", "n", "1"], secrets=["s3cret"]
         )
         assert argv == ["--nfs", "--version=3.0", "--vms", "10.0.0.5"]
         assert env["VAST_PASSWORD"] == "s3cret"
@@ -1850,7 +1850,7 @@ class TestWizard:
 
     def test_block_scope_emits_volume_flags(self):
         argv, env, _ = _run_wizard(
-            ["2", "203.0.113.9", "", "", "1", "vol1,vol2", "", "1"], secrets=["pw"]
+            ["2", "203.0.113.9", "", "", "1", "vol1,vol2", "", "n", "1"], secrets=["pw"]
         )
         assert argv == [
             "--block", "--nvme-over-tcp", "--vms", "203.0.113.9",
@@ -1861,7 +1861,7 @@ class TestWizard:
     def test_smb_token_auth_sets_env_and_cluster_scope(self):
         # protocol=SMB, vms, default port/user, auth=token, no client scope, start.
         argv, env, _ = _run_wizard(
-            ["3", "smb-vms", "", "", "2", "", "", "1"], secrets=["TOK-XYZ"]
+            ["3", "smb-vms", "", "", "2", "", "", "n", "1"], secrets=["TOK-XYZ"]
         )
         assert argv == ["--smb", "--vms", "smb-vms"]
         assert env["VAST_TOKEN"] == "TOK-XYZ"
@@ -1903,6 +1903,15 @@ class TestWizard:
         assert "--export-openmetrics" in argv
         assert argv[argv.index("--openmetrics-file") + 1] == "/tmp/metrics.jsonl"
 
+    def test_openmetrics_offered_even_when_advanced_skipped(self):
+        # NFS v3, password, advanced=NO, then openmetrics=YES (auto-named file).
+        argv, _env, _ = _run_wizard(
+            ["1", "1", "10.0.0.5", "", "", "1", "", "y", "", "1"], secrets=["pw"]
+        )
+        assert argv == [
+            "--nfs", "--version=3.0", "--vms", "10.0.0.5", "--export-openmetrics",
+        ]
+
     def test_quit_returns_none(self):
         argv, env, _ = _run_wizard(["q"])
         assert argv is None
@@ -1911,7 +1920,7 @@ class TestWizard:
     def test_nfs42_choice_is_rejected(self):
         # choosing planned 4.2 (index 3) re-prompts; then pick 4.1.
         argv, _env, _ = _run_wizard(
-            ["1", "3", "2", "h", "", "", "1", "", "1"], secrets=["pw"]
+            ["1", "3", "2", "h", "", "", "1", "", "n", "1"], secrets=["pw"]
         )
         assert "--version=4.1" in argv
 
@@ -1919,7 +1928,7 @@ class TestWizard:
         cfg = {"vms": "cfg-host", "user": "cfguser", "password": "cfgpw"}
         # load config = yes, protocol NFS, version 3.0, advanced no, start.
         argv, env, _ = _run_wizard(
-            ["", "1", "1", "", "1"], config_loader=lambda _p: cfg
+            ["", "1", "1", "", "n", "1"], config_loader=lambda _p: cfg
         )
         assert argv == [
             "--nfs", "--version=3.0", "--vms", "cfg-host", "--user", "cfguser",
@@ -2006,6 +2015,7 @@ class TestOpenMetricsExporter:
         try:
             path = openmetrics.configure(True, None, "smb", "10.0.0.50")
             assert path is not None
+            assert os.path.dirname(path) == "/tmp"
             base = os.path.basename(path)
             assert base.startswith("vast-opstat-openmetrics-smb-10.0.0.50-")
             assert base.endswith(".jsonl")

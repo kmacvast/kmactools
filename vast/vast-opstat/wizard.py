@@ -335,8 +335,6 @@ def _ask_advanced(p, ans):
         ans.setdefault("csv", None)
         ans.setdefault("no_color", False)
         ans.setdefault("log_api_calls", False)
-        ans.setdefault("export_openmetrics", False)
-        ans.setdefault("openmetrics_file", None)
         return
     ans["refresh"] = int(p.text(
         "Refresh interval (seconds)", default=str(ans.get("refresh", DEFAULT_REFRESH)),
@@ -354,12 +352,15 @@ def _ask_advanced(p, ans):
     ans["log_api_calls"] = p.yes_no(
         "Log VMS API calls to /tmp (debugging)?", default=False
     )
+
+
+def _ask_openmetrics(p, ans):
     ans["export_openmetrics"] = p.yes_no(
         "Export metrics to an OpenMetrics JSON Lines (.jsonl) file?", default=False
     )
     if ans["export_openmetrics"]:
         ans["openmetrics_file"] = p.text(
-            "OpenMetrics .jsonl path, or Enter for an auto-named file",
+            "OpenMetrics .jsonl path, or Enter for an auto-named file under /tmp",
             default=ans.get("openmetrics_file") or None,
         ) or None
     else:
@@ -421,6 +422,7 @@ def _edit_menu(p, ans, environ):
     if ans["protocol"]["scope"]:
         fields.append(("Scope", lambda: _ask_scope(p, ans)))
     fields.append(("Advanced options", lambda: _ask_advanced(p, ans)))
+    fields.append(("OpenMetrics export", lambda: _ask_openmetrics(p, ans)))
     labels = [f[0] for f in fields] + ["Back to summary"]
     idx = p.choice("Edit which section?", labels, len(labels) - 1)
     if idx < len(fields):
@@ -461,9 +463,10 @@ def run(*, input_fn=input, output_fn=print, getpass_fn=None,
             _ask_connection(p, ans)
             _ask_auth(p, ans, environ)
 
-        # Stage 4-5 — scoping + advanced.
+        # Stage 4-6 — scoping, advanced, metrics export.
         _ask_scope(p, ans)
         _ask_advanced(p, ans)
+        _ask_openmetrics(p, ans)
 
         # Stage 6 — confirm / edit / launch.
         while True:

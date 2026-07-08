@@ -94,6 +94,7 @@ runtime.
 | `vast_common.py` | Shared REST transport, monitor lifecycle, signals, terminal I/O, cluster OS-version fetch |
 | `tui_layout.py` | Shared table/color/box/formatter/glyph helpers |
 | `vast_api_log.py` | Optional VMS REST logging (`--log-api-calls`) |
+| `openmetrics.py` | Optional OpenMetrics/OTel JSON Lines metrics export (`--export-openmetrics`) |
 | `smb_phase0_discover.py` | SMB metric discovery probe |
 | `images/` | TUI screenshots |
 | `README.md` / `SETUP.md` | Usage matrix / beginner install guide |

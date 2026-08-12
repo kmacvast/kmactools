@@ -12,6 +12,7 @@ import urllib.request
 from datetime import datetime
 from typing import Any
 
+DEFAULT_SLACK_CONFIG_PATH = os.path.expanduser("~/.timefinder_cache/slack_channels.json")
 DEFAULT_CREDS_PATH = os.path.expanduser("~/.slack/credentials.json")
 
 
@@ -19,7 +20,16 @@ def parse_harvest_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse command-line arguments for thread harvest."""
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--channel", "-c", required=True, help="Slack Channel ID to harvest.")
-    parser.add_argument("--credentials", default=DEFAULT_CREDS_PATH)
+    parser.add_argument(
+        "--slack-config",
+        default=None,
+        help="TimeFinder Slack config path (default: ~/.timefinder_cache/slack_channels.json).",
+    )
+    parser.add_argument(
+        "--credentials",
+        default=None,
+        help="Override: Slack CLI credentials.json path (team-map format).",
+    )
     parser.add_argument("--team-id", default=None)
     parser.add_argument("--output", "-o", default=None)
     return parser.parse_args(argv)
@@ -45,19 +55,58 @@ Follow these succinct steps to refresh your configuration:
    * From 'Payload' tab: The 'token' value (starts with xoxc-)
    * From 'Cookies' tab: The value of cookie 'd' (starts with xoxd-)
 
-5. Save these values to your credentials file at:
-   ~/.slack/credentials.json
+5. Save these values to ~/.timefinder_cache/slack_channels.json:
 
-Format Template:
+{
+  "slack_token": "xoxc-YOUR-NEW-BROWSER-TOKEN",
+  "slack_d_cookie": "xoxd-YOUR-NEW-COOKIE-STRING",
+  "channels": {}
+}
+
+Or, for Slack CLI team-map format via --credentials ~/.slack/credentials.json:
 {
   "YOUR_TEAM_ID": {
     "token": "xoxc-YOUR-NEW-BROWSER-TOKEN",
-    "refresh_token": "xoxd-YOUR-NEW-COOKIE-STRING",
-    "team_domain": "your-org",
-    "team_id": "YOUR_TEAM_ID",
-    "user_id": "YOUR_USER_ID"
+    "refresh_token": "xoxd-YOUR-NEW-COOKIE-STRING"
   }
 }
+===========================================================================
+"""
+    print(instructions, file=sys.stderr)
+
+
+def print_missing_scope_error(method: str, response: dict[str, Any]) -> None:
+    """Print a clear explanation when Slack rejects a call for missing OAuth scopes."""
+    needed = response.get("needed") or "(not reported by Slack)"
+    provided = response.get("provided") or "(not reported by Slack)"
+    instructions = f"""
+===========================================================================
+[-] SLACK API PERMISSION ERROR (missing_scope)
+===========================================================================
+Method:   {method}
+Needed:   {needed}
+Provided: {provided}
+
+Your Slack token authenticated, but it does not have permission to read
+channel history. conversations.history / conversations.replies require one
+or more of: channels:history, groups:history, im:history, mpim:history.
+
+Common causes:
+  * A Slack CLI login token (xoxe.xoxp-...) was used; those lack *:history.
+  * slack_token in ~/.timefinder_cache/slack_channels.json is a service/app
+    token without history scopes, or slack_d_cookie is missing for xoxc-.
+
+How to fix (--harvest-thread):
+  1. Use the same browser session credentials as gather/discover:
+     Open Slack in a browser → DevTools → Network → filter 'client.counts'
+     → copy token (xoxc-) and cookie 'd' (xoxd-).
+  2. Save them in ~/.timefinder_cache/slack_channels.json as:
+       "slack_token": "xoxc-...",
+       "slack_d_cookie": "xoxd-..."
+  3. Or pass a CLI-format file with xoxc- + xoxd- via --credentials.
+
+Default auth file: ~/.timefinder_cache/slack_channels.json
+(same as gather/discover). Override with --slack-config or --credentials.
 ===========================================================================
 """
     print(instructions, file=sys.stderr)
@@ -79,8 +128,37 @@ def check_token_expiry(team_id: str, team_info: dict[str, Any]) -> None:
             pass
 
 
-def resolve_credentials(creds_path: str, team_id: str | None) -> tuple[str | None, str | None]:
-    """Extract both the token and the cookie from credentials.json."""
+def resolve_timefinder_credentials(config_path: str) -> tuple[str | None, str | None]:
+    """Load slack_token and slack_d_cookie from TimeFinder slack_channels.json."""
+    if not os.path.exists(config_path):
+        print(f"Warning: Slack config not found at {config_path}", file=sys.stderr)
+        return None, None
+
+    try:
+        with open(config_path, "r", encoding="utf-8") as handle:
+            config = json.load(handle)
+
+        if not isinstance(config, dict) or not config:
+            print(f"Error: Invalid or empty JSON structure in {config_path}", file=sys.stderr)
+            return None, None
+
+        token = config.get("slack_token")
+        if not token:
+            print(f"Error: Missing slack_token in {config_path}", file=sys.stderr)
+            return None, None
+
+        cookie = config.get("slack_d_cookie") or None
+        print(f"[*] Using TimeFinder Slack config: {config_path}", file=sys.stderr)
+        return token, cookie
+
+    except (json.JSONDecodeError, OSError) as exc:
+        print(f"Error reading Slack config {config_path}: {exc}", file=sys.stderr)
+
+    return None, None
+
+
+def resolve_cli_credentials(creds_path: str, team_id: str | None) -> tuple[str | None, str | None]:
+    """Extract token and cookie from Slack CLI team-map credentials.json."""
     if not os.path.exists(creds_path):
         print(f"Warning: Credentials file not found at {creds_path}", file=sys.stderr)
         return None, None
@@ -113,6 +191,45 @@ def resolve_credentials(creds_path: str, team_id: str | None) -> tuple[str | Non
         print(f"Error reading credentials file {creds_path}: {exc}", file=sys.stderr)
 
     return None, None
+
+
+def resolve_credentials(
+    creds_path: str,
+    team_id: str | None = None,
+) -> tuple[str | None, str | None]:
+    """Resolve token and cookie from TimeFinder or Slack CLI credential file shapes.
+
+    TimeFinder shape: top-level ``slack_token`` / ``slack_d_cookie``.
+    Slack CLI shape: team-id map with ``token`` and ``cookie`` / ``refresh_token``.
+    """
+    if not os.path.exists(creds_path):
+        print(f"Warning: Credentials file not found at {creds_path}", file=sys.stderr)
+        return None, None
+
+    try:
+        with open(creds_path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (json.JSONDecodeError, OSError) as exc:
+        print(f"Error reading credentials file {creds_path}: {exc}", file=sys.stderr)
+        return None, None
+
+    if not isinstance(data, dict) or not data:
+        print(f"Error: Invalid or empty JSON structure in {creds_path}", file=sys.stderr)
+        return None, None
+
+    if "slack_token" in data:
+        return resolve_timefinder_credentials(creds_path)
+
+    return resolve_cli_credentials(creds_path, team_id)
+
+
+def select_auth_path(args: argparse.Namespace) -> str:
+    """Choose auth file path: --credentials wins, else --slack-config, else default."""
+    if getattr(args, "credentials", None):
+        return args.credentials
+    if getattr(args, "slack_config", None):
+        return args.slack_config
+    return DEFAULT_SLACK_CONFIG_PATH
 
 
 def slack_api_call(
@@ -152,6 +269,9 @@ def slack_api_call(
                     if error_code == "invalid_auth":
                         print_succinct_setup_instructions()
                         sys.exit(1)
+                    if error_code == "missing_scope":
+                        print_missing_scope_error(method, res)
+                        sys.exit(1)
                     raise RuntimeError(f"Slack API Error [{method}]: {error_code}")
                 return res
 
@@ -168,9 +288,10 @@ def slack_api_call(
 
 def run_harvest_thread(args: argparse.Namespace) -> int:
     """Harvest channel messages and thread replies to JSON."""
-    token, cookie = resolve_credentials(args.credentials, args.team_id)
+    auth_path = select_auth_path(args)
+    token, cookie = resolve_credentials(auth_path, args.team_id)
     if not token:
-        print(f"Error: Could not find a valid Slack token inside {args.credentials}", file=sys.stderr)
+        print(f"Error: Could not find a valid Slack token inside {auth_path}", file=sys.stderr)
         print_succinct_setup_instructions()
         return 1
 
@@ -178,6 +299,24 @@ def run_harvest_thread(args: argparse.Namespace) -> int:
     c_disp = f"{cookie[:15]}..." if cookie else "None"
     print(f"[*] Loaded Token: {t_disp}", file=sys.stderr)
     print(f"[*] Loaded Cookie: {c_disp}", file=sys.stderr)
+
+    if cookie:
+        cookie_body = cookie.strip()
+        if cookie_body.startswith("d="):
+            cookie_body = cookie_body[2:]
+        if not cookie_body.startswith("xoxd-"):
+            print(
+                "[-] Warning: Cookie/refresh_token does not look like a browser 'd' cookie "
+                "(expected xoxd-...). Slack CLI refresh tokens often lack history scopes "
+                "and will fail conversations.history with missing_scope.",
+                file=sys.stderr,
+            )
+    elif token.startswith("xoxc-"):
+        print(
+            "[-] Warning: xoxc browser token loaded without an xoxd- cookie; "
+            "conversations.history usually fails without both.",
+            file=sys.stderr,
+        )
 
     channel_id = args.channel
     output_path = args.output or os.path.expanduser(f"~/Downloads/slack_{channel_id}.json")

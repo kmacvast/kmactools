@@ -57,7 +57,7 @@ Copy the token — you will paste it into `slack_channels.json` in Step 3.
 
 ### Browser credentials (advanced)
 
-For `--harvest-thread` only, browser session tokens (`xoxc-` + `d` cookie) may be required. Extract from Developer Tools → Network → `client.counts` request, or save to `~/.slack/credentials.json`. See [README.md](README.md#cli-reference).
+Browser session tokens (`xoxc-` + `d` cookie / `xoxd-`) work for gather, discover, and `--harvest-thread`. Extract from Developer Tools → Network → `client.counts`, then save as `slack_token` / `slack_d_cookie` in `~/.timefinder_cache/slack_channels.json`. Harvest uses that same file by default (override with `--slack-config` or `--credentials` for Slack CLI team-map format).
 
 ---
 
@@ -242,6 +242,7 @@ pytest timefinder/tests/ -v
 |---------|--------------|-----|
 | `slack: command not found` | PATH | Add `~/.local/bin` to `~/.zshrc` |
 | `invalid_auth` | Bad/expired token | `slack auth token` → update `slack_channels.json` |
+| `missing_scope` on `--harvest-thread` | Token lacks `*:history` (e.g. Slack CLI login token passed via `--credentials`) | Use `xoxc-` + `xoxd-` (or an `xoxp-` with history scopes) in `~/.timefinder_cache/slack_channels.json`. Harvest defaults to that file, same as gather/discover. |
 | `Slack configuration not found` | Missing config | Step 3 |
 | Gmail skipped during gather | No `gmail_config.json` | Expected with `--slack-only`; add Step 4 or use `--require-gmail` to enforce |
 | App passwords denied | Workspace policy | Step 4C import, or Slack-only |

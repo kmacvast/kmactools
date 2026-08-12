@@ -107,8 +107,12 @@ Examples:
     parser.add_argument("--include-trivial-debug", action="store_true")
 
     parser.add_argument("--channel", "-c", help="Slack channel ID (with --harvest-thread).")
-    parser.add_argument("--credentials", default=None, help="Slack credentials JSON path.")
-    parser.add_argument("--team-id", default=None, help="Slack team ID for credentials lookup.")
+    parser.add_argument(
+        "--credentials",
+        default=None,
+        help="Override Slack CLI credentials.json for --harvest-thread (default: use slack_channels.json).",
+    )
+    parser.add_argument("--team-id", default=None, help="Slack team ID for --credentials lookup.")
     parser.add_argument("--output", "-o", default=None, help="Harvest output JSON path.")
 
     return parser
@@ -207,8 +211,11 @@ def main(argv: list[str] | None = None) -> int:
             print("Error: --harvest-thread requires --channel CHANNEL_ID", file=sys.stderr)
             return 1
         harvest_argv = ["--channel", args.channel]
+        # Precedence: --credentials overrides TimeFinder config; else --slack-config / default.
         if args.credentials:
             harvest_argv.extend(["--credentials", args.credentials])
+        elif args.slack_config:
+            harvest_argv.extend(["--slack-config", args.slack_config])
         if args.team_id:
             harvest_argv.extend(["--team-id", args.team_id])
         if args.output:

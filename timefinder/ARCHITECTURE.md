@@ -137,8 +137,10 @@ Gather escribe dated backup files; generate reads **message timestamps** inside 
 
 | Token type | Used for | Config field |
 |------------|----------|--------------|
-| `xoxp-` service token | Gather, discover (recommended) | `slack_token` |
-| `xoxc-` browser token | Some harvest scenarios | `slack_token` + `slack_d_cookie` |
+| `xoxp-` service token | Gather, discover, harvest (if scopes include `*:history`) | `slack_token` |
+| `xoxc-` browser token | Gather, discover, harvest | `slack_token` + `slack_d_cookie` |
+
+`--harvest-thread` shares auth with gather/discover: it reads `~/.timefinder_cache/slack_channels.json` by default. Use `--slack-config` for an alternate TimeFinder config, or `--credentials` for a Slack CLI team-map file (`~/.slack/credentials.json` shape).
 
 Channel targets live in `slack_channels.json` → `channels` map (`name` → `C…` / `D…` ID).
 

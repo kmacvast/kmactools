@@ -17,10 +17,10 @@
 # ==============================================================================
 # CONFIGURATION PARAMETERS
 # ==============================================================================
-TARGET_DEV="/dev/nvme0n2"          # Current target NVMe network block device
-DISCOVERY_IP="172.200.203.6"       # VAST Cluster Discovery VIP
-DISCOVERY_PORT="4420"              # Standard NVMe/TCP Fabric Port
-MNT_POINT_2="/mnt/blockhead2"       # Trim Target Mount
+TARGET_DEV="/dev/nvme1n2"           # Updated to your actual NVMe device
+DISCOVERY_IP="172.200.203.3"        # Updated to your active cluster IP
+DISCOVERY_PORT="4420"
+MNT_POINT_2="/mnt/nvme2"            # Updated to your active mount point
 
 # Check for root privileges
 if [ "$EUID" -ne 0 ]; then

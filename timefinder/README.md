@@ -81,7 +81,7 @@ Single entry point:
 | `--review-ics PATH` | Interactive approve / remove / modify wizard |
 | `--setup-google-auth` | OAuth browser flow for Gmail API and/or Calendar |
 | `--sync-google PATH` | Push approved JSON or ICS to Google Calendar |
-| `--harvest-thread` | Deep export of one Slack channel + threads |
+| `--harvest-thread` | Deep export of one Slack channel + threads (uses `slack_channels.json` auth by default) |
 
 ### Common options
 
@@ -89,6 +89,8 @@ Single entry point:
 |------|---------|---------|
 | `--date YYYY-MM-DD` | today | discover, generate |
 | `--lookback-days N` | `7` | discover, gather, generate |
+| `--slack-config PATH` | `~/.timefinder_cache/slack_channels.json` | discover, gather, harvest |
+| `--credentials PATH` | unset | harvest only — override with Slack CLI team-map file |
 | `--slack-only` | off | gather — skip Gmail |
 | `--require-gmail` | off | gather — fail if Gmail unavailable |
 | `--verbose` | off | most commands |
